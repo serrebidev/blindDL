@@ -69,6 +69,7 @@ The installer sets BlindDL up for your user account and can obtain FFmpeg throug
 Adult providers are included by the normal dependency installation and in
 packaged releases. The enabled-by-default **Enable adult sites** checkbox is in
 Settings. Search-capable providers appear under **Adult sites** in Search;
+the Search sites dialog separates straight and LGBTQ+ provider lists.
 Beeg and Porngo currently support URL downloads only. BoyfriendTV URLs work
 through blindDL's native extractor. The adult API libraries retain their
 upstream licenses and require Python 3.12 or newer.

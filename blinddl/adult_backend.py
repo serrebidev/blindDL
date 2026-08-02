@@ -45,6 +45,11 @@ class Provider:
     search_kwargs: dict = field(default_factory=dict)
     config_class: str = "DownloadConfigHLS"
     download_style: str = "standard"
+    audience: str = "straight"
+
+
+AUDIENCE_STRAIGHT = "straight"
+AUDIENCE_LGBTQ = "lgbtq"
 
 
 # All repositories explicitly named unofficial-api-for-* on the upstream
@@ -66,7 +71,7 @@ PROVIDERS = {
                 "load_html": False,
                 "load_api": False,
             },
-            "DownloadConfigRAW", "eporner",
+            "DownloadConfigRAW", "eporner", AUDIENCE_LGBTQ,
         ),
         Provider(
             "hqporner", "HQPorner", "hqporner_api", ("hqporner.com",),
@@ -84,7 +89,7 @@ PROVIDERS = {
         Provider(
             "pornhub", "Pornhub", "pornhub_api", ("pornhub.com",),
             "search_videos", {"pages": 1, "load_html": False,
-                              "load_api": False},
+                              "load_api": True},
         ),
         Provider(
             "porntrex", "Porntrex", "porntrex_api", ("porntrex.com",),
@@ -150,10 +155,14 @@ _UA = (
 )
 
 
-def sources_by_label():
+def sources_by_label(audience=None):
     """Return searchable provider keys in accessible display order."""
     return sorted(
-        (key for key, provider in PROVIDERS.items() if provider.search_method),
+        (
+            key for key, provider in PROVIDERS.items()
+            if provider.search_method
+            and (audience is None or provider.audience == audience)
+        ),
         key=lambda key: PROVIDERS[key].label.lower(),
     )
 

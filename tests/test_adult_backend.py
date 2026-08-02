@@ -36,6 +36,22 @@ class AdultProviderTests(unittest.TestCase):
             "xvideos",
         )
 
+    def test_searchable_sources_are_split_by_audience(self):
+        straight = adult_backend.sources_by_label(
+            adult_backend.AUDIENCE_STRAIGHT)
+        lgbtq = adult_backend.sources_by_label(adult_backend.AUDIENCE_LGBTQ)
+
+        self.assertEqual(lgbtq, ["eporner"])
+        self.assertNotIn("eporner", straight)
+        self.assertEqual(
+            set(straight + lgbtq), set(adult_backend.sources_by_label()))
+
+    def test_pornhub_search_loads_api_metadata(self):
+        kwargs = adult_backend.PROVIDERS["pornhub"].search_kwargs
+
+        self.assertTrue(kwargs["load_api"])
+        self.assertFalse(kwargs["load_html"])
+
     def test_normalize_unwraps_common_video_metadata(self):
         video = types.SimpleNamespace(
             url="https://example.invalid/video",

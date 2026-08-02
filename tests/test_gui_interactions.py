@@ -22,6 +22,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
     from blinddl.gui.search_panel import ENGINE_ADULT, SearchPanel
     from blinddl.gui.settings_dialog import SettingsDialog
+    from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import SubsPanel
 
 
@@ -184,6 +185,29 @@ class GuiInteractionTests(unittest.TestCase):
 
         self.assertFalse(config["adult_sites_enabled"])
         self.assertTrue(config.saved)
+        dialog.Destroy()
+
+    def test_sources_dialog_separates_straight_and_lgbtq_adult_sites(self):
+        config = _SettingsConfig()
+        dialog = SourcesDialog(self.host, config)
+
+        self.assertEqual(
+            dialog.straight_adult_check_list.GetName(),
+            "Straight adult sites",
+        )
+        self.assertEqual(
+            dialog.lgbtq_adult_check_list.GetName(),
+            "LGBTQ+ adult sites",
+        )
+        self.assertNotIn("eporner", dialog.straight_adult_sources)
+        self.assertEqual(dialog.lgbtq_adult_sources, ["eporner"])
+
+        pornhub_index = dialog.straight_adult_sources.index("pornhub")
+        dialog.straight_adult_check_list.Check(pornhub_index, False)
+        dialog.apply()
+
+        self.assertIn("pornhub", config["disabled_adult_sources"])
+        self.assertNotIn("eporner", config["disabled_adult_sources"])
         dialog.Destroy()
 
     def test_search_shutdown_stops_timer_and_ignores_late_results(self):
