@@ -18,14 +18,14 @@ jobs:
     name: Release preflight
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python scripts/check_no_arl.py
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -34,8 +34,8 @@ jobs:
     needs: audit
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: denoland/setup-deno@v2
@@ -49,7 +49,7 @@ jobs:
           python -m pip install "pyinstaller>=6.19" -r requirements.txt
       - name: Build packages
         run: python tools/build_release.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blindDL-windows-x64
           path: release/*
@@ -68,8 +68,8 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install native tools
@@ -83,7 +83,7 @@ jobs:
           python -m pip install "pyinstaller>=6.19" -r requirements.txt
       - name: Build packages
         run: python tools/build_release.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blindDL-macos-${{ matrix.arch }}
           path: release/*
@@ -113,7 +113,7 @@ jobs:
             python3 python3-dev python3-pip python3-venv python3-wxgtk4.0 \
             binutils patchelf dpkg-dev ffmpeg \
             libgtk-3-0 libnotify4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
@@ -124,7 +124,7 @@ jobs:
           .venv/bin/python -m pip install "pyinstaller>=6.19" -r requirements.txt
       - name: Build packages
         run: .venv/bin/python tools/build_release.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: blindDL-linux-${{ matrix.arch }}
           path: release/*
@@ -136,7 +136,7 @@ jobs:
     needs: [windows, macos, linux]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
