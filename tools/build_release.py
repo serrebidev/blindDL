@@ -81,14 +81,16 @@ def verify_application() -> None:
         environment["XDG_CACHE_HOME"] = str(self_test_data / "cache")
         environment["XDG_STATE_HOME"] = str(self_test_data / "state")
     print("+", executable, "--self-test", report_path, flush=True)
-    subprocess.run(
+    completed = subprocess.run(
         [str(executable), "--self-test", str(report_path)],
         cwd=ROOT,
         env=environment,
-        check=True,
+        check=False,
     )
+    if not report_path.is_file():
+        completed.check_returncode()
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    if not report.get("ok"):
+    if completed.returncode or not report.get("ok"):
         raise RuntimeError("Frozen application self-test failed: " + repr(report))
     print("Frozen application self-test passed:")
     for name, value in sorted(report["results"].items()):
@@ -230,7 +232,7 @@ def package_deb(app_version: str) -> Path:
         f"Architecture: {deb_arch}\n"
         f"Installed-Size: {installed_kib}\n"
         f"Maintainer: serrebidev\n"
-        f"Depends: ffmpeg, libvlc5, vlc-plugin-base, libgtk-3-0 | libgtk-3-0t64, libnotify4 | libnotify4t64\n"
+        f"Depends: ffmpeg, libvlc5, vlc-plugin-base, python3-wxgtk-media4.0, libgtk-3-0 | libgtk-3-0t64, libnotify4 | libnotify4t64\n"
         f"Homepage: https://github.com/serrebidev/blindDL\n"
         f"Description: Accessible cross-platform media downloader\n"
         f" blindDL provides keyboard and screen-reader accessible media search,\n"

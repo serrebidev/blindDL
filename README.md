@@ -129,8 +129,8 @@ Treat these files like passwords. Only ordinary MP4, HLS, image, audio, and GIF
 media is supported. blindDL does not accept DRM device keys or decrypt
 protected OnlyFans/JustForFans media.
 
-On Debian-family Linux, install `python3-wxgtk4.0`, `ffmpeg`, `libvlc5`,
-`vlc-plugin-base`, and `git` first, then create the virtual environment with
+On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`,
+`ffmpeg`, `libvlc5`, `vlc-plugin-base`, and `git` first, then create the virtual environment with
 `--system-site-packages`. Windows and macOS release builds bundle the VLC
 playback runtime. On Windows, BlindDL can install Deno and FFmpeg with winget;
 on macOS, it uses Homebrew when available.

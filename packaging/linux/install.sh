@@ -37,7 +37,7 @@ install_vlc() {
     echo "Installing required VLC playback library..."
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update
-        sudo apt-get install -y libvlc5 vlc-plugin-base
+        sudo apt-get install -y libvlc5 vlc-plugin-base python3-wxgtk-media4.0
     elif command -v dnf >/dev/null 2>&1; then
         sudo dnf install -y vlc-core
     elif command -v pacman >/dev/null 2>&1; then
