@@ -16,6 +16,7 @@ from ..downloader import DownloadQueue, STATUS_DONE, STATUS_ERROR
 from ..runtime import open_folder
 from ..subscriptions import SubscriptionStore
 from .downloads_panel import DownloadsPanel
+from .library_panel import LibraryPanel
 from .search_panel import SearchPanel
 from .settings_dialog import SettingsDialog
 from .sources_dialog import SourcesDialog
@@ -26,7 +27,8 @@ from .url_panel import UrlPanel
 TAB_URL = 0
 TAB_SEARCH = 1
 TAB_DOWNLOADS = 2
-TAB_SUBS = 3
+TAB_LIBRARY = 3
+TAB_SUBS = 4
 
 
 class MainFrame(wx.Frame):
@@ -58,11 +60,14 @@ class MainFrame(wx.Frame):
         self.url_panel = UrlPanel(self.notebook, self)
         self.search_panel = SearchPanel(self.notebook, self)
         self.downloads_panel = DownloadsPanel(self.notebook, self)
+        self.library_panel = LibraryPanel(self.notebook, self)
         self.subs_panel = SubsPanel(self.notebook, self)
         self.notebook.AddPage(self.url_panel, "URL")
         self.notebook.AddPage(self.search_panel, "Search")
         self.notebook.AddPage(self.downloads_panel, "Downloads")
+        self.notebook.AddPage(self.library_panel, "Library")
         self.notebook.AddPage(self.subs_panel, "Subscriptions")
+        self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
 
         self.CreateStatusBar(2)
         self.SetStatusWidths([-3, -1])
@@ -107,21 +112,22 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
 
     def _bind_shortcuts(self):
-        ids = [wx.NewIdRef() for _ in range(6)]
+        ids = [wx.NewIdRef() for _ in range(7)]
         entries = [
             (wx.ACCEL_CTRL, ord("1"), ids[0]),
             (wx.ACCEL_CTRL, ord("2"), ids[1]),
             (wx.ACCEL_CTRL, ord("3"), ids[2]),
             (wx.ACCEL_CTRL, ord("4"), ids[3]),
-            (wx.ACCEL_CTRL, ord("F"), ids[4]),
-            (wx.ACCEL_CTRL, ord("L"), ids[5]),
+            (wx.ACCEL_CTRL, ord("5"), ids[4]),
+            (wx.ACCEL_CTRL, ord("F"), ids[5]),
+            (wx.ACCEL_CTRL, ord("L"), ids[6]),
         ]
         self.SetAcceleratorTable(wx.AcceleratorTable(
             [wx.AcceleratorEntry(*e) for e in entries]))
-        for tab, bind_id in enumerate(ids[:4]):
+        for tab, bind_id in enumerate(ids[:5]):
             self.Bind(wx.EVT_MENU, lambda e, t=tab: self.show_tab(t), id=bind_id)
-        self.Bind(wx.EVT_MENU, lambda e: self._focus_search(), id=ids[4])
-        self.Bind(wx.EVT_MENU, lambda e: self._focus_url(), id=ids[5])
+        self.Bind(wx.EVT_MENU, lambda e: self._focus_search(), id=ids[5])
+        self.Bind(wx.EVT_MENU, lambda e: self._focus_url(), id=ids[6])
 
     # -- helpers used by panels ----------------------------------------------
 
@@ -141,6 +147,21 @@ class MainFrame(wx.Frame):
 
     def show_downloads_tab(self):
         self.show_tab(TAB_DOWNLOADS)
+
+    def play_media(self, player, location, title):
+        """Start one player and stop any other tab's active playback."""
+        for other in (
+                self.url_panel.player,
+                self.search_panel.player,
+                self.library_panel.player):
+            if other is not player:
+                other.stop(silent=True)
+        player.load(location, title)
+
+    def on_tab_changed(self, event):
+        if event.GetSelection() == TAB_LIBRARY:
+            self.library_panel.refresh(announce=False)
+        event.Skip()
 
     def _focus_search(self):
         self.notebook.SetSelection(TAB_SEARCH)
@@ -169,6 +190,8 @@ class MainFrame(wx.Frame):
                 f"{active} active, {queued} queued, {done} done, "
                 f"{failed} failed/cancelled", 1)
         if item.status == STATUS_DONE:
+            if self.notebook.GetSelection() == TAB_LIBRARY:
+                self.library_panel.refresh(announce=False)
             self.announce(f"Finished: {item.title}")
         elif item.status == STATUS_ERROR:
             self.announce(f"Download failed: {item.title}. {item.error}")
@@ -197,6 +220,7 @@ class MainFrame(wx.Frame):
         if dialog.ShowModal() == wx.ID_OK:
             dialog.apply()
             self.search_panel.refresh_engine_choices()
+            self.library_panel.refresh(announce=False)
             self.queue.set_concurrency(self.config["max_concurrent"])
             self.subs.wake()
             self.announce("Settings saved.")
@@ -235,7 +259,9 @@ class MainFrame(wx.Frame):
             "Accessible media downloader.\n"
             "MIT licensed. Copyright (c) 2024-2026 "
             "serrebidev and contributors.\n\n"
-            "Tabs: Ctrl+1-4. URL: Ctrl+L. Search: Ctrl+F.",
+            "Tabs: Ctrl+1-5. URL: Ctrl+L. Search: Ctrl+F.\n"
+            "Play from URL or Search without downloading, or use Library "
+            "to play completed downloads.",
             f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self)
 
     def on_close(self, event):
@@ -243,6 +269,8 @@ class MainFrame(wx.Frame):
             return
         self._closing = True
         self.search_panel.shutdown()
+        self.url_panel.shutdown()
+        self.library_panel.shutdown()
         self.subs.stop()
         self.Destroy()
 

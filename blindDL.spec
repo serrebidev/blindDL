@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# ruff: noqa: F821 - PyInstaller injects its build API and SPECPATH.
 # Copyright (c) serrebidev and contributors
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
@@ -103,6 +104,7 @@ for distribution in (
     "requests",
     "mutagen",
     "pycryptodome",
+    "python-vlc",
     "aebndl",
     "curl_cffi",
     "lxml",
@@ -148,6 +150,44 @@ for tool_name in tool_names:
     if tool_path:
         binaries.append((tool_path, "tools"))
 
+
+def collect_vlc_runtime():
+    """Bundle native libVLC and plugins where release builders provide it."""
+    if sys.platform == "win32":
+        candidates = [
+            Path(os.environ.get("BLINDDL_VLC_ROOT", "")),
+            Path(os.environ.get("ProgramFiles", "")) / "VideoLAN" / "VLC",
+            Path(os.environ.get("ProgramFiles(x86)", "")) / "VideoLAN" / "VLC",
+        ]
+        root = next((path for path in candidates
+                     if (path / "libvlc.dll").is_file()), None)
+        if root is None:
+            return
+        binaries.extend([
+            (str(root / "libvlc.dll"), "."),
+            (str(root / "libvlccore.dll"), "."),
+        ])
+        datas.append((str(root / "plugins"), "plugins"))
+        if (root / "COPYING.txt").is_file():
+            datas.append((str(root / "COPYING.txt"), "."))
+    elif sys.platform == "darwin":
+        root = Path(os.environ.get(
+            "BLINDDL_VLC_ROOT", "/Applications/VLC.app/Contents/MacOS"))
+        lib_dir = root / "lib"
+        library = lib_dir / "libvlc.dylib"
+        core = lib_dir / "libvlccore.dylib"
+        plugins = root / "plugins"
+        if not plugins.is_dir():
+            plugins = root / "modules"
+        if not (library.is_file() and core.is_file() and plugins.is_dir()):
+            return
+        for dylib in lib_dir.glob("*.dylib"):
+            binaries.append((str(dylib), "vlc/lib"))
+        datas.append((str(plugins), "vlc/plugins"))
+
+
+collect_vlc_runtime()
+
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
@@ -167,6 +207,14 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+if sys.platform == "win32":
+    # python-vlc contains macOS ctypes lookup strings. PyInstaller otherwise
+    # duplicates the Windows DLLs under misleading .dylib names.
+    a.binaries = [
+        entry
+        for entry in a.binaries
+        if entry[0] not in {"libvlc.dylib", "libvlccore.dylib"}
+    ]
 pyz = PYZ(a.pure)
 
 exe = EXE(

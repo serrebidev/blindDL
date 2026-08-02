@@ -40,6 +40,19 @@ def _self_test(output_path: str) -> int:
     check("sideb", lambda: __import__("sideb.app.main", fromlist=["Application"]).__name__)
     check("crypto", lambda: __import__("Crypto.Cipher.Blowfish", fromlist=["new"]).__name__)
 
+    def vlc_runtime():
+        from .gui.media_player import vlc
+
+        if vlc is None:
+            raise RuntimeError("libVLC was not found")
+        instance = vlc.Instance("--quiet", "--no-video-title-show")
+        try:
+            return vlc.libvlc_get_version().decode("utf-8", errors="replace")
+        finally:
+            instance.release()
+
+    check("vlc", vlc_runtime)
+
     def musicdl_sources():
         from .musicdl_backend import ALL_SOURCES
 

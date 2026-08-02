@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.3.2"
+version = "0.3.3"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,6 +31,7 @@ dependencies = [
   "mutagen>=1.47",
   "pycryptodome>=3.20",
   "platformdirs>=4.3",
+  "python-vlc>=3.0.21203",
   "chardet>=7,<7.4",
   "pycparser>=2.23,<3",
   # Adult providers are bundled so the disabled-by-default Settings checkbox

@@ -10,7 +10,9 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 ## Features
 
 - Downloads individual videos, playlists, and whole channels from links supported by yt-dlp.
+- Plays audio or video directly from a pasted URL without downloading it first.
 - Searches Deezer and every enabled musicdl service from one search box.
+- Previews audio and video from the Search results list.
 - Searches and downloads through all 17 EchterAlsFake `unofficial-api-for-*`
   providers. Adult features are disabled by default; enabling them adds
   separate straight, gay, lesbian, bisexual, and trans search choices.
@@ -32,7 +34,8 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Subscribes to playlists and channels, then checks for and downloads new items automatically.
 - Updates yt-dlp nightly builds, musicdl, Side B, wxPython, Deno, and FFmpeg from inside the app.
 - Uses native wxWidgets controls, labeled fields, status-bar announcements, and complete keyboard operation.
-- Includes context menus for batch actions in search results, downloads, and subscriptions.
+- Includes context menus for actions in search results, downloads, Library, and subscriptions.
+- Includes a Library tab that finds and plays completed downloads, including media in subfolders.
 
 ## Download and install
 
@@ -126,7 +129,11 @@ Treat these files like passwords. Only ordinary MP4, HLS, image, audio, and GIF
 media is supported. blindDL does not accept DRM device keys or decrypt
 protected OnlyFans/JustForFans media.
 
-On Debian-family Linux, install `python3-wxgtk4.0`, `ffmpeg`, and `git` first, then create the virtual environment with `--system-site-packages`. On Windows, BlindDL can install Deno and FFmpeg with winget; on macOS, it uses Homebrew when available.
+On Debian-family Linux, install `python3-wxgtk4.0`, `ffmpeg`, `libvlc5`,
+`vlc-plugin-base`, and `git` first, then create the virtual environment with
+`--system-site-packages`. Windows and macOS release builds bundle the VLC
+playback runtime. On Windows, BlindDL can install Deno and FFmpeg with winget;
+on macOS, it uses Homebrew when available.
 
 ## Building
 
@@ -136,7 +143,7 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 
 ## Keyboard shortcuts
 
-- Ctrl+1 / 2 / 3 / 4 — URL / Search / Downloads / Subscriptions tabs
+- Ctrl+1 / 2 / 3 / 4 / 5 — URL / Search / Downloads / Library / Subscriptions tabs
 - Ctrl+L — jump to the URL field
 - Ctrl+F — jump to search
 - Ctrl+O — open the download folder

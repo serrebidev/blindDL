@@ -4,15 +4,19 @@
 
 import copy
 import logging
+import os
+import tempfile
 import threading
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import wx
 
 # musicdl creates a file logger at import time. Keep GUI tests self-contained.
 with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
-    from blinddl import adult_backend
+    from blinddl import adult_backend, preview, ytdlp_backend
     from blinddl.downloader import (
         DownloadItem,
         STATUS_DONE,
@@ -21,6 +25,9 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
+    from blinddl.gui.library_panel import discover_media
+    from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
+    from blinddl.gui import media_player
     from blinddl.gui.search_panel import (
         ADULT_ENGINE_CATEGORIES,
         ENGINE_ADULT,
@@ -108,12 +115,16 @@ class _Frame:
         self.queue = _Queue()
         self.subs = _Subscriptions()
         self.messages = []
+        self.play_calls = []
 
     def announce(self, message):
         self.messages.append(message)
 
     def on_choose_sources(self):
         pass
+
+    def play_media(self, player, location, title):
+        self.play_calls.append((player, location, title))
 
 
 class GuiInteractionTests(unittest.TestCase):
@@ -161,6 +172,102 @@ class GuiInteractionTests(unittest.TestCase):
         panel.on_download_selected(None)
         self.assertEqual(len(self.frame.queue.calls), 2)
         self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
+
+    def test_search_preview_ready_uses_shared_player(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.preview_token = token = object()
+
+        panel._preview_ready(token, "https://media.example/audio.mp3", "One")
+
+        self.assertEqual(
+            self.frame.play_calls,
+            [(panel.player, "https://media.example/audio.mp3", "One")],
+        )
+
+    def test_music_search_preview_uses_direct_download_url(self):
+        item = {
+            "title": "One",
+            "song_info": SimpleNamespace(
+                download_url=[{"url": "https://media.example/one.mp3"}]),
+        }
+
+        location, title = preview.resolve_search_result(
+            item, audio_only=True, config={})
+
+        self.assertEqual(location, "https://media.example/one.mp3")
+        self.assertEqual(title, "One")
+
+    def test_direct_media_url_bypasses_ytdlp_extraction(self):
+        with mock.patch.object(ytdlp_backend, "resolve_stream") as resolve:
+            location, title = preview.resolve_url(
+                "https://media.example/live/video.mp4?token=one",
+                audio_only=False,
+                config={},
+            )
+
+        self.assertEqual(
+            location, "https://media.example/live/video.mp4?token=one")
+        self.assertEqual(title, location)
+        resolve.assert_not_called()
+
+    def test_bundled_vlc_runtime_paths_are_configured(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "libvlc.dll").touch()
+            (root / "plugins").mkdir()
+            with (
+                mock.patch.object(media_player.sys, "platform", "win32"),
+                mock.patch.object(
+                    media_player.sys, "_MEIPASS", str(root), create=True),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
+                os.environ.pop("PYTHON_VLC_LIB_PATH", None)
+                os.environ.pop("PYTHON_VLC_MODULE_PATH", None)
+                media_player._configure_bundled_vlc()
+                self.assertEqual(
+                    os.environ["PYTHON_VLC_LIB_PATH"],
+                    str(root / "libvlc.dll"),
+                )
+                self.assertEqual(
+                    os.environ["PYTHON_VLC_MODULE_PATH"],
+                    str(root / "plugins"),
+                )
+
+    def test_completed_download_only_rescans_visible_library(self):
+        frame = SimpleNamespace(
+            _closing=False,
+            downloads_panel=mock.Mock(),
+            queue=mock.Mock(),
+            _last_counts=(0, 0, 1, 0),
+            notebook=mock.Mock(),
+            library_panel=mock.Mock(),
+            announce=mock.Mock(),
+        )
+        frame.queue.counts.return_value = frame._last_counts
+        item = SimpleNamespace(status=STATUS_DONE, title="Finished")
+
+        frame.notebook.GetSelection.return_value = TAB_DOWNLOADS
+        MainFrame._on_item_update(frame, item)
+        frame.library_panel.refresh.assert_not_called()
+
+        frame.notebook.GetSelection.return_value = TAB_LIBRARY
+        MainFrame._on_item_update(frame, item)
+        frame.library_panel.refresh.assert_called_once_with(announce=False)
+
+    def test_library_discovers_audio_and_video_recursively(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "song.mp3").write_bytes(b"audio")
+            (root / "notes.txt").write_text("not media", encoding="utf-8")
+            nested = root / "Videos"
+            nested.mkdir()
+            (nested / "clip.MP4").write_bytes(b"video")
+
+            items = discover_media(root)
+
+        self.assertEqual([item["title"] for item in items], ["song", "clip"])
+        self.assertEqual([item["kind"] for item in items], ["Audio", "Video"])
+        self.assertEqual(items[1]["folder"], "Videos")
 
     def test_search_queues_adult_api_result(self):
         panel = SearchPanel(self.host, self.frame)

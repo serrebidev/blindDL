@@ -48,10 +48,10 @@ try:
 finally:
     logging.FileHandler = _file_handler
 
-from requests.adapters import HTTPAdapter
-from rich.progress import Progress
+from requests.adapters import HTTPAdapter  # noqa: E402
+from rich.progress import Progress  # noqa: E402
 
-from .config import app_data_dir
+from .config import app_data_dir  # noqa: E402
 
 ALL_SOURCES = sorted(MusicClientBuilder.REGISTERED_MODULES.keys())
 

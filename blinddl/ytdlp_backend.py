@@ -80,6 +80,52 @@ def search(query, count=20):
     return items
 
 
+def resolve_stream(url, audio_only=False, cookies_from_browser=None,
+                   http_headers=None):
+    """Resolve *url* to one stream that a native media player can open.
+
+    Video previews deliberately request a progressive format containing both
+    audio and video. Native desktop players cannot combine yt-dlp's separate
+    adaptive audio/video URLs themselves.
+    """
+    opts = {
+        "quiet": True,
+        "noprogress": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "format": (
+            "bestaudio[protocol^=http]/bestaudio/best"
+            if audio_only else
+            "best[protocol^=http][vcodec!=none][acodec!=none]/"
+            "best[vcodec!=none][acodec!=none]/best"
+        ),
+    }
+    if http_headers:
+        opts["http_headers"] = dict(http_headers)
+    if cookies_from_browser:
+        opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        raise RuntimeError("No playable media stream was found.")
+    entries = info.get("entries")
+    if entries is not None:
+        info = next((entry for entry in entries if entry), None)
+    if not info:
+        raise RuntimeError("No playable media stream was found.")
+    stream_url = info.get("url")
+    if not stream_url:
+        requested = info.get("requested_downloads") or ()
+        stream_url = next(
+            (entry.get("url") for entry in requested if entry.get("url")),
+            None,
+        )
+    if not stream_url:
+        raise RuntimeError("The site did not expose a stream for playback.")
+    return str(stream_url)
+
+
 def download(url, out_dir, audio_only=True, audio_format="mp3",
              progress_cb=None, cancel_event=None, http_headers=None,
              cookies_from_browser=None):

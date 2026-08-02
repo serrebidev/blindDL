@@ -9,7 +9,10 @@ import time
 
 import wx
 
-from .. import adult_backend, musicdl_backend, sideb_backend, ytdlp_backend
+from .. import (
+    adult_backend, musicdl_backend, preview, sideb_backend, ytdlp_backend,
+)
+from .media_player import MediaPlayerPanel
 
 ENGINE_MUSIC = 0
 ENGINE_YOUTUBE = 1
@@ -83,29 +86,34 @@ def _sorted_results(items, mode):
             key=lambda pair: pair[1].get("_search_order", pair[0]),
         )]
     if mode == SORT_NAME:
-        key = lambda pair: (text(pair[1], "title"), pair[0])
+        def key(pair):
+            return text(pair[1], "title"), pair[0]
     elif mode == SORT_SITE:
-        key = lambda pair: (
-            text(pair[1], "source") or "youtube",
-            text(pair[1], "title"), pair[0],
-        )
+        def key(pair):
+            return (
+                text(pair[1], "source") or "youtube",
+                text(pair[1], "title"), pair[0],
+            )
     elif mode == SORT_ARTIST:
-        key = lambda pair: (
-            text(pair[1], "artist", "uploader"),
-            text(pair[1], "title"), pair[0],
-        )
+        def key(pair):
+            return (
+                text(pair[1], "artist", "uploader"),
+                text(pair[1], "title"), pair[0],
+            )
     elif mode == SORT_SHORTEST:
-        key = lambda pair: (
-            duration(pair[1]) is None,
-            duration(pair[1]) or 0,
-            text(pair[1], "title"), pair[0],
-        )
+        def key(pair):
+            return (
+                duration(pair[1]) is None,
+                duration(pair[1]) or 0,
+                text(pair[1], "title"), pair[0],
+            )
     elif mode == SORT_LONGEST:
-        key = lambda pair: (
-            duration(pair[1]) is None,
-            -(duration(pair[1]) or 0),
-            text(pair[1], "title"), pair[0],
-        )
+        def key(pair):
+            return (
+                duration(pair[1]) is None,
+                -(duration(pair[1]) or 0),
+                text(pair[1], "title"), pair[0],
+            )
     else:
         return list(items)
     return [item for _index, item in sorted(indexed, key=key)]
@@ -125,6 +133,7 @@ class SearchPanel(wx.Panel):
         self.started_at = 0.0
         self.closing = False
         self.next_result_order = 0
+        self.preview_token = None
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -161,6 +170,12 @@ class SearchPanel(wx.Panel):
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_download_selected)
         self.results_list.Bind(wx.EVT_CONTEXT_MENU, self.on_results_menu)
 
+        self.preview_btn = wx.Button(self, label="&Preview selected")
+        self.preview_btn.SetHelpText(
+            "Plays music as audio and video results with picture and sound.")
+        self.preview_btn.Bind(wx.EVT_BUTTON, self.on_preview_selected)
+        self.player = MediaPlayerPanel(self, frame, video_height=150)
+
         top = wx.BoxSizer(wx.HORIZONTAL)
         top.Add(engine_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.engine_choice, 0, wx.RIGHT, 12)
@@ -173,6 +188,8 @@ class SearchPanel(wx.Panel):
         sizer.Add(top, 0, wx.ALL, 8)
         sizer.Add(self.results_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT |
                   wx.BOTTOM, 8)
+        sizer.Add(self.preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sizer.Add(self.player, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.SetSizer(sizer)
 
     def focus_input(self):
@@ -203,6 +220,7 @@ class SearchPanel(wx.Panel):
         if self.stop is not None:
             self.stop.set()
         self.timer.Stop()
+        self.player.shutdown()
 
     # -- search -----------------------------------------------------------
 
@@ -495,21 +513,70 @@ class SearchPanel(wx.Panel):
     def on_results_menu(self, event):
         self._target_context_item(event)
         menu = wx.Menu()
+        preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
         download = menu.Append(wx.ID_ANY, "&Download selected")
         menu.AppendSeparator()
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear = menu.Append(wx.ID_ANY, "&Clear selection")
         has_selection = bool(self._selected_indices())
+        preview_item.Enable(has_selection)
         download.Enable(has_selection)
         clear.Enable(has_selection)
         select_all.Enable(
             self.results_list.GetSelectedItemCount() <
             self.results_list.GetItemCount())
+        menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
         menu.Bind(wx.EVT_MENU, self._select_all, select_all)
         menu.Bind(wx.EVT_MENU, self._clear_selection, clear)
         self.results_list.PopupMenu(menu)
         menu.Destroy()
+
+    def on_preview_selected(self, event):
+        indices = [index for index in self._selected_indices()
+                   if index < len(self.results)]
+        if not indices:
+            self.frame.announce("Select a result to preview first.")
+            return
+        index = self.results_list.GetFocusedItem()
+        if index not in indices:
+            index = indices[0]
+        item = self.results[index]
+        audio_only = self.result_engine == ENGINE_MUSIC
+        token = self.preview_token = object()
+        self.preview_btn.Disable()
+        self.frame.announce(f"Preparing preview: {item['title']}")
+        threading.Thread(
+            target=self._resolve_preview,
+            args=(token, item, audio_only),
+            daemon=True,
+            name="blinddl-search-preview",
+        ).start()
+
+    def _resolve_preview(self, token, item, audio_only):
+        try:
+            location, title = preview.resolve_search_result(
+                item, audio_only, self.frame.config)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            wx.CallAfter(self._preview_failed, token, str(exc))
+            return
+        wx.CallAfter(self._preview_ready, token, location, title)
+
+    def _preview_ready(self, token, location, title):
+        if self.closing or token is not self.preview_token:
+            return
+        self.preview_btn.Enable()
+        self.frame.play_media(self.player, location, title)
+
+    def _preview_failed(self, token, error):
+        if self.closing or token is not self.preview_token:
+            return
+        self.preview_btn.Enable()
+        self.frame.announce("Could not play that preview.")
+        wx.MessageBox(
+            f"Could not play that preview:\n{error}", "blindDL",
+            wx.OK | wx.ICON_ERROR, self,
+        )
 
     def on_download_selected(self, event):
         indices = [i for i in self._selected_indices()

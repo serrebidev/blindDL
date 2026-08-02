@@ -5,7 +5,7 @@
 
 set -eu
 
-SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 TARGET_DIR=${XDG_DATA_HOME:-"$HOME/.local/share"}/blinddl
 BIN_DIR="$HOME/.local/bin"
 APPS_DIR=${XDG_DATA_HOME:-"$HOME/.local/share"}/applications
@@ -30,7 +30,28 @@ install_ffmpeg() {
     fi
 }
 
+install_vlc() {
+    if ldconfig -p 2>/dev/null | grep -q 'libvlc\.so'; then
+        return
+    fi
+    echo "Installing required VLC playback library..."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y libvlc5 vlc-plugin-base
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y vlc-core
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --needed --noconfirm vlc
+    elif command -v zypper >/dev/null 2>&1; then
+        sudo zypper --non-interactive install vlc
+    else
+        echo "No supported package manager was found. Install VLC, then rerun this installer." >&2
+        exit 1
+    fi
+}
+
 install_ffmpeg
+install_vlc
 mkdir -p "$TARGET_DIR" "$BIN_DIR" "$APPS_DIR"
 cp -R "$SOURCE_DIR"/. "$TARGET_DIR"/
 chmod +x "$TARGET_DIR/blindDL"

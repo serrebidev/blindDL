@@ -5,7 +5,7 @@
 """Keeps blindDL's runtime dependencies up to date.
 
 Covers everything the app relies on:
-- Python packages (pip): yt-dlp, musicdl, wxPython, and the rest of
+- Python packages (pip): yt-dlp, musicdl, wxPython, python-vlc, and the rest of
   requirements.txt.
 - Deno: the JavaScript runtime yt-dlp needs for YouTube extraction.
 - ffmpeg: needed for audio extraction and video merging.
@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 
-PIP_PACKAGES = ["musicdl", "wxPython"]
+PIP_PACKAGES = ["musicdl", "wxPython", "python-vlc"]
 # yt-dlp tracks the nightly builds (pip pre-releases), so it upgrades with
 # --pre in its own command instead of waiting for stable releases.
 PRE_PACKAGES = ["yt-dlp"]

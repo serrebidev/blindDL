@@ -23,7 +23,10 @@ class _YoutubeDL:
         return False
 
     def extract_info(self, url, download=False):
-        return {"id": "1", "title": "Example", "webpage_url": url}
+        return {
+            "id": "1", "title": "Example", "webpage_url": url,
+            "url": "https://media.example/stream.mp4",
+        }
 
     def download(self, urls):
         self.downloaded.extend(urls)
@@ -58,6 +61,19 @@ class YtDlpBackendTests(unittest.TestCase):
             _YoutubeDL.instances[0].downloaded,
             ["https://example.invalid/video"],
         )
+
+    def test_video_preview_resolves_one_progressive_stream(self):
+        with mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _YoutubeDL):
+            stream = ytdlp_backend.resolve_stream(
+                "https://example.invalid/video", audio_only=False,
+                cookies_from_browser="edge")
+
+        options = _YoutubeDL.instances[0].options
+        self.assertEqual(stream, "https://media.example/stream.mp4")
+        self.assertIn("acodec!=none", options["format"])
+        self.assertIn("vcodec!=none", options["format"])
+        self.assertEqual(options["cookiesfrombrowser"], ("edge",))
 
 
 if __name__ == "__main__":
