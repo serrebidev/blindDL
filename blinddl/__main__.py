@@ -46,6 +46,10 @@ def _self_test(output_path: str) -> int:
         if vlc is None:
             raise RuntimeError("libVLC was not found")
         instance = vlc.Instance("--quiet", "--no-video-title-show")
+        if instance is None:
+            raise RuntimeError(
+                "libVLC could not initialize; check its plugin runtime"
+            )
         try:
             return vlc.libvlc_get_version().decode("utf-8", errors="replace")
         finally:

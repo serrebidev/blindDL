@@ -215,6 +215,15 @@ if sys.platform == "win32":
         for entry in a.binaries
         if entry[0] not in {"libvlc.dylib", "libvlccore.dylib"}
     ]
+elif sys.platform.startswith("linux"):
+    # Linux packages provide libVLC and its matching plugin tree together.
+    # Bundling only the ctypes-discovered shared libraries prevents libVLC
+    # from locating those system plugins and causes initialization to fail.
+    a.binaries = [
+        entry
+        for entry in a.binaries
+        if not entry[0].startswith(("libvlc.so", "libvlccore.so"))
+    ]
 pyz = PYZ(a.pure)
 
 exe = EXE(
