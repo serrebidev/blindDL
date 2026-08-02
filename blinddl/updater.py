@@ -32,6 +32,7 @@ GIT_PACKAGES = {
     "sideb": "git+https://github.com/mosaddiqdev/sideb",
     # Adult providers are refreshed when present; frozen builds update them
     # together with the application release.
+    "aebndl": "git+https://github.com/hyper440/aebn-vod-downloader",
     "eaf_base_api": "git+https://github.com/EchterAlsFake/eaf_base_api",
     "unofficial-api-for-beeg": "git+https://github.com/EchterAlsFake/unofficial-api-for-beeg",
     "unofficial-api-for-eporner": "git+https://github.com/EchterAlsFake/unofficial-api-for-eporner",

@@ -50,10 +50,13 @@ def _self_test(output_path: str) -> int:
     check("musicdl_sources", musicdl_sources)
 
     def adult_providers():
-        from .adult_backend import PROVIDERS, _import_provider
+        from .adult_backend import PROVIDERS, _import_aebn, _import_provider
 
         for provider in PROVIDERS.values():
-            _import_provider(provider)
+            if provider.download_style == "aebn":
+                _import_aebn()
+            elif provider.download_style not in ("creator", "ytdlp"):
+                _import_provider(provider)
         return len(PROVIDERS)
 
     check("adult_providers", adult_providers)

@@ -153,7 +153,9 @@ class SubsPanel(wx.Panel):
                 items, title = sideb_backend.extract_flat(
                     url, self.frame.config)
             else:
-                items, title = ytdlp_backend.extract_flat(url)
+                items, title = ytdlp_backend.extract_flat(
+                    url, cookies_from_browser=
+                    self.frame.config["cookies_from_browser"])
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._add_failed, str(exc))
             return

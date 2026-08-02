@@ -106,7 +106,9 @@ class SubscriptionStore:
                 items, title = sideb_backend.extract_flat(
                     sub["url"], self.config)
             else:
-                items, title = ytdlp_backend.extract_flat(sub["url"])
+                items, title = ytdlp_backend.extract_flat(
+                    sub["url"], cookies_from_browser=
+                    self.config["cookies_from_browser"])
         except Exception as exc:  # noqa: BLE001 - shown to the user
             return 0, str(exc)
         if title:

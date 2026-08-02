@@ -69,6 +69,7 @@ datas += musicdl_datas
 hiddenimports += musicdl_hidden
 
 ADULT_MODULES = (
+    "aebn_dl",
     "base_api",
     "beeg_api",
     "eporner_api",
@@ -102,6 +103,10 @@ for distribution in (
     "requests",
     "mutagen",
     "pycryptodome",
+    "aebndl",
+    "curl_cffi",
+    "lxml",
+    "rich",
     "eaf_base_api",
     "unofficial-api-for-beeg",
     "unofficial-api-for-eporner",

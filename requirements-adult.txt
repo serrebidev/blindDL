@@ -1,4 +1,6 @@
 # Adult-media API providers bundled by blindDL. Requires Python 3.12+.
+curl-cffi>=0.7
+aebndl @ git+https://github.com/hyper440/aebn-vod-downloader@38438ec1660c56524bfe7007c4a8e1343994a589
 eaf_base_api @ git+https://github.com/EchterAlsFake/eaf_base_api
 unofficial-api-for-beeg @ git+https://github.com/EchterAlsFake/unofficial-api-for-beeg
 unofficial-api-for-eporner @ git+https://github.com/EchterAlsFake/unofficial-api-for-eporner

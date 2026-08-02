@@ -13,8 +13,34 @@ from .. import adult_backend, musicdl_backend, sideb_backend, ytdlp_backend
 
 ENGINE_MUSIC = 0
 ENGINE_YOUTUBE = 1
-ENGINE_ADULT = 2
-ENGINE_LABELS = ["Music sites", "YouTube/web", "Adult sites"]
+ENGINE_STRAIGHT = 2
+ENGINE_GAY = 3
+ENGINE_LESBIAN = 4
+ENGINE_BISEXUAL = 5
+ENGINE_TRANS = 6
+# Kept as an import-compatible name for callers that treated adult search as
+# the first adult choice before content categories were separated.
+ENGINE_ADULT = ENGINE_STRAIGHT
+ENGINE_LABELS = [
+    "Music sites",
+    "YouTube/web",
+    "Straight porn",
+    "Gay porn",
+    "Lesbian porn",
+    "Bisexual porn",
+    "Trans porn",
+]
+ADULT_ENGINE_CATEGORIES = {
+    ENGINE_STRAIGHT: adult_backend.CONTENT_STRAIGHT,
+    ENGINE_GAY: adult_backend.CONTENT_GAY,
+    ENGINE_LESBIAN: adult_backend.CONTENT_LESBIAN,
+    ENGINE_BISEXUAL: adult_backend.CONTENT_BISEXUAL,
+    ENGINE_TRANS: adult_backend.CONTENT_TRANS,
+}
+
+
+def _is_adult_engine(engine):
+    return engine in ADULT_ENGINE_CATEGORIES
 
 
 class SearchPanel(wx.Panel):
@@ -42,7 +68,8 @@ class SearchPanel(wx.Panel):
         self.query_text.Bind(wx.EVT_TEXT_ENTER, self.on_search)
 
         engine_label = wx.StaticText(self, label="S&ource:")
-        self.engine_choice = wx.Choice(self, choices=ENGINE_LABELS)
+        self.engine_choice = wx.Choice(
+            self, choices=self._visible_engine_labels())
         self.engine_choice.SetName("Search source")
         self.engine_choice.SetSelection(0)
 
@@ -76,6 +103,21 @@ class SearchPanel(wx.Panel):
             return
         self.query_text.SetFocus()
 
+    def _visible_engine_labels(self):
+        if self.frame.config["adult_sites_enabled"]:
+            return ENGINE_LABELS
+        return ENGINE_LABELS[:2]
+
+    def refresh_engine_choices(self):
+        """Show or hide adult categories after Settings changes."""
+        selection = self.engine_choice.GetSelection()
+        labels = self._visible_engine_labels()
+        self.engine_choice.Clear()
+        self.engine_choice.AppendItems(labels)
+        if selection < 0 or selection >= len(labels):
+            selection = ENGINE_MUSIC
+        self.engine_choice.SetSelection(selection)
+
     def shutdown(self):
         """Stop timers and silence worker callbacks before widgets are freed."""
         if self.closing:
@@ -102,7 +144,7 @@ class SearchPanel(wx.Panel):
                 self.frame.announce(
                     "No music sites selected. Use Tools, Search sites.")
                 return
-        elif engine == ENGINE_ADULT:
+        elif _is_adult_engine(engine):
             if not self.frame.config["adult_sites_enabled"]:
                 self.frame.announce(
                     "Adult sites are disabled. Enable them in Settings.")
@@ -143,11 +185,11 @@ class SearchPanel(wx.Panel):
             self.frame.announce(
                 f"Searching {count} music {site_word} "
                 f"({self.frame.config['search_timeout_s']:g} seconds each)...")
-        elif engine == ENGINE_ADULT:
+        elif _is_adult_engine(engine):
             count = len(sources)
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
-                f"Searching {count} adult {site_word} "
+                f"Searching {count} {ENGINE_LABELS[engine]} {site_word} "
                 f"({self.frame.config['search_timeout_s']:g} seconds each)...")
         else:
             self.frame.announce("Searching YouTube...")
@@ -171,13 +213,14 @@ class SearchPanel(wx.Panel):
                 asked.append(sideb_backend.SIDEB_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
                 items = []
-            elif engine == ENGINE_ADULT:
+            elif _is_adult_engine(engine):
                 def on_adult_site(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 items, _answered, asked = adult_backend.search(
                     query, self.frame.config["search_timeout_s"],
-                    on_site=on_adult_site, stop=stop, sources=sources)
+                    on_site=on_adult_site, stop=stop, sources=sources,
+                    category=ADULT_ENGINE_CATEGORIES[engine])
                 # on_adult_site already delivered these.
                 items = []
             else:
@@ -364,7 +407,7 @@ class SearchPanel(wx.Panel):
                 else:
                     self.frame.queue.add_musicdl(
                         item["song_info"], item["title"])
-            elif engine == ENGINE_ADULT:
+            elif _is_adult_engine(engine):
                 self.frame.queue.add_adult(item, item["title"])
             else:
                 self.frame.queue.add_ytdlp(item["url"], item["title"])

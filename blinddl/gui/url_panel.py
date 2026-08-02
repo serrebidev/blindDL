@@ -64,7 +64,8 @@ class UrlPanel(wx.Panel):
                 )
                 return
             try:
-                items, title = adult_backend.inspect_url(url)
+                items, title = adult_backend.inspect_url(
+                    url, config=self.frame.config)
                 wx.CallAfter(self._inspect_done, items, title, False, "adult")
                 return
             except Exception as exc:  # noqa: BLE001 - yt-dlp may still cope
@@ -82,7 +83,9 @@ class UrlPanel(wx.Panel):
             except Exception as exc:  # noqa: BLE001 - yt-dlp may still cope
                 sideb_error = str(exc)
         try:
-            items, title = ytdlp_backend.extract_flat(url)
+            items, title = ytdlp_backend.extract_flat(
+                url, cookies_from_browser=
+                self.frame.config["cookies_from_browser"])
         except Exception as exc:  # noqa: BLE001 - shown to the user
             error = str(exc)
             if sideb_error:

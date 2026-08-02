@@ -214,6 +214,7 @@ class DownloadQueue:
             audio_format=item.audio_format,
             progress_cb=progress,
             cancel_event=item.cancel_event,
+            cookies_from_browser=self.config["cookies_from_browser"],
         )
 
     def _run_musicdl(self, item):

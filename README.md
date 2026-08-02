@@ -12,8 +12,16 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Downloads individual videos, playlists, and whole channels from links supported by yt-dlp.
 - Searches Deezer and every enabled musicdl service from one search box.
 - Searches and downloads through all 17 EchterAlsFake `unofficial-api-for-*`
-  providers, with an enabled-by-default adult-sites setting and separate site
-  selection controls.
+  providers. Adult features are disabled by default; enabling them adds
+  separate straight, gay, lesbian, bisexual, and trans search choices.
+- Searches public ThisVid videos and downloads supported video, member, and
+  playlist URLs through yt-dlp.
+- Searches the gay-only MyMuscleVideo catalog and downloads its standard
+  public or browser-authenticated video pages.
+- Downloads straight and gay AEBN movie URLs with title, performer, duration,
+  cancellation, and progress support.
+- Downloads ordinary media that the signed-in user can access from OnlyFans
+  and JustForFans creator or post URLs; protected/DRM media is skipped.
 - Downloads BoyfriendTV video URLs through a native MP4/HLS extractor.
 - Finds music across Spotify, TIDAL, SoundCloud, Netease, QQ, Kugou, Kuwo, Migu, and dozens of other services.
 - Downloads Deezer tracks, albums, playlists, and artists as tagged music with cover art and synced lyrics.
@@ -67,12 +75,49 @@ The installer sets BlindDL up for your user account and can obtain FFmpeg throug
 3. Launch it: `python main.py`
 
 Adult providers are included by the normal dependency installation and in
-packaged releases. The enabled-by-default **Enable adult sites** checkbox is in
-Settings. Search-capable providers appear under **Adult sites** in Search;
-the Search sites dialog separates straight and LGBTQ+ provider lists.
-Beeg and Porngo currently support URL downloads only. BoyfriendTV URLs work
-through blindDL's native extractor. The adult API libraries retain their
-upstream licenses and require Python 3.12 or newer.
+packaged releases. Adult features are disabled by default. Enabling **Enable
+adult sites** in Settings adds separate Straight, Gay, Lesbian, Bisexual, and
+Trans porn choices to the Search source combo box. Search-capable providers
+can be selected in the Search sites dialog.
+Beeg, Porngo, AEBN, OnlyFans, and JustForFans currently support URL downloads
+only. SpankBang and archived Sex.com are also URL-only while their public search
+pages block or no longer match their upstream parsers. BoyfriendTV URLs work
+through blindDL's native extractor. ThisVid public search and URL downloads use
+the bundled yt-dlp extractor. MyMuscleVideo is included only in Gay porn
+searches. AEBN support uses the MIT-licensed `aebn-vod-downloader`; the other
+adult API libraries retain their upstream licenses and require Python 3.12 or
+newer.
+
+For sites already signed into in a local browser, **Use cookies from browser**
+in Settings lets yt-dlp read that browser profile. This is useful for standard
+login-only MyMuscleVideo and ThisVid pages.
+
+OnlyFans and JustForFans use user-controlled authentication JSON files selected
+in Settings. blindDL stores only each file path, never a copy of its session
+values. An OnlyFans file uses the `ofd`-compatible non-DRM fields:
+
+```json
+{
+  "cookie": "auth_id=YOUR_ID; sess=YOUR_SESSION",
+  "x_bc": "YOUR_X_BC_HEADER",
+  "user_agent": "THE_MATCHING_BROWSER_USER_AGENT"
+}
+```
+
+A JustForFans file uses the cookie and account ID visible on an authenticated
+`ajax/getPosts.php` browser request:
+
+```json
+{
+  "cookie": "userhash4=YOUR_HASH; OTHER_SESSION_COOKIES",
+  "user_id": "YOUR_NUMERIC_ACCOUNT_ID",
+  "user_agent": "YOUR_BROWSER_USER_AGENT"
+}
+```
+
+Treat these files like passwords. Only ordinary MP4, HLS, image, audio, and GIF
+media is supported. blindDL does not accept DRM device keys or decrypt
+protected OnlyFans/JustForFans media.
 
 On Debian-family Linux, install `python3-wxgtk4.0`, `ffmpeg`, and `git` first, then create the virtual environment with `--system-site-packages`. On Windows, BlindDL can install Deno and FFmpeg with winget; on macOS, it uses Homebrew when available.
 

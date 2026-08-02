@@ -196,6 +196,7 @@ class MainFrame(wx.Frame):
         dialog = SettingsDialog(self, self.config)
         if dialog.ShowModal() == wx.ID_OK:
             dialog.apply()
+            self.search_panel.refresh_engine_choices()
             self.queue.set_concurrency(self.config["max_concurrent"])
             self.subs.wake()
             self.announce("Settings saved.")

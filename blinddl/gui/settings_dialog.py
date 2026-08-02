@@ -7,6 +7,15 @@
 import wx
 
 AUDIO_FORMATS = ["mp3", "m4a", "flac", "wav", "opus"]
+BROWSER_COOKIE_CHOICES = [
+    ("None", ""),
+    ("Chrome", "chrome"),
+    ("Edge", "edge"),
+    ("Firefox", "firefox"),
+    ("Brave", "brave"),
+    ("Opera", "opera"),
+    ("Vivaldi", "vivaldi"),
+]
 
 
 class SettingsDialog(wx.Dialog):
@@ -65,6 +74,48 @@ class SettingsDialog(wx.Dialog):
         self.adult_sites_check.SetHelpText(
             "Enables adult-site search results and adult URL downloads.")
 
+        cookies_label = wx.StaticText(
+            self, label="Use cookies from &browser:")
+        self.cookies_choice = wx.Choice(
+            self, choices=[label for label, _value in BROWSER_COOKIE_CHOICES])
+        self.cookies_choice.SetName("Browser cookies")
+        browser_value = config["cookies_from_browser"]
+        browser_values = [value for _label, value in BROWSER_COOKIE_CHOICES]
+        self.cookies_choice.SetSelection(
+            browser_values.index(browser_value)
+            if browser_value in browser_values else 0)
+        self.cookies_choice.SetHelpText(
+            "Lets yt-dlp read an existing signed-in browser profile when a "
+            "site requires login.")
+
+        onlyfans_label = wx.StaticText(
+            self, label="OnlyFans auth &JSON file:")
+        self.onlyfans_auth_picker = wx.FilePickerCtrl(
+            self, path=config["onlyfans_auth_file"],
+            message="Choose an ofd-compatible OnlyFans auth JSON file",
+            wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
+            style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+        )
+        self.onlyfans_auth_picker.SetName("OnlyFans auth JSON file")
+
+        justforfans_label = wx.StaticText(
+            self, label="JustForFans auth &JSON file:")
+        self.justforfans_auth_picker = wx.FilePickerCtrl(
+            self, path=config["justforfans_auth_file"],
+            message="Choose a JustForFans auth JSON file",
+            wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
+            style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+        )
+        self.justforfans_auth_picker.SetName("JustForFans auth JSON file")
+
+        def enable_adult_auth(_event=None):
+            enabled = self.adult_sites_check.GetValue()
+            self.onlyfans_auth_picker.Enable(enabled)
+            self.justforfans_auth_picker.Enable(enabled)
+
+        self.adult_sites_check.Bind(wx.EVT_CHECKBOX, enable_adult_auth)
+        enable_adult_auth()
+
         arl_label = wx.StaticText(
             self, label="Deezer A&RL cookie:")
         self.arl_text = wx.TextCtrl(self, value=config["deezer_arl"],
@@ -88,7 +139,13 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(row(sub_label, self.sub_spin), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
         sizer.Add(self.lyrics_check, 0, wx.ALL, 8)
+        sizer.Add(row(cookies_label, self.cookies_choice),
+                  0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.adult_sites_check, 0, wx.ALL, 8)
+        sizer.Add(onlyfans_label, 0, wx.TOP | wx.LEFT, 8)
+        sizer.Add(self.onlyfans_auth_picker, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(justforfans_label, 0, wx.TOP | wx.LEFT, 8)
+        sizer.Add(self.justforfans_auth_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(row(arl_label, self.arl_text), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizerAndFit(sizer)
@@ -104,5 +161,11 @@ class SettingsDialog(wx.Dialog):
         self.config["auto_update"] = self.update_check.GetValue()
         self.config["sideb_lyrics"] = self.lyrics_check.GetValue()
         self.config["adult_sites_enabled"] = self.adult_sites_check.GetValue()
+        self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
+            self.cookies_choice.GetSelection()][1]
+        self.config["onlyfans_auth_file"] = (
+            self.onlyfans_auth_picker.GetPath().strip())
+        self.config["justforfans_auth_file"] = (
+            self.justforfans_auth_picker.GetPath().strip())
         self.config["deezer_arl"] = self.arl_text.GetValue().strip()
         self.config.save()

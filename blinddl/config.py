@@ -39,9 +39,16 @@ DEFAULTS = {
     # Adult sites the user switched off. These are separate from music
     # sources so the two provider lists can be configured independently.
     "disabled_adult_sources": [],
-    # Master privacy/content switch. Adult integrations ship enabled so their
-    # search-capable providers appear immediately after installation.
-    "adult_sites_enabled": True,
+    # Master privacy/content switch. Adult integrations are hidden until the
+    # user explicitly enables them in Settings.
+    "adult_sites_enabled": False,
+    # Optional browser profile whose cookies yt-dlp may read for sites the
+    # user is already signed into. Empty means no browser-cookie access.
+    "cookies_from_browser": "",
+    # Paths only: session secrets remain in user-controlled JSON files rather
+    # than being copied into blindDL's config.
+    "onlyfans_auth_file": "",
+    "justforfans_auth_file": "",
     # Deezer ARL cookie: unlocks native FLAC/MP3 320 downloads and Deezer's
     # word-level (karaoke) lyrics. Empty = Side B audio and LRCLIB lyrics.
     "deezer_arl": "",

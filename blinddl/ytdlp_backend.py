@@ -43,7 +43,7 @@ def _entry_to_item(entry):
     }
 
 
-def extract_flat(url):
+def extract_flat(url, cookies_from_browser=None):
     """Inspect a URL without downloading.
 
     Returns (items, title): items is a list of normalized dicts (one entry
@@ -53,10 +53,13 @@ def extract_flat(url):
     opts = {
         "extract_flat": True,
         "quiet": True,
+        "noprogress": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "noplaylist": False,
     }
+    if cookies_from_browser:
+        opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     if not info:
@@ -78,7 +81,8 @@ def search(query, count=20):
 
 
 def download(url, out_dir, audio_only=True, audio_format="mp3",
-             progress_cb=None, cancel_event=None, http_headers=None):
+             progress_cb=None, cancel_event=None, http_headers=None,
+             cookies_from_browser=None):
     """Download one URL. progress_cb receives yt-dlp progress dicts."""
     os.makedirs(out_dir, exist_ok=True)
 
@@ -96,9 +100,12 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         "noplaylist": True,
         "continuedl": True,
         "windowsfilenames": True,
+        "noprogress": True,
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
+    if cookies_from_browser:
+        opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     if audio_only:
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [{

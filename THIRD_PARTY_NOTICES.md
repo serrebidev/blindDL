@@ -13,6 +13,7 @@ and their transitive dependencies:
 - PyCryptodome — BSD/Public Domain
 - Deno — MIT License
 - FFmpeg — LGPL v2.1 or later, or GPL when built with GPL components
+- aebn-vod-downloader — MIT License
 
 blindDL distributions include the EchterAlsFake adult API provider set. As of
 2026-08-02, `eaf_base_api` and the active video API packages are AGPL-3.0,

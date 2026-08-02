@@ -12,6 +12,7 @@ import wx
 
 # musicdl creates a file logger at import time. Keep GUI tests self-contained.
 with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
+    from blinddl import adult_backend
     from blinddl.downloader import (
         DownloadItem,
         STATUS_DONE,
@@ -20,7 +21,14 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
-    from blinddl.gui.search_panel import ENGINE_ADULT, SearchPanel
+    from blinddl.gui.search_panel import (
+        ADULT_ENGINE_CATEGORIES,
+        ENGINE_ADULT,
+        ENGINE_LABELS,
+        ENGINE_MUSIC,
+        ENGINE_TRANS,
+        SearchPanel,
+    )
     from blinddl.gui.settings_dialog import SettingsDialog
     from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import SubsPanel
@@ -175,35 +183,75 @@ class GuiInteractionTests(unittest.TestCase):
         )
         self.assertTrue(panel.search_btn.IsEnabled())
 
-    def test_settings_adult_sites_checkbox_defaults_on_and_saves(self):
+    def test_adult_combo_choices_follow_master_setting(self):
+        self.frame.config["adult_sites_enabled"] = False
+        panel = SearchPanel(self.host, self.frame)
+
+        self.assertEqual(
+            [panel.engine_choice.GetString(index)
+             for index in range(panel.engine_choice.GetCount())],
+            ENGINE_LABELS[:2],
+        )
+
+        self.frame.config["adult_sites_enabled"] = True
+        panel.refresh_engine_choices()
+        self.assertEqual(
+            [panel.engine_choice.GetString(index)
+             for index in range(panel.engine_choice.GetCount())],
+            ENGINE_LABELS,
+        )
+
+        panel.engine_choice.SetSelection(ENGINE_TRANS)
+        self.frame.config["adult_sites_enabled"] = False
+        panel.refresh_engine_choices()
+        self.assertEqual(panel.engine_choice.GetCount(), 2)
+        self.assertEqual(panel.engine_choice.GetSelection(), ENGINE_MUSIC)
+
+    def test_each_adult_combo_choice_routes_its_category(self):
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        for engine, category in ADULT_ENGINE_CATEGORIES.items():
+            token = object()
+            panel.token = token
+            with (mock.patch.object(
+                    adult_backend, "search", return_value=([], [], []))
+                  as search,
+                  mock.patch.object(wx, "CallAfter")):
+                panel._search("example", engine, token, stop, ["pornhub"])
+
+            self.assertEqual(search.call_args.kwargs["category"], category)
+
+    def test_settings_adult_sites_default_off_and_auth_paths_save(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)
 
-        self.assertTrue(dialog.adult_sites_check.GetValue())
-        dialog.adult_sites_check.SetValue(False)
+        self.assertFalse(dialog.adult_sites_check.GetValue())
+        self.assertFalse(dialog.onlyfans_auth_picker.IsEnabled())
+        self.assertFalse(dialog.justforfans_auth_picker.IsEnabled())
+        dialog.adult_sites_check.SetValue(True)
+        dialog.cookies_choice.SetSelection(1)
+        dialog.onlyfans_auth_picker.SetPath("onlyfans.json")
+        dialog.justforfans_auth_picker.SetPath("justforfans.json")
         dialog.apply()
 
-        self.assertFalse(config["adult_sites_enabled"])
+        self.assertTrue(config["adult_sites_enabled"])
+        self.assertEqual(config["cookies_from_browser"], "chrome")
+        self.assertEqual(config["onlyfans_auth_file"], "onlyfans.json")
+        self.assertEqual(config["justforfans_auth_file"], "justforfans.json")
         self.assertTrue(config.saved)
         dialog.Destroy()
 
-    def test_sources_dialog_separates_straight_and_lgbtq_adult_sites(self):
+    def test_sources_dialog_lists_general_adult_providers_together(self):
         config = _SettingsConfig()
+        config["adult_sites_enabled"] = True
         dialog = SourcesDialog(self.host, config)
 
-        self.assertEqual(
-            dialog.straight_adult_check_list.GetName(),
-            "Straight adult sites",
-        )
-        self.assertEqual(
-            dialog.lgbtq_adult_check_list.GetName(),
-            "LGBTQ+ adult sites",
-        )
-        self.assertNotIn("eporner", dialog.straight_adult_sources)
-        self.assertEqual(dialog.lgbtq_adult_sources, ["eporner"])
+        self.assertEqual(dialog.adult_check_list.GetName(), "Adult sites")
+        self.assertIn("eporner", dialog.adult_sources)
+        self.assertIn("pornhub", dialog.adult_sources)
 
-        pornhub_index = dialog.straight_adult_sources.index("pornhub")
-        dialog.straight_adult_check_list.Check(pornhub_index, False)
+        pornhub_index = dialog.adult_sources.index("pornhub")
+        dialog.adult_check_list.Check(pornhub_index, False)
         dialog.apply()
 
         self.assertIn("pornhub", config["disabled_adult_sources"])
