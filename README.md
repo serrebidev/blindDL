@@ -51,7 +51,7 @@ Grab the latest build from the [Releases page](https://github.com/serrebidev/bli
 1. Download the `.deb` matching your processor: `amd64` for most PCs or `arm64` for ARM computers.
 2. Install it with `sudo apt install ./blinddl_*.deb`.
 
-The Debian packages are built on Debian 12 for current Debian-family distributions and install FFmpeg as a system dependency.
+The Debian packages are built on Ubuntu 24.04 for current Debian-family distributions and install FFmpeg as a system dependency.
 
 **Other Linux distributions**
 
