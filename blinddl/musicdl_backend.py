@@ -14,11 +14,12 @@ multi-source constructor aborts entirely when one source fails to build.
 Searches return normalized dicts that keep the original SongInfo attached
 so the download queue can hand it back to musicdl.
 
-Every site is searched in parallel and the whole search returns after
-SEARCH_TIMEOUT_S (default 5s): a handful of these sites are dead, rate
-limited, or answer only after minutes, and waiting for the slowest one
-means the user gets nothing at all. Whatever answered in time is returned;
-stragglers are abandoned.
+Sites are searched through a small, shared concurrency gate and the whole
+search returns after SEARCH_TIMEOUT_S (default 5s): a handful of these sites
+are dead, rate limited, or answer only after minutes, and waiting for the
+slowest one means the user gets nothing at all. Whatever answered in time is
+returned; late sites continue through the same bounded gate without spiking
+CPU use.
 
 musicdl is a console tool at heart: it logs to stderr and paints rich
 progress bars while it works, and it drops a search_results.pkl under a
@@ -35,7 +36,18 @@ import shutil
 import threading
 import time
 
-from musicdl.musicdl import MusicClient, MusicClientBuilder
+# musicdl configures an exclusive per-user FileHandler at import time. On
+# Windows that prevents a second blindDL process (including the frozen release
+# self-test) from importing musicdl while another instance still owns the log.
+# blindDL does not use that third-party log, so substitute a no-op handler only
+# for the import and immediately restore logging's real FileHandler class.
+_file_handler = logging.FileHandler
+try:
+    logging.FileHandler = lambda *args, **kwargs: logging.NullHandler()
+    from musicdl.musicdl import MusicClient, MusicClientBuilder
+finally:
+    logging.FileHandler = _file_handler
+
 from requests.adapters import HTTPAdapter
 from rich.progress import Progress
 
@@ -48,11 +60,18 @@ SEARCH_TIMEOUT_S = 5.0
 # Hard socket timeout, so an abandoned search thread dies instead of
 # hanging on a dead host for the rest of the session.
 HTTP_TIMEOUT_S = 15
+# musicdl can create another worker pool inside every source. Without both
+# limits, searching all currently registered sources can create hundreds of
+# runnable threads, and timed-out searches compound the load while late sites
+# continue working.
+MAX_CONCURRENT_SOURCE_SEARCHES = 8
+SOURCE_SEARCH_THREADS = 1
 
 _lock = threading.Lock()
 _clients = None  # dict: source -> single-source MusicClient
 _http_timeout_installed = False
 _silenced = False
+_search_slots = threading.BoundedSemaphore(MAX_CONCURRENT_SOURCE_SEARCHES)
 
 
 def cache_dir():
@@ -87,9 +106,8 @@ def _silence_musicdl():
 
     Importing musicdl runs logging.basicConfig with a StreamHandler, so
     every site's INFO/WARNING chatter goes to stderr; its rich progress
-    bars go to stdout on top of that. Drop the stream handler (musicdl's
-    own log file keeps everything) and hand the source modules a progress
-    class that never draws.
+    bars go to stdout on top of that. Drop the stream handler and hand the
+    source modules a progress class that never draws.
     """
     global _silenced
     if _silenced:
@@ -157,6 +175,7 @@ def _get_clients():
                 try:
                     clients[source] = MusicClient(
                         music_sources=[source],
+                        clients_threadings={source: SOURCE_SEARCH_THREADS},
                         init_music_clients_cfg={source: {
                             "work_dir": work_dir,
                             "disable_print": True,
@@ -240,14 +259,13 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     """Search the chosen music sites at once and return after timeout_s.
 
     sources is a list of musicdl source names; None means every site that
-    could be built. All of them are queried in parallel, one thread each, so
-    the search takes about timeout_s no matter how many sites there are.
-    Sites still working when the budget runs out are not waited for -- but
-    they are not thrown away either: on_site(source, items) fires for every
-    site that answers, late ones included, so a caller can keep filling a
-    results list after this function has already returned. Set the `stop`
-    event to make those late callbacks stop firing (e.g. when a newer search
-    starts).
+    could be built. Sources pass through a shared concurrency gate so late
+    work from repeated searches cannot multiply CPU load. Sites still working
+    when the budget runs out are not waited for -- but they are not thrown
+    away either: on_site(source, items) fires for every site that answers,
+    late ones included, so a caller can keep filling a results list after this
+    function has already returned. Set the `stop` event to prevent queued
+    sources and late callbacks from a superseded search from doing more work.
 
     Returns (items, answered, asked): items are the normalized result dicts
     available at the deadline, answered is the list of sites that replied by
@@ -265,11 +283,14 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     found_lock = threading.Lock()
 
     def search_one(source, client):
-        try:
-            results = client.search(keyword) or {}
-            songs = results.get(source) or []
-        except Exception:  # noqa: BLE001 - one failing site must not kill the rest
-            songs = []
+        with _search_slots:
+            if stop is not None and stop.is_set():
+                return
+            try:
+                results = client.search(keyword) or {}
+                songs = results.get(source) or []
+            except Exception:  # noqa: BLE001 - one bad site must not kill the rest
+                songs = []
         items = _normalize(source, songs)
         with found_lock:
             found[source] = items

@@ -13,6 +13,17 @@ from pathlib import Path
 from .runtime import prepare_runtime_path
 
 
+def _flush_standard_streams() -> None:
+    """Flush attached consoles without failing in a windowed frozen build."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def _self_test(output_path: str) -> int:
     """Exercise imports and bundled tools without creating a GUI."""
     results: dict[str, object] = {}
@@ -64,8 +75,7 @@ def main() -> int | None:
     frame.Show()
     frame.Raise()
     code = app.MainLoop()
-    sys.stdout.flush()
-    sys.stderr.flush()
+    _flush_standard_streams()
     os._exit(code if isinstance(code, int) else 0)
 
 

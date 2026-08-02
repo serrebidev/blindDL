@@ -33,6 +33,7 @@ class MainFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title=APP_NAME, size=(950, 650))
 
+        self._closing = False
         self.config = Config()
         self.queue = DownloadQueue(self.config, self._queue_notify)
         self.subs = SubscriptionStore(self.config, self.queue,
@@ -126,6 +127,8 @@ class MainFrame(wx.Frame):
 
     def announce(self, message):
         """Put a message on the status bar (NVDA: Insert+End reads it)."""
+        if self._closing:
+            return
         self.SetStatusText(message, 0)
 
     def show_tab(self, index):
@@ -150,9 +153,13 @@ class MainFrame(wx.Frame):
     # -- queue / subscription notifications (from worker threads) -------------
 
     def _queue_notify(self, item):
+        if self._closing:
+            return
         wx.CallAfter(self._on_item_update, item)
 
     def _on_item_update(self, item):
+        if self._closing:
+            return
         self.downloads_panel.update_item(item)
         counts = self.queue.counts()
         if counts != self._last_counts:
@@ -167,8 +174,16 @@ class MainFrame(wx.Frame):
             self.announce(f"Download failed: {item.title}. {item.error}")
 
     def _subs_notify(self, message):
+        if self._closing:
+            return
         wx.CallAfter(self.announce, message)
-        wx.CallAfter(self.subs_panel.refresh)
+        wx.CallAfter(self._refresh_subscriptions)
+
+    def _refresh_subscriptions(self):
+        """Refresh only while the native subscription controls still exist."""
+        if self._closing:
+            return
+        self.subs_panel.refresh()
 
     # -- menu handlers ---------------------------------------------------------
 
@@ -209,7 +224,7 @@ class MainFrame(wx.Frame):
 
     def _check_subs_worker(self):
         self.subs.check_all()
-        wx.CallAfter(self.subs_panel.refresh)
+        wx.CallAfter(self._refresh_subscriptions)
         wx.CallAfter(self.announce, "Subscription check complete.")
 
     def on_about(self, event):
@@ -223,6 +238,10 @@ class MainFrame(wx.Frame):
             f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self)
 
     def on_close(self, event):
+        if self._closing:
+            return
+        self._closing = True
+        self.search_panel.shutdown()
         self.subs.stop()
         self.Destroy()
 

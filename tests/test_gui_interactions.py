@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import logging
+import threading
 import unittest
 from unittest import mock
 
@@ -126,6 +127,20 @@ class GuiInteractionTests(unittest.TestCase):
         panel.on_download_selected(None)
         self.assertEqual(len(self.frame.queue.calls), 2)
         self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
+
+    def test_search_shutdown_stops_timer_and_ignores_late_results(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.token = token = object()
+        panel.stop = threading.Event()
+        panel.timer.Start(1000)
+
+        panel.shutdown()
+        panel._add_site(token, 1, "YouTube", [{"title": "Too late"}])
+
+        self.assertTrue(panel.closing)
+        self.assertTrue(panel.stop.is_set())
+        self.assertFalse(panel.timer.IsRunning())
+        self.assertEqual(panel.results, [])
 
     def test_downloads_cancel_multiple_and_clear_finished(self):
         panel = DownloadsPanel(self.host, self.frame)

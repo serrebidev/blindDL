@@ -27,6 +27,7 @@ class SearchPanel(wx.Panel):
         self.asked = []  # sites this search went out to
         self.done = False  # True once the current search hit its deadline
         self.started_at = 0.0
+        self.closing = False
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -69,11 +70,24 @@ class SearchPanel(wx.Panel):
         self.SetSizer(sizer)
 
     def focus_input(self):
+        if self.closing:
+            return
         self.query_text.SetFocus()
+
+    def shutdown(self):
+        """Stop timers and silence worker callbacks before widgets are freed."""
+        if self.closing:
+            return
+        self.closing = True
+        if self.stop is not None:
+            self.stop.set()
+        self.timer.Stop()
 
     # -- search -----------------------------------------------------------
 
     def on_search(self, event):
+        if self.closing:
+            return
         query = self.query_text.GetValue().strip()
         if not query:
             self.frame.announce("Type a search first.")
@@ -136,7 +150,8 @@ class SearchPanel(wx.Panel):
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._search_failed, token, str(exc))
             return
-        wx.CallAfter(self._search_done, token, items, engine, asked)
+        if not stop.is_set():
+            wx.CallAfter(self._search_done, token, items, engine, asked)
 
     def _sideb_search(self, query, token, engine, stop):
         try:
@@ -149,7 +164,7 @@ class SearchPanel(wx.Panel):
                      sideb_backend.SIDEB_SOURCE, items)
 
     def _search_failed(self, token, error):
-        if token is not self.token:
+        if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
         self.frame.announce("Search failed.")
@@ -158,7 +173,8 @@ class SearchPanel(wx.Panel):
 
     def _add_site(self, token, engine, source, items):
         """Append one site's results. Runs on the GUI thread."""
-        if token is not self.token or source in self.shown_sources:
+        if (self.closing or token is not self.token or
+                source in self.shown_sources):
             return
         self.shown_sources.add(source)
         if not items:
@@ -208,6 +224,8 @@ class SearchPanel(wx.Panel):
 
     def _tick(self, event):
         """Keep the status bar honest while slow sites are still working."""
+        if self.closing:
+            return
         if self.done and not self._pending():
             self.timer.Stop()
             return
@@ -216,7 +234,7 @@ class SearchPanel(wx.Panel):
                 f"{self._result_count()} so far. {self._pending_phrase()}")
 
     def _search_done(self, token, items, engine, asked=()):
-        if token is not self.token:
+        if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
         # yt-dlp hands back everything at once; music results arrived per site.
