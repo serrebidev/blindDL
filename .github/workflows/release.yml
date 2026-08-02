@@ -76,7 +76,11 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: brew install deno ffmpeg
+        run: |
+          if brew tap | grep -qx 'aws/tap'; then
+            brew untap aws/tap
+          fi
+          brew install deno ffmpeg
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
