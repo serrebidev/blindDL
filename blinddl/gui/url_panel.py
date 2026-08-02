@@ -8,7 +8,7 @@ import threading
 
 import wx
 
-from .. import sideb_backend, ytdlp_backend
+from .. import adult_backend, sideb_backend, ytdlp_backend
 from .item_picker_dialog import ItemPickerDialog
 
 
@@ -55,6 +55,20 @@ class UrlPanel(wx.Panel):
                          daemon=True).start()
 
     def _inspect(self, url, audio_only):
+        adult_error = None
+        if adult_backend.is_supported_url(url):
+            if not self.frame.config["adult_sites_enabled"]:
+                wx.CallAfter(
+                    self._inspect_failed,
+                    "Adult sites are disabled. Enable them in Settings.",
+                )
+                return
+            try:
+                items, title = adult_backend.inspect_url(url)
+                wx.CallAfter(self._inspect_done, items, title, False, "adult")
+                return
+            except Exception as exc:  # noqa: BLE001 - yt-dlp may still cope
+                adult_error = str(exc)
         sideb_error = None
         if sideb_backend.is_deezer_url(url):
             # Deezer gets the full Side B treatment (tags, cover, lyrics);
@@ -73,6 +87,8 @@ class UrlPanel(wx.Panel):
             error = str(exc)
             if sideb_error:
                 error = f"Side B: {sideb_error}\nyt-dlp: {error}"
+            if adult_error:
+                error = f"Adult API: {adult_error}\nyt-dlp: {error}"
             wx.CallAfter(self._inspect_failed, error)
             return
         wx.CallAfter(self._inspect_done, items, title, audio_only, "ytdlp")
@@ -105,6 +121,8 @@ class UrlPanel(wx.Panel):
         for item in items:
             if engine == "sideb":
                 self.frame.queue.add_sideb(item["url"], item["title"])
+            elif engine == "adult":
+                self.frame.queue.add_adult(item, item["title"])
             else:
                 self.frame.queue.add_ytdlp(item["url"], item["title"],
                                            audio_only=audio_only)

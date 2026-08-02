@@ -49,6 +49,15 @@ def _self_test(output_path: str) -> int:
 
     check("musicdl_sources", musicdl_sources)
 
+    def adult_providers():
+        from .adult_backend import PROVIDERS, _import_provider
+
+        for provider in PROVIDERS.values():
+            _import_provider(provider)
+        return len(PROVIDERS)
+
+    check("adult_providers", adult_providers)
+
     for tool in ("deno", "ffmpeg"):
         check(tool, lambda tool=tool: shutil.which(tool) or (_ for _ in ()).throw(
             RuntimeError(f"{tool} was not found")

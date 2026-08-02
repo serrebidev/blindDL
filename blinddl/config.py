@@ -36,6 +36,12 @@ DEFAULTS = {
     # search everything -- including sites added by future musicdl updates,
     # which is why the off list is stored rather than the on list.
     "disabled_music_sources": [],
+    # Adult sites the user switched off. These are separate from music
+    # sources so the two provider lists can be configured independently.
+    "disabled_adult_sources": [],
+    # Master privacy/content switch. Adult integrations ship enabled so their
+    # search-capable providers appear immediately after installation.
+    "adult_sites_enabled": True,
     # Deezer ARL cookie: unlocks native FLAC/MP3 320 downloads and Deezer's
     # word-level (karaoke) lyrics. Empty = Side B audio and LRCLIB lyrics.
     "deezer_arl": "",

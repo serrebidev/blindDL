@@ -2,17 +2,19 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Search tab: musicdl across all supported music sites, or yt-dlp/YouTube."""
+"""Search tab: music, adult API providers, or yt-dlp/YouTube."""
 
 import threading
 import time
 
 import wx
 
-from .. import musicdl_backend, sideb_backend, ytdlp_backend
+from .. import adult_backend, musicdl_backend, sideb_backend, ytdlp_backend
 
-ENGINE_MUSIC = "Music sites"
-ENGINE_YOUTUBE = "YouTube/web"
+ENGINE_MUSIC = 0
+ENGINE_YOUTUBE = 1
+ENGINE_ADULT = 2
+ENGINE_LABELS = ["Music sites", "YouTube/web", "Adult sites"]
 
 
 class SearchPanel(wx.Panel):
@@ -40,7 +42,7 @@ class SearchPanel(wx.Panel):
         self.query_text.Bind(wx.EVT_TEXT_ENTER, self.on_search)
 
         engine_label = wx.StaticText(self, label="S&ource:")
-        self.engine_choice = wx.Choice(self, choices=[ENGINE_MUSIC, ENGINE_YOUTUBE])
+        self.engine_choice = wx.Choice(self, choices=ENGINE_LABELS)
         self.engine_choice.SetName("Search source")
         self.engine_choice.SetSelection(0)
 
@@ -93,11 +95,29 @@ class SearchPanel(wx.Panel):
             self.frame.announce("Type a search first.")
             return
         engine = self.engine_choice.GetSelection()
-        sources = musicdl_backend.enabled_sources(
-            self.frame.config["disabled_music_sources"])
-        if engine == 0 and not sources:
-            self.frame.announce("No music sites selected. Use Tools, Search sites.")
-            return
+        if engine == ENGINE_MUSIC:
+            sources = musicdl_backend.enabled_sources(
+                self.frame.config["disabled_music_sources"])
+            if not sources:
+                self.frame.announce(
+                    "No music sites selected. Use Tools, Search sites.")
+                return
+        elif engine == ENGINE_ADULT:
+            if not self.frame.config["adult_sites_enabled"]:
+                self.frame.announce(
+                    "Adult sites are disabled. Enable them in Settings.")
+                return
+            sources = adult_backend.enabled_sources(
+                self.frame.config["disabled_adult_sources"])
+            unavailable = adult_backend.unavailable_sources()
+            sources = [source for source in sources if source not in unavailable]
+            if not sources:
+                self.frame.announce(
+                    "Adult API packages are unavailable. Reinstall blindDL "
+                    "to restore them.")
+                return
+        else:
+            sources = []
         self.search_btn.Disable()
 
         # Everything below is tagged with this token, so results still
@@ -115,13 +135,19 @@ class SearchPanel(wx.Panel):
         self.timer.Stop()
         self.results_list.DeleteAllItems()
 
-        if engine == 0:
+        if engine == ENGINE_MUSIC:
             # Side B's Deezer catalog search goes out next to the musicdl
             # sites and reports through the same per-site callback.
             count = len(sources) + 1
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} music {site_word} "
+                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+        elif engine == ENGINE_ADULT:
+            count = len(sources)
+            site_word = "site" if count == 1 else "sites"
+            self.frame.announce(
+                f"Searching {count} adult {site_word} "
                 f"({self.frame.config['search_timeout_s']:g} seconds each)...")
         else:
             self.frame.announce("Searching YouTube...")
@@ -132,7 +158,7 @@ class SearchPanel(wx.Panel):
     def _search(self, query, engine, token, stop, sources):
         asked = []
         try:
-            if engine == 0:
+            if engine == ENGINE_MUSIC:
                 def on_site(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
@@ -144,6 +170,15 @@ class SearchPanel(wx.Panel):
                     on_site=on_site, stop=stop, sources=sources)
                 asked.append(sideb_backend.SIDEB_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
+                items = []
+            elif engine == ENGINE_ADULT:
+                def on_adult_site(source, items):
+                    wx.CallAfter(self._add_site, token, engine, source, items)
+
+                items, _answered, asked = adult_backend.search(
+                    query, self.frame.config["search_timeout_s"],
+                    on_site=on_adult_site, stop=stop, sources=sources)
+                # on_adult_site already delivered these.
                 items = []
             else:
                 items = ytdlp_backend.search(query)
@@ -182,7 +217,7 @@ class SearchPanel(wx.Panel):
         for item in items:
             row = self.results_list.GetItemCount()
             self.results_list.InsertItem(row, item["title"])
-            if engine == 0:
+            if engine != ENGINE_YOUTUBE:
                 self.results_list.SetItem(row, 1, item.get("artist", ""))
                 self.results_list.SetItem(row, 2, item.get("source", ""))
                 self.results_list.SetItem(
@@ -323,12 +358,14 @@ class SearchPanel(wx.Panel):
         engine = self.result_engine
         for index in indices:
             item = self.results[index]
-            if engine == 0:
+            if engine == ENGINE_MUSIC:
                 if item.get("kind") == "sideb":
                     self.frame.queue.add_sideb(item["url"], item["title"])
                 else:
                     self.frame.queue.add_musicdl(
                         item["song_info"], item["title"])
+            elif engine == ENGINE_ADULT:
+                self.frame.queue.add_adult(item, item["title"])
             else:
                 self.frame.queue.add_ytdlp(item["url"], item["title"])
         if len(indices) == 1:

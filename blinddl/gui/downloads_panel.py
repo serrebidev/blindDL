@@ -40,7 +40,8 @@ class DownloadsPanel(wx.Panel):
             self._rows[item.id] = row
         self.list.SetItem(row, 0, item.title)
         self.list.SetItem(row, 1, item.status)
-        if item.status == STATUS_DOWNLOADING and item.kind == "musicdl":
+        if (item.status == STATUS_DOWNLOADING and
+                item.kind in ("musicdl", "adult") and not item.percent):
             self.list.SetItem(row, 2, "in progress")
         elif item.percent:
             self.list.SetItem(row, 2, f"{item.percent:.0f}%")

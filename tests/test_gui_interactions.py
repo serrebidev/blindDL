@@ -2,6 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
+import copy
 import logging
 import threading
 import unittest
@@ -16,9 +17,11 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         STATUS_DONE,
         STATUS_QUEUED,
     )
+    from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
-    from blinddl.gui.search_panel import SearchPanel
+    from blinddl.gui.search_panel import ENGINE_ADULT, SearchPanel
+    from blinddl.gui.settings_dialog import SettingsDialog
     from blinddl.gui.subs_panel import SubsPanel
 
 
@@ -36,6 +39,9 @@ class _Queue:
     def add_sideb(self, url, title):
         self.calls.append(("sideb", url, title))
 
+    def add_adult(self, payload, title):
+        self.calls.append(("adult", payload, title))
+
     def _find(self, item_id):
         return next((item for item in self.items if item.id == item_id), None)
 
@@ -46,6 +52,15 @@ class _Queue:
 
     def remove_finished(self):
         self.items = [item for item in self.items if item.status != STATUS_DONE]
+
+
+class _SettingsConfig(dict):
+    def __init__(self):
+        super().__init__(copy.deepcopy(DEFAULTS))
+        self.saved = False
+
+    def save(self):
+        self.saved = True
 
 
 class _Subscriptions:
@@ -68,6 +83,8 @@ class _Frame:
     def __init__(self):
         self.config = {
             "disabled_music_sources": [],
+            "disabled_adult_sources": [],
+            "adult_sites_enabled": True,
             "search_timeout_s": 5,
             "audio_only": True,
         }
@@ -127,6 +144,47 @@ class GuiInteractionTests(unittest.TestCase):
         panel.on_download_selected(None)
         self.assertEqual(len(self.frame.queue.calls), 2)
         self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
+
+    def test_search_queues_adult_api_result(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_ADULT
+        item = {
+            "title": "Example", "url": "https://xvideos.com/video.1",
+            "provider": "xvideos", "kind": "adult",
+        }
+        panel.results = [item]
+        panel.results_list.InsertItem(0, item["title"])
+        panel.results_list.Select(0)
+
+        panel.on_download_selected(None)
+
+        self.assertEqual(self.frame.queue.calls, [("adult", item, "Example")])
+
+    def test_adult_search_respects_master_setting(self):
+        panel = SearchPanel(self.host, self.frame)
+        self.frame.config["adult_sites_enabled"] = False
+        panel.query_text.SetValue("example")
+        panel.engine_choice.SetSelection(ENGINE_ADULT)
+
+        panel.on_search(None)
+
+        self.assertEqual(
+            self.frame.messages[-1],
+            "Adult sites are disabled. Enable them in Settings.",
+        )
+        self.assertTrue(panel.search_btn.IsEnabled())
+
+    def test_settings_adult_sites_checkbox_defaults_on_and_saves(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertTrue(dialog.adult_sites_check.GetValue())
+        dialog.adult_sites_check.SetValue(False)
+        dialog.apply()
+
+        self.assertFalse(config["adult_sites_enabled"])
+        self.assertTrue(config.saved)
+        dialog.Destroy()
 
     def test_search_shutdown_stops_timer_and_ignores_late_results(self):
         panel = SearchPanel(self.host, self.frame)

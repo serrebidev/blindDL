@@ -78,7 +78,7 @@ def search(query, count=20):
 
 
 def download(url, out_dir, audio_only=True, audio_format="mp3",
-             progress_cb=None, cancel_event=None):
+             progress_cb=None, cancel_event=None, http_headers=None):
     """Download one URL. progress_cb receives yt-dlp progress dicts."""
     os.makedirs(out_dir, exist_ok=True)
 
@@ -97,6 +97,8 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         "continuedl": True,
         "windowsfilenames": True,
     }
+    if http_headers:
+        opts["http_headers"] = dict(http_headers)
     if audio_only:
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [{

@@ -11,3 +11,4 @@ platformdirs>=4.3
 # Avoid known PyInstaller hook warnings in newer mypyc/packaging layouts.
 chardet>=7,<7.4
 pycparser>=2.23,<3
+-r requirements-adult.txt

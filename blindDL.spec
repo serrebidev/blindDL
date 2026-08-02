@@ -53,6 +53,8 @@ def collect_package_from_filesystem(package_name):
         if not path.is_file() or "__pycache__" in path.parts:
             continue
         relative = path.relative_to(package_dir)
+        if "tests" in relative.parts or "test" in relative.parts:
+            continue
         if path.suffix == ".py":
             if path.name != "__init__.py":
                 module_parts = relative.with_suffix("").parts
@@ -66,6 +68,32 @@ musicdl_datas, musicdl_hidden = collect_package_from_filesystem("musicdl")
 datas += musicdl_datas
 hiddenimports += musicdl_hidden
 
+ADULT_MODULES = (
+    "base_api",
+    "beeg_api",
+    "eporner_api",
+    "hqporner_api",
+    "missav_api",
+    "porngo_api",
+    "pornhub_api",
+    "porntrex_api",
+    "redtube_api",
+    "sex_api",
+    "spankbang_api",
+    "thumbzilla_api",
+    "tube8_api",
+    "xfreehd_api",
+    "xhamster_api",
+    "xnxx_api",
+    "xvideos_api",
+    "youporn_api",
+)
+for package in ADULT_MODULES:
+    package_datas, package_hidden = collect_package_from_filesystem(package)
+    datas += package_datas
+    hiddenimports += package_hidden
+    hiddenimports.append(package)
+
 for distribution in (
     "wxPython",
     "yt-dlp",
@@ -74,6 +102,24 @@ for distribution in (
     "requests",
     "mutagen",
     "pycryptodome",
+    "eaf_base_api",
+    "unofficial-api-for-beeg",
+    "unofficial-api-for-eporner",
+    "unofficial-api-for-hqporner",
+    "unofficial-api-for-missav",
+    "porngo_api",
+    "unofficial-api-for-pornhub",
+    "unofficial-api-for-porntrex",
+    "unofficial-api-for-redtube",
+    "Sex_API",
+    "unofficial-api-for-spankbang",
+    "unofficial-api-for-thumbzilla",
+    "unofficial-api-for-tube8",
+    "unofficial-api-for-xfreehd",
+    "unofficial-api-for-xhamster",
+    "unofficial-api-for-xnxx",
+    "unofficial-api-for-xvideos",
+    "unofficial-api-for-youporn",
 ):
     try:
         datas += copy_metadata(distribution, recursive=True)

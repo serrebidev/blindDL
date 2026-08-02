@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.1.1"
+version = "0.2.0"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "serrebidev" }]
@@ -33,6 +33,26 @@ dependencies = [
   "platformdirs>=4.3",
   "chardet>=7,<7.4",
   "pycparser>=2.23,<3",
+  # Adult providers are bundled so the enabled-by-default Settings checkbox
+  # works in source installs and native releases without a second install.
+  "eaf_base_api @ git+https://github.com/EchterAlsFake/eaf_base_api",
+  "unofficial-api-for-beeg @ git+https://github.com/EchterAlsFake/unofficial-api-for-beeg",
+  "unofficial-api-for-eporner @ git+https://github.com/EchterAlsFake/unofficial-api-for-eporner",
+  "unofficial-api-for-hqporner @ git+https://github.com/EchterAlsFake/unofficial-api-for-hqporner",
+  "unofficial-api-for-missav @ git+https://github.com/EchterAlsFake/unofficial-api-for-missav",
+  "porngo_api @ git+https://github.com/EchterAlsFake/unofficial-api-for-porngo",
+  "unofficial-api-for-pornhub @ git+https://github.com/EchterAlsFake/unofficial-api-for-pornhub",
+  "unofficial-api-for-porntrex @ git+https://github.com/EchterAlsFake/unofficial-api-for-porntrex",
+  "unofficial-api-for-redtube @ git+https://github.com/EchterAlsFake/unofficial-api-for-redtube",
+  "Sex_API @ git+https://github.com/EchterAlsFake/unofficial-api-for-sex.com",
+  "unofficial-api-for-spankbang @ git+https://github.com/EchterAlsFake/unofficial-api-for-spankbang",
+  "unofficial-api-for-thumbzilla @ git+https://github.com/EchterAlsFake/unofficial-api-for-thumbzilla",
+  "unofficial-api-for-tube8 @ git+https://github.com/EchterAlsFake/unofficial-api-for-tube8",
+  "unofficial-api-for-xfreehd @ git+https://github.com/EchterAlsFake/unofficial-api-for-xfreehd",
+  "unofficial-api-for-xhamster @ git+https://github.com/EchterAlsFake/unofficial-api-for-xhamster",
+  "unofficial-api-for-xnxx @ git+https://github.com/EchterAlsFake/unofficial-api-for-xnxx",
+  "unofficial-api-for-xvideos @ git+https://github.com/EchterAlsFake/unofficial-api-for-xvideos",
+  "unofficial-api-for-youporn @ git+https://github.com/EchterAlsFake/unofficial-api-for-youporn",
 ]
 
 [project.urls]

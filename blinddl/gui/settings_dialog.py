@@ -59,6 +59,12 @@ class SettingsDialog(wx.Dialog):
             self, label="Embed synced Deezer &lyrics")
         self.lyrics_check.SetValue(bool(config["sideb_lyrics"]))
 
+        self.adult_sites_check = wx.CheckBox(
+            self, label="Enable &adult sites")
+        self.adult_sites_check.SetValue(bool(config["adult_sites_enabled"]))
+        self.adult_sites_check.SetHelpText(
+            "Enables adult-site search results and adult URL downloads.")
+
         arl_label = wx.StaticText(
             self, label="Deezer A&RL cookie:")
         self.arl_text = wx.TextCtrl(self, value=config["deezer_arl"],
@@ -82,6 +88,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(row(sub_label, self.sub_spin), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
         sizer.Add(self.lyrics_check, 0, wx.ALL, 8)
+        sizer.Add(self.adult_sites_check, 0, wx.ALL, 8)
         sizer.Add(row(arl_label, self.arl_text), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizerAndFit(sizer)
@@ -96,5 +103,6 @@ class SettingsDialog(wx.Dialog):
         self.config["sub_check_hours"] = self.sub_spin.GetValue()
         self.config["auto_update"] = self.update_check.GetValue()
         self.config["sideb_lyrics"] = self.lyrics_check.GetValue()
+        self.config["adult_sites_enabled"] = self.adult_sites_check.GetValue()
         self.config["deezer_arl"] = self.arl_text.GetValue().strip()
         self.config.save()

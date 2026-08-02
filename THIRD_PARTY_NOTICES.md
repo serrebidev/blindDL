@@ -14,6 +14,13 @@ and their transitive dependencies:
 - Deno — MIT License
 - FFmpeg — LGPL v2.1 or later, or GPL when built with GPL components
 
+blindDL distributions include the EchterAlsFake adult API provider set. As of
+2026-08-02, `eaf_base_api` and the active video API packages are AGPL-3.0,
+while the archived Porngo and Sex.com packages are LGPL-3.0. Their source is
+available from the upstream repositories identified in `requirements-adult.txt`.
+These packages retain their upstream licenses; review those terms before
+redistributing blindDL or a combined build.
+
 The dependency metadata and license texts shipped by each project are retained
 inside packaged application directories when provided by the dependency.
 Nothing in blindDL's MIT License changes or overrides a third party's terms.

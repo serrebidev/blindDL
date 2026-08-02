@@ -11,6 +11,10 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 
 - Downloads individual videos, playlists, and whole channels from links supported by yt-dlp.
 - Searches Deezer and every enabled musicdl service from one search box.
+- Searches and downloads through all 17 EchterAlsFake `unofficial-api-for-*`
+  providers, with an enabled-by-default adult-sites setting and separate site
+  selection controls.
+- Downloads BoyfriendTV video URLs through a native MP4/HLS extractor.
 - Finds music across Spotify, TIDAL, SoundCloud, Netease, QQ, Kugou, Kuwo, Migu, and dozens of other services.
 - Downloads Deezer tracks, albums, playlists, and artists as tagged music with cover art and synced lyrics.
 - Lets you choose exactly which music sites are searched, with newly supported sites enabled automatically.
@@ -62,6 +66,13 @@ The installer sets BlindDL up for your user account and can obtain FFmpeg throug
 2. Install dependencies: `pip install -r requirements.txt`
 3. Launch it: `python main.py`
 
+Adult providers are included by the normal dependency installation and in
+packaged releases. The enabled-by-default **Enable adult sites** checkbox is in
+Settings. Search-capable providers appear under **Adult sites** in Search;
+Beeg and Porngo currently support URL downloads only. BoyfriendTV URLs work
+through blindDL's native extractor. The adult API libraries retain their
+upstream licenses and require Python 3.12 or newer.
+
 On Debian-family Linux, install `python3-wxgtk4.0`, `ffmpeg`, and `git` first, then create the virtual environment with `--system-site-packages`. On Windows, BlindDL can install Deno and FFmpeg with winget; on macOS, it uses Homebrew when available.
 
 ## Building
@@ -79,7 +90,7 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 - Ctrl+, — open Settings
 - Ctrl+U — check for updates
 - Ctrl+Shift+C — check all subscriptions now
-- Ctrl+Shift+S — choose which music sites to search
+- Ctrl+Shift+S — choose which music and adult sites to search
 
 ## Config and downloads
 

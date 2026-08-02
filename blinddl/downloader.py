@@ -14,7 +14,13 @@ import threading
 import time
 import uuid
 
-from . import deezer_backend, musicdl_backend, sideb_backend, ytdlp_backend
+from . import (
+    adult_backend,
+    deezer_backend,
+    musicdl_backend,
+    sideb_backend,
+    ytdlp_backend,
+)
 
 STATUS_QUEUED = "Queued"
 STATUS_DOWNLOADING = "Downloading"
@@ -41,7 +47,7 @@ class DownloadItem:
     def __init__(self, title, kind, payload, audio_only=True, audio_format="mp3"):
         self.id = uuid.uuid4().hex
         self.title = title
-        self.kind = kind  # "ytdlp", "musicdl" or "sideb"
+        self.kind = kind  # "ytdlp", "musicdl", "sideb" or "adult"
         self.payload = payload  # URL string, or musicdl SongInfo
         self.audio_only = audio_only
         self.audio_format = audio_format
@@ -114,6 +120,12 @@ class DownloadQueue:
         self.add(item)
         return item
 
+    def add_adult(self, payload, title):
+        item = DownloadItem(title=title, kind="adult", payload=payload,
+                            audio_only=False)
+        self.add(item)
+        return item
+
     def cancel(self, item_id):
         item = self._find(item_id)
         if item is None:
@@ -172,6 +184,8 @@ class DownloadQueue:
                     self._run_ytdlp(item)
                 elif item.kind == "sideb":
                     self._run_sideb(item)
+                elif item.kind == "adult":
+                    self._run_adult(item)
                 else:
                     self._run_musicdl(item)
                 item.percent = 100.0
@@ -236,6 +250,29 @@ class DownloadQueue:
         sideb_backend.download(
             item.payload, self.config["download_dir"], self.config,
             event_cb=on_event)
+
+    def _run_adult(self, item):
+        started = time.monotonic()
+
+        def progress(current, total=None):
+            if isinstance(current, dict):
+                item.update_from_ytdlp(current)
+            else:
+                downloaded = current or 0
+                total_bytes = total or 0
+                elapsed = max(time.monotonic() - started, 0.001)
+                rate = downloaded / elapsed
+                item.speed = format_speed(rate)
+                if total_bytes:
+                    item.percent = min(100.0, downloaded * 100.0 / total_bytes)
+                    if rate:
+                        item.eta = ytdlp_backend.format_duration(
+                            max(total_bytes - downloaded, 0) / rate)
+            self._notify(item, throttle=True)
+
+        adult_backend.download(
+            item.payload, self.config["download_dir"], progress_cb=progress,
+            cancel_event=item.cancel_event)
 
     def _run_deezer(self, item):
         started = time.monotonic()

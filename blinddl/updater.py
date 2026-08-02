@@ -28,7 +28,29 @@ PRE_PACKAGES = ["yt-dlp"]
 # sideb is not on PyPI, so it is installed and refreshed from git. pip
 # cannot tell whether a git package is stale, so it is reinstalled on
 # every update check (cheap, and only when already installed).
-GIT_PACKAGES = {"sideb": "git+https://github.com/mosaddiqdev/sideb"}
+GIT_PACKAGES = {
+    "sideb": "git+https://github.com/mosaddiqdev/sideb",
+    # Adult providers are refreshed when present; frozen builds update them
+    # together with the application release.
+    "eaf_base_api": "git+https://github.com/EchterAlsFake/eaf_base_api",
+    "unofficial-api-for-beeg": "git+https://github.com/EchterAlsFake/unofficial-api-for-beeg",
+    "unofficial-api-for-eporner": "git+https://github.com/EchterAlsFake/unofficial-api-for-eporner",
+    "unofficial-api-for-hqporner": "git+https://github.com/EchterAlsFake/unofficial-api-for-hqporner",
+    "unofficial-api-for-missav": "git+https://github.com/EchterAlsFake/unofficial-api-for-missav",
+    "porngo_api": "git+https://github.com/EchterAlsFake/unofficial-api-for-porngo",
+    "unofficial-api-for-pornhub": "git+https://github.com/EchterAlsFake/unofficial-api-for-pornhub",
+    "unofficial-api-for-porntrex": "git+https://github.com/EchterAlsFake/unofficial-api-for-porntrex",
+    "unofficial-api-for-redtube": "git+https://github.com/EchterAlsFake/unofficial-api-for-redtube",
+    "Sex_API": "git+https://github.com/EchterAlsFake/unofficial-api-for-sex.com",
+    "unofficial-api-for-spankbang": "git+https://github.com/EchterAlsFake/unofficial-api-for-spankbang",
+    "unofficial-api-for-thumbzilla": "git+https://github.com/EchterAlsFake/unofficial-api-for-thumbzilla",
+    "unofficial-api-for-tube8": "git+https://github.com/EchterAlsFake/unofficial-api-for-tube8",
+    "unofficial-api-for-xfreehd": "git+https://github.com/EchterAlsFake/unofficial-api-for-xfreehd",
+    "unofficial-api-for-xhamster": "git+https://github.com/EchterAlsFake/unofficial-api-for-xhamster",
+    "unofficial-api-for-xnxx": "git+https://github.com/EchterAlsFake/unofficial-api-for-xnxx",
+    "unofficial-api-for-xvideos": "git+https://github.com/EchterAlsFake/unofficial-api-for-xvideos",
+    "unofficial-api-for-youporn": "git+https://github.com/EchterAlsFake/unofficial-api-for-youporn",
+}
 WINGET_PACKAGES = {
     "DenoLand.Deno": "Deno (JavaScript runtime for yt-dlp/YouTube)",
     "Gyan.FFmpeg.Essentials": "ffmpeg (audio/video conversion)",
