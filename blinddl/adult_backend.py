@@ -102,6 +102,28 @@ _TRANS_RESULT_PATTERN = re.compile(
     r"ladyboys?|t[-\s]?girls?|futanari|ftm|mtf|ts"
     r")\b"
 )
+_FEMALE_RESULT_PATTERN = re.compile(
+    r"(?ix)\b(?:"
+    r"women?|female|girls?|wives|wife|girlfriends?|brides?|"
+    r"mothers?|moms?|momm(?:y|ies)|daughters?|sisters?|aunts?|"
+    r"milfs?|grann(?:y|ies)|lesbians?|femdom|cowgirls?|latinas?|"
+    r"puss(?:y|ies)|vaginas?|clits?|cunts?|boobs?|tits?|breasts?|"
+    r"busty|[a-z][-\s]?cups?|actresses?|schoolgirls?|cheerleaders?|"
+    r"she|her|fisse"
+    r")\b"
+)
+_BISEXUAL_RESULT_PATTERN = re.compile(
+    r"(?ix)\b(?:bisexual\w*|bi|biphoria)\b"
+)
+_GAY_MALE_RESULT_PATTERN = re.compile(
+    r"(?ix)\b(?:"
+    r"gay|males?|boys?|boyfriends?|husbands?|twinks?|bears?|"
+    r"dadd(?:y|ies)|jocks?|hunks?|studs?"
+    r")\b"
+)
+_TRUSTED_GAY_CATALOGS = {
+    "mymusclevideo", "thisvid", "xhamster", "xnxx",
+}
 
 
 # All repositories explicitly named unofficial-api-for-* on the upstream
@@ -133,7 +155,7 @@ PROVIDERS = {
         Provider(
             "hqporner", "HQPorner", "hqporner_api", ("hqporner.com",),
             "search_videos", {"pages": 1, "load_html": False},
-            "DownloadConfigRAW",
+            "DownloadConfigRAW", search_categories=(CONTENT_STRAIGHT,),
         ),
         Provider(
             "justforfans", "JustForFans", "requests", ("justfor.fans",),
@@ -142,6 +164,7 @@ PROVIDERS = {
         Provider(
             "missav", "MissAV", "missav_api", ("missav.ws",),
             "search", {"video_count": 20, "load_html": True},
+            search_categories=(CONTENT_STRAIGHT,),
         ),
         Provider(
             "mymusclevideo", "MyMuscleVideo", "yt_dlp",
@@ -180,7 +203,7 @@ PROVIDERS = {
         ),
         Provider(
             "thumbzilla", "Thumbzilla", "thumbzilla_api",
-            ("thumbzilla.com",), "search", {"pages": 1},
+            ("thumbzilla.com",),
         ),
         Provider(
             "thisvid", "ThisVid", "yt_dlp", ("thisvid.com",),
@@ -312,6 +335,73 @@ class _ThisVidSearchParser(HTMLParser):
         self._finish_pending()
 
 
+class _ThisVidPlaylistParser(HTMLParser):
+    """Extract public and private cards from a ThisVid playlist view."""
+
+    def __init__(self, playlist_id):
+        super().__init__(convert_charrefs=True)
+        self.playlist_id = str(playlist_id)
+        self.items = []
+        self.seen = set()
+        self.heading = ""
+        self._in_h1 = False
+        self._heading_parts = []
+        self._pending = None
+        self._pending_private = False
+
+    def _finish_pending(self):
+        if self._pending is not None:
+            direct_url, title = self._pending
+            if direct_url not in self.seen:
+                self.seen.add(direct_url)
+                self.items.append(
+                    (direct_url, title, self._pending_private))
+        self._pending = None
+        self._pending_private = False
+
+    def handle_starttag(self, tag, attrs):
+        folded = tag.casefold()
+        values = dict(attrs)
+        if folded == "h1":
+            self._in_h1 = True
+            return
+        if self._pending is not None:
+            classes = set((values.get("class") or "").casefold().split())
+            if "private" in classes or values.get("alt", "").casefold() == "private":
+                self._pending_private = True
+        if folded != "a":
+            return
+        classes = set((values.get("class") or "").casefold().split())
+        if "tumbpu" not in classes:
+            return
+        parsed = urlparse(values.get("href") or "")
+        match = re.fullmatch(r"/playlist/(\d+)/video/([^/]+)/", parsed.path)
+        if not match or match.group(1) != self.playlist_id:
+            return
+        title = html.unescape(values.get("title") or "").strip()
+        if not title:
+            return
+        direct_url = f"https://thisvid.com/videos/{match.group(2)}/"
+        self._pending = (direct_url, title)
+
+    def handle_data(self, data):
+        if self._in_h1:
+            self._heading_parts.append(data)
+
+    def handle_endtag(self, tag):
+        folded = tag.casefold()
+        if folded == "a":
+            self._finish_pending()
+        elif folded == "h1":
+            self._in_h1 = False
+            self.heading = html.unescape(
+                " ".join(self._heading_parts)).strip()
+
+    def close(self):
+        super().close()
+        self._finish_pending()
+
+
 class _MyMuscleVideoSearchParser(HTMLParser):
     """Extract titled public video cards from MyMuscleVideo search pages."""
 
@@ -433,6 +523,55 @@ def _search_mymusclevideo(query, category):
     ]
 
 
+def _is_mymusclevideo_playlist_url(url):
+    parsed = urlparse(url)
+    return (
+        _host_matches(parsed.hostname, ("mymusclevideo.com",))
+        and re.fullmatch(r"/playlist/\d+/[^/]+/?", parsed.path) is not None
+    )
+
+
+def _inspect_mymusclevideo_playlist(url, cookies_from_browser=""):
+    response = requests.get(url, headers={"User-Agent": _UA}, timeout=30)
+    response.raise_for_status()
+    parser = _MyMuscleVideoSearchParser()
+    parser.feed(response.text)
+    parser.close()
+    if not parser.items:
+        raise RuntimeError(
+            "MyMuscleVideo returned no public videos for this playlist.")
+
+    title_match = re.search(
+        r"<title[^>]*>(.*?)</title>", response.text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    playlist_title = html.unescape(
+        title_match.group(1) if title_match else "MyMuscleVideo playlist"
+    ).strip()
+    playlist_title = re.sub(
+        r"\s+Playlist\s+-\s+MyMusclevideo\.com\s*$", "",
+        playlist_title, flags=re.IGNORECASE,
+    ).strip() or "MyMuscleVideo playlist"
+
+    items = [
+        {
+            "id": f"adult:mymusclevideo:{video_url}",
+            "kind": "adult",
+            "provider": "mymusclevideo",
+            "title": title,
+            "artist": "",
+            "source": "MyMuscleVideo",
+            "duration_s": None,
+            "file_size": "",
+            "url": video_url,
+            "adult_category": CONTENT_GAY,
+            "cookies_from_browser": cookies_from_browser,
+        }
+        for video_url, title in parser.items
+    ]
+    return items, playlist_title
+
+
 def _search_thisvid(query, category):
     categorized_query, _kwargs = _search_parameters(
         PROVIDERS["thisvid"], query, category)
@@ -461,6 +600,59 @@ def _search_thisvid(query, category):
         }
         for url, title in parser.items[:MAX_RESULTS_PER_SITE]
     ]
+
+
+def _thisvid_playlist_parts(url):
+    parsed = urlparse(url)
+    if not _host_matches(parsed.hostname, ("thisvid.com",)):
+        return None
+    match = re.fullmatch(
+        r"/playlist/(\d+)/video/([^/]+)/?", parsed.path)
+    return match.groups() if match else None
+
+
+def _inspect_thisvid_playlist(url, cookies_from_browser=""):
+    playlist_id, current_slug = _thisvid_playlist_parts(url)
+    response = requests.get(url, headers={"User-Agent": _UA}, timeout=30)
+    response.raise_for_status()
+    parser = _ThisVidPlaylistParser(playlist_id)
+    parser.feed(response.text)
+    parser.close()
+
+    heading_parts = parser.heading.split(":", 1)
+    playlist_title = heading_parts[0].strip() or "ThisVid playlist"
+    current_title = (
+        heading_parts[1].strip() if len(heading_parts) == 2
+        else current_slug.replace("-", " ").title()
+    )
+    entries = [(
+        f"https://thisvid.com/videos/{current_slug}/", current_title, False,
+    )]
+    entries.extend(parser.items)
+
+    items = []
+    seen = set()
+    for video_url, title, private in entries:
+        if video_url in seen or (private and not cookies_from_browser):
+            continue
+        seen.add(video_url)
+        items.append({
+            "id": f"adult:thisvid:{video_url}",
+            "kind": "adult",
+            "provider": "thisvid",
+            "title": title,
+            "artist": "",
+            "source": "ThisVid",
+            "duration_s": None,
+            "file_size": "",
+            "url": video_url,
+            "adult_category": CONTENT_GAY,
+            "cookies_from_browser": cookies_from_browser,
+            "requires_login": private,
+        })
+    if not items:
+        raise RuntimeError("ThisVid returned no accessible playlist videos.")
+    return items, playlist_title
 
 
 def sources_by_label():
@@ -638,6 +830,8 @@ def _first_attr(obj, *names):
             if inspect.iscoroutine(value):
                 value.close()
             continue
+        if callable(value):
+            continue
         if value not in (None, "", [], ()):  # keep zero out of metadata text
             return value
     return None
@@ -672,8 +866,8 @@ def _normalize(provider, media):
     url = _first_attr(media, "url", "webpage_url", "embed_url") or ""
     title = _first_attr(media, "title", "name") or "Unknown title"
     artist = _first_attr(
-        media, "author_name", "uploader", "author", "pornstar", "pornstars",
-        "actors", "models",
+        media, "author_name", "uploader", "author", "uploader_name",
+        "pornstar", "pornstars", "actors", "models",
     ) or ""
     if isinstance(artist, (list, tuple, set)):
         artist = ", ".join(str(value) for value in artist if value)
@@ -681,6 +875,18 @@ def _normalize(provider, media):
         media, "duration", "length_seconds", "video_duration", "length",
     )
     media_id = _first_attr(media, "video_id", "id", "key") or url
+    content_values = []
+    for name in ("keywords", "tags", "categories", "pornstars_urls",
+                 "author_link"):
+        value = _first_attr(media, name)
+        if isinstance(value, dict):
+            content_values.extend(str(key) for key in value)
+            content_values.extend(str(child) for child in value.values())
+        elif isinstance(value, (list, tuple, set)):
+            content_values.extend(str(child) for child in value if child)
+        elif value:
+            content_values.append(str(value))
+    content_tags = ", ".join(content_values)
     if not url:
         return None
     return {
@@ -693,6 +899,7 @@ def _normalize(provider, media):
         "duration_s": _duration_seconds(duration),
         "file_size": "",
         "url": str(url),
+        "content_tags": str(content_tags),
     }
 
 
@@ -702,9 +909,16 @@ def _matches_content_category(item, category):
         return True
     url_path = urlparse(str(item.get("url", ""))).path
     searchable = " ".join((
-        str(item.get("title", "")), str(item.get("artist", "")), url_path,
+        str(item.get("title", "")), str(item.get("artist", "")),
+        str(item.get("content_tags", "")), url_path,
     ))
-    return _TRANS_RESULT_PATTERN.search(searchable) is None
+    if (_TRANS_RESULT_PATTERN.search(searchable)
+            or _BISEXUAL_RESULT_PATTERN.search(searchable)
+            or _FEMALE_RESULT_PATTERN.search(searchable)):
+        return False
+    if item.get("provider") in _TRUSTED_GAY_CATALOGS:
+        return True
+    return _GAY_MALE_RESULT_PATTERN.search(searchable) is not None
 
 
 def _search_parameters(provider, query, category):
@@ -883,6 +1097,13 @@ def inspect_url(url, config=None):
         return _inspect_aebn(url)
     if provider.download_style == "ytdlp":
         browser = config["cookies_from_browser"] if config is not None else ""
+        if (provider.key == "mymusclevideo"
+                and _is_mymusclevideo_playlist_url(url)):
+            return _inspect_mymusclevideo_playlist(
+                url, cookies_from_browser=browser)
+        if provider.key == "thisvid" and _thisvid_playlist_parts(url):
+            return _inspect_thisvid_playlist(
+                url, cookies_from_browser=browser)
         extracted, title = ytdlp_backend.extract_flat(
             url, cookies_from_browser=browser)
         items = []

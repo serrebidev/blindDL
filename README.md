@@ -14,10 +14,10 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Searches and downloads through all 17 EchterAlsFake `unofficial-api-for-*`
   providers. Adult features are disabled by default; enabling them adds
   separate straight, gay, lesbian, bisexual, and trans search choices.
-- Searches public ThisVid videos and downloads supported video, member, and
-  playlist URLs through yt-dlp.
-- Searches the gay-only MyMuscleVideo catalog and downloads its standard
-  public or browser-authenticated video pages.
+- Searches public ThisVid videos and expands playlist-view URLs into supported
+  public or browser-authenticated video downloads through yt-dlp.
+- Searches the gay-only MyMuscleVideo catalog and expands playlist URLs into
+  standard public or browser-authenticated video downloads.
 - Downloads straight and gay AEBN movie URLs with title, performer, duration,
   cancellation, and progress support.
 - Downloads ordinary media that the signed-in user can access from OnlyFans
@@ -78,14 +78,20 @@ Adult providers are included by the normal dependency installation and in
 packaged releases. Adult features are disabled by default. Enabling **Enable
 adult sites** in Settings adds separate Straight, Gay, Lesbian, Bisexual, and
 Trans porn choices to the Search source combo box. Search-capable providers
-can be selected in the Search sites dialog. Gay searches reject results with
-explicit trans metadata even when a provider mixes them into its gay feed.
+can be selected in the Search sites dialog. Gay searches reject explicit
+female, bisexual, and trans metadata even when a provider mixes categories;
+query-only sources must also provide positive gay/male evidence. MissAV and
+HQPorner are offered only under Straight porn because they have no reliable gay
+catalog filter.
 Beeg, Porngo, AEBN, OnlyFans, and JustForFans currently support URL downloads
-only. SpankBang and archived Sex.com are also URL-only while their public search
-pages block or no longer match their upstream parsers. BoyfriendTV URLs work
-through blindDL's native extractor. ThisVid public search and URL downloads use
-the bundled yt-dlp extractor. MyMuscleVideo is included only in Gay porn
-searches. AEBN support uses the MIT-licensed `aebn-vod-downloader`; the other
+only. SpankBang, Thumbzilla, and archived Sex.com are also URL-only while their
+public search pages block, hang, or no longer match their upstream parsers.
+BoyfriendTV URLs work through blindDL's native extractor. ThisVid public search
+and URL downloads use the bundled yt-dlp extractor. MyMuscleVideo is included
+only in Gay porn searches, and its playlist URLs expand into individual queue
+items. Entries that redirect to signup require an eligible account through
+browser cookies.
+AEBN support uses the MIT-licensed `aebn-vod-downloader`; the other
 adult API libraries retain their upstream licenses and require Python 3.12 or
 newer.
 

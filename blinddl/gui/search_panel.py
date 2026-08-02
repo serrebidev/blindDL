@@ -37,10 +37,78 @@ ADULT_ENGINE_CATEGORIES = {
     ENGINE_BISEXUAL: adult_backend.CONTENT_BISEXUAL,
     ENGINE_TRANS: adult_backend.CONTENT_TRANS,
 }
+SORT_RELEVANCE = 0
+SORT_NAME = 1
+SORT_SITE = 2
+SORT_ARTIST = 3
+SORT_SHORTEST = 4
+SORT_LONGEST = 5
+SORT_LABELS = [
+    "Relevance",
+    "Name",
+    "Site",
+    "Artist / channel",
+    "Shortest duration",
+    "Longest duration",
+]
 
 
 def _is_adult_engine(engine):
     return engine in ADULT_ENGINE_CATEGORIES
+
+
+def _sorted_results(items, mode):
+    """Return results in a stable, deterministic display order."""
+    indexed = list(enumerate(items))
+
+    def text(item, *names):
+        for name in names:
+            value = item.get(name)
+            if value:
+                return str(value).casefold()
+        return ""
+
+    def duration(item):
+        value = item.get("duration_s")
+        if value is None:
+            value = item.get("duration")
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if mode == SORT_RELEVANCE:
+        return [item for index, item in sorted(
+            indexed,
+            key=lambda pair: pair[1].get("_search_order", pair[0]),
+        )]
+    if mode == SORT_NAME:
+        key = lambda pair: (text(pair[1], "title"), pair[0])
+    elif mode == SORT_SITE:
+        key = lambda pair: (
+            text(pair[1], "source") or "youtube",
+            text(pair[1], "title"), pair[0],
+        )
+    elif mode == SORT_ARTIST:
+        key = lambda pair: (
+            text(pair[1], "artist", "uploader"),
+            text(pair[1], "title"), pair[0],
+        )
+    elif mode == SORT_SHORTEST:
+        key = lambda pair: (
+            duration(pair[1]) is None,
+            duration(pair[1]) or 0,
+            text(pair[1], "title"), pair[0],
+        )
+    elif mode == SORT_LONGEST:
+        key = lambda pair: (
+            duration(pair[1]) is None,
+            -(duration(pair[1]) or 0),
+            text(pair[1], "title"), pair[0],
+        )
+    else:
+        return list(items)
+    return [item for _index, item in sorted(indexed, key=key)]
 
 
 class SearchPanel(wx.Panel):
@@ -56,6 +124,7 @@ class SearchPanel(wx.Panel):
         self.done = False  # True once the current search hit its deadline
         self.started_at = 0.0
         self.closing = False
+        self.next_result_order = 0
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -73,6 +142,12 @@ class SearchPanel(wx.Panel):
         self.engine_choice.SetName("Search source")
         self.engine_choice.SetSelection(0)
 
+        sort_label = wx.StaticText(self, label="Sort &by:")
+        self.sort_choice = wx.Choice(self, choices=SORT_LABELS)
+        self.sort_choice.SetName("Sort search results")
+        self.sort_choice.SetSelection(SORT_RELEVANCE)
+        self.sort_choice.Bind(wx.EVT_CHOICE, self.on_sort_changed)
+
         self.search_btn = wx.Button(self, label="&Search")
         self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
 
@@ -89,6 +164,8 @@ class SearchPanel(wx.Panel):
         top = wx.BoxSizer(wx.HORIZONTAL)
         top.Add(engine_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.engine_choice, 0, wx.RIGHT, 12)
+        top.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        top.Add(self.sort_choice, 0, wx.RIGHT, 12)
         top.Add(self.search_btn, 0)
 
         sizer.Add(query_label, 0, wx.ALL, 8)
@@ -174,6 +251,7 @@ class SearchPanel(wx.Panel):
         self.asked = []
         self.done = False
         self.started_at = time.time()
+        self.next_result_order = 0
         self.timer.Stop()
         self.results_list.DeleteAllItems()
 
@@ -257,21 +335,15 @@ class SearchPanel(wx.Panel):
         self.shown_sources.add(source)
         if not items:
             return
+        selected = self._selected_result_objects()
+        focused = self._focused_result_object()
         for item in items:
-            row = self.results_list.GetItemCount()
-            self.results_list.InsertItem(row, item["title"])
-            if engine != ENGINE_YOUTUBE:
-                self.results_list.SetItem(row, 1, item.get("artist", ""))
-                self.results_list.SetItem(row, 2, item.get("source", ""))
-                self.results_list.SetItem(
-                    row, 3, ytdlp_backend.format_duration(item.get("duration_s")))
-                self.results_list.SetItem(row, 4, item.get("file_size", ""))
-            else:
-                self.results_list.SetItem(row, 1, item.get("uploader", ""))
-                self.results_list.SetItem(row, 2, "YouTube")
-                self.results_list.SetItem(
-                    row, 3, ytdlp_backend.format_duration(item.get("duration")))
+            item["_search_order"] = self.next_result_order
+            self.next_result_order += 1
             self.results.append(item)
+        self.results = _sorted_results(
+            self.results, self.sort_choice.GetSelection())
+        self._render_results(engine, selected=selected, focused=focused)
         if self.done:
             # A late site: say so on the status bar, but leave focus alone.
             self.frame.announce(
@@ -279,6 +351,53 @@ class SearchPanel(wx.Panel):
                 f"{self._pending_phrase()}")
             if not self._pending():
                 self.timer.Stop()
+
+    def _insert_result_row(self, row, item, engine):
+        self.results_list.InsertItem(row, item["title"])
+        if engine != ENGINE_YOUTUBE:
+            self.results_list.SetItem(row, 1, item.get("artist", ""))
+            self.results_list.SetItem(row, 2, item.get("source", ""))
+            self.results_list.SetItem(
+                row, 3, ytdlp_backend.format_duration(item.get("duration_s")))
+            self.results_list.SetItem(row, 4, item.get("file_size", ""))
+        else:
+            self.results_list.SetItem(row, 1, item.get("uploader", ""))
+            self.results_list.SetItem(row, 2, "YouTube")
+            self.results_list.SetItem(
+                row, 3, ytdlp_backend.format_duration(item.get("duration")))
+
+    def _selected_result_objects(self):
+        return [
+            self.results[index] for index in self._selected_indices()
+            if index < len(self.results)
+        ]
+
+    def _focused_result_object(self):
+        index = self.results_list.GetFocusedItem()
+        return self.results[index] if 0 <= index < len(self.results) else None
+
+    def _render_results(self, engine, selected=(), focused=None):
+        selected_ids = {id(item) for item in selected}
+        self.results_list.DeleteAllItems()
+        for row, item in enumerate(self.results):
+            self._insert_result_row(row, item, engine)
+            if id(item) in selected_ids:
+                self.results_list.Select(row)
+            if item is focused:
+                self.results_list.Focus(row)
+
+    def on_sort_changed(self, event):
+        selected = self._selected_result_objects()
+        focused = self._focused_result_object()
+        mode = self.sort_choice.GetSelection()
+        self.results = _sorted_results(self.results, mode)
+        self._render_results(
+            self.result_engine, selected=selected, focused=focused)
+        label = SORT_LABELS[mode] if 0 <= mode < len(SORT_LABELS) else "selected order"
+        if self.results:
+            self.frame.announce(f"Sorted {self._result_count()} by {label}.")
+        else:
+            self.frame.announce(f"Sort set to {label}.")
 
     def _pending(self):
         """Sites that were asked but have not reported back yet."""

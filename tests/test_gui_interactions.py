@@ -27,7 +27,15 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         ENGINE_LABELS,
         ENGINE_MUSIC,
         ENGINE_TRANS,
+        SORT_ARTIST,
+        SORT_LABELS,
+        SORT_LONGEST,
+        SORT_NAME,
+        SORT_RELEVANCE,
+        SORT_SHORTEST,
+        SORT_SITE,
         SearchPanel,
+        _sorted_results,
     )
     from blinddl.gui.settings_dialog import SettingsDialog
     from blinddl.gui.sources_dialog import SourcesDialog
@@ -206,6 +214,68 @@ class GuiInteractionTests(unittest.TestCase):
         panel.refresh_engine_choices()
         self.assertEqual(panel.engine_choice.GetCount(), 2)
         self.assertEqual(panel.engine_choice.GetSelection(), ENGINE_MUSIC)
+
+    def test_search_sort_choices_and_ordering(self):
+        panel = SearchPanel(self.host, self.frame)
+        self.assertEqual(
+            [panel.sort_choice.GetString(index)
+             for index in range(panel.sort_choice.GetCount())],
+            SORT_LABELS,
+        )
+        items = [
+            {"title": "Zulu", "artist": "Beta", "source": "Site B",
+             "duration_s": 90, "_search_order": 0},
+            {"title": "Alpha", "artist": "Gamma", "source": "Site A",
+             "duration_s": None, "_search_order": 1},
+            {"title": "Bravo", "artist": "Alpha", "source": "Site B",
+             "duration_s": 30, "_search_order": 2},
+        ]
+
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_RELEVANCE)],
+            ["Zulu", "Alpha", "Bravo"],
+        )
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_NAME)],
+            ["Alpha", "Bravo", "Zulu"],
+        )
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_SITE)],
+            ["Alpha", "Bravo", "Zulu"],
+        )
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_ARTIST)],
+            ["Bravo", "Zulu", "Alpha"],
+        )
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_SHORTEST)],
+            ["Bravo", "Zulu", "Alpha"],
+        )
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_LONGEST)],
+            ["Zulu", "Bravo", "Alpha"],
+        )
+
+    def test_search_sort_change_preserves_selected_result(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_MUSIC
+        panel.results = [
+            {"title": "Zulu", "source": "Two", "_search_order": 0},
+            {"title": "Alpha", "source": "One", "_search_order": 1},
+        ]
+        panel._render_results(ENGINE_MUSIC)
+        panel.results_list.Select(0)
+        panel.results_list.Focus(0)
+        panel.sort_choice.SetSelection(SORT_NAME)
+
+        panel.on_sort_changed(None)
+
+        self.assertEqual(panel.results_list.GetItemText(0), "Alpha")
+        self.assertEqual(panel.results_list.GetItemText(1), "Zulu")
+        self.assertTrue(panel.results_list.IsSelected(1))
+        self.assertEqual(panel.results_list.GetFocusedItem(), 1)
+        self.assertEqual(
+            self.frame.messages[-1], "Sorted 2 results by Name.")
 
     def test_each_adult_combo_choice_routes_its_category(self):
         panel = SearchPanel(self.host, self.frame)

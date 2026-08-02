@@ -153,23 +153,84 @@ class AdultProviderTests(unittest.TestCase):
                 self.assertTrue(adult_backend._matches_content_category(
                     item, adult_backend.CONTENT_TRANS))
 
+    def test_gay_results_exclude_female_and_mixed_metadata(self):
+        unwanted = (
+            {"provider": "eporner", "title":
+             "Hentai femdom cop cosplay - anal fingering & rimjob"},
+            {"provider": "eporner", "title": "Natalie Mars - Cop Gets Fucked",
+             "content_tags": "uniform, anal, shemale"},
+            {"provider": "eporner", "title":
+             "Amateur wife is my gay sex slave and teen boy football blowjob"},
+        )
+
+        for item in unwanted:
+            with self.subTest(item=item):
+                self.assertFalse(adult_backend._matches_content_category(
+                    item, adult_backend.CONTENT_GAY))
+
+    def test_query_based_gay_results_require_positive_male_evidence(self):
+        self.assertFalse(adult_backend._matches_content_category({
+            "provider": "eporner",
+            "title": "Ambiguous cop cosplay",
+        }, adult_backend.CONTENT_GAY))
+        self.assertFalse(adult_backend._matches_content_category({
+            "provider": "eporner",
+            "title": "Men in cop uniforms",
+        }, adult_backend.CONTENT_GAY))
+
+    def test_gay_results_exclude_bisexual_and_foreign_female_titles(self):
+        for title in (
+            "Bisexual sex in the car with daddy",
+            "Top 10 Bi Scenes - Biphoria",
+            'Thick Latina Fucks "Gay" Best Friend',
+            "HAN VAR BØG, MEN HAN VANDT MIG SOM EN RIGTIG FISSE",
+        ):
+            with self.subTest(title=title):
+                self.assertFalse(adult_backend._matches_content_category({
+                    "provider": "youporn", "title": title,
+                }, adult_backend.CONTENT_GAY))
+        self.assertTrue(adult_backend._matches_content_category({
+            "provider": "eporner",
+            "title": "Bevis and Albert",
+            "content_tags": "gay, handjob, anal",
+        }, adult_backend.CONTENT_GAY))
+
+    def test_trusted_gay_catalog_keeps_ambiguous_male_only_title(self):
+        self.assertTrue(adult_backend._matches_content_category({
+            "provider": "mymusclevideo",
+            "title": "Must have been cold in the room",
+        }, adult_backend.CONTENT_GAY))
+
     def test_gay_filter_keeps_gender_expression_terms(self):
         for title in ("Gay femboy massage", "Sissy men together",
                       "Crossdresser boyfriend"):
             with self.subTest(title=title):
                 self.assertTrue(adult_backend._matches_content_category(
-                    {"title": title}, adult_backend.CONTENT_GAY))
+                    {"provider": "mymusclevideo", "title": title},
+                    adult_backend.CONTENT_GAY))
 
         self.assertTrue(adult_backend._matches_content_category({
+            "provider": "mymusclevideo",
             "title": "Gay massage",
             "url": "https://example.invalid/video?ts=123456",
         }, adult_backend.CONTENT_GAY))
+
+    def test_missav_is_not_offered_outside_straight_search(self):
+        for key in ("missav", "hqporner"):
+            with self.subTest(provider=key):
+                self.assertEqual(
+                    adult_backend.PROVIDERS[key].search_categories,
+                    (adult_backend.CONTENT_STRAIGHT,),
+                )
 
     def test_pornhub_search_loads_api_metadata(self):
         kwargs = adult_backend.PROVIDERS["pornhub"].search_kwargs
 
         self.assertTrue(kwargs["load_api"])
         self.assertFalse(kwargs["load_html"])
+
+    def test_nonresponsive_thumbzilla_search_is_not_advertised(self):
+        self.assertIsNone(adult_backend.PROVIDERS["thumbzilla"].search_method)
 
     def test_normalize_unwraps_common_video_metadata(self):
         video = types.SimpleNamespace(
@@ -185,6 +246,23 @@ class AdultProviderTests(unittest.TestCase):
         self.assertEqual(item["artist"], "One, Two")
         self.assertEqual(item["duration_s"], 125)
         self.assertEqual(item["provider"], "pornhub")
+
+    def test_normalize_skips_callable_author_and_keeps_loaded_context(self):
+        video = types.SimpleNamespace(
+            url="https://example.invalid/video",
+            video_id="42",
+            title="Example",
+            author=lambda: "not loaded",
+            uploader_name="Actual creator",
+            categories=["gay"],
+            pornstars_urls=["/gay/pornstar/example/"],
+        )
+
+        item = adult_backend._normalize(
+            adult_backend.PROVIDERS["youporn"], video)
+
+        self.assertEqual(item["artist"], "Actual creator")
+        self.assertIn("gay", item["content_tags"])
 
     def test_boyfriendtv_extracts_highest_public_media_definition(self):
         page = """
@@ -282,6 +360,54 @@ class AdultProviderTests(unittest.TestCase):
                 timeout=30,
             )
 
+    def test_thisvid_playlist_expands_public_entries_without_cookies(self):
+        page = """
+            <h1>Leather: Current Video</h1>
+            <a class="tumbpu"
+               href="https://thisvid.com/playlist/102612/video/public-video/"
+               title="Public video"><span class="thumb"></span></a>
+            <a class="tumbpu"
+               href="https://thisvid.com/playlist/102612/video/private-video/"
+               title="Private video"><span class="thumb private">
+               <img alt="Private"></span></a>
+        """
+        url = "https://thisvid.com/playlist/102612/video/current-video/"
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response(page)) as get, mock.patch.object(
+                    adult_backend.ytdlp_backend, "extract_flat") as extract:
+            items, title = adult_backend.inspect_url(url)
+
+        get.assert_called_once_with(
+            url, headers={"User-Agent": adult_backend._UA}, timeout=30)
+        extract.assert_not_called()
+        self.assertEqual(title, "Leather")
+        self.assertEqual(
+            [item["title"] for item in items],
+            ["Current Video", "Public video"],
+        )
+        self.assertFalse(any(item["requires_login"] for item in items))
+
+    def test_thisvid_playlist_includes_private_entries_with_cookies(self):
+        page = """
+            <h1>Leather: Current Video</h1>
+            <a class="tumbpu"
+               href="/playlist/102612/video/private-video/"
+               title="Private video"><span class="thumb private"></span></a>
+        """
+        url = "https://thisvid.com/playlist/102612/video/current-video/"
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response(page)):
+            items, _title = adult_backend.inspect_url(
+                url, config={"cookies_from_browser": "chrome"})
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual(
+            items[1]["url"], "https://thisvid.com/videos/private-video/")
+        self.assertTrue(items[1]["requires_login"])
+        self.assertEqual(items[1]["cookies_from_browser"], "chrome")
+
     def test_mymusclevideo_parser_normalizes_unique_titled_links(self):
         page = """
             <a href="/123/first-video/" title="First video"></a>
@@ -312,6 +438,38 @@ class AdultProviderTests(unittest.TestCase):
             headers={"User-Agent": adult_backend._UA},
             timeout=30,
         )
+
+    def test_mymusclevideo_playlist_url_expands_to_queue_items(self):
+        page = """
+            <title>cop Playlist - MyMusclevideo.com</title>
+            <a href="/38947/leather-muscle-pig/"
+               title="LEATHER MUSCLE PIG !"></a>
+            <a href="/40665/sexy-cop-1/" title="Sexy Cop 1"></a>
+        """
+        url = "https://mymusclevideo.com/playlist/17311/cop/"
+        config = {"cookies_from_browser": "firefox"}
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response(page)) as get, mock.patch.object(
+                    adult_backend.ytdlp_backend, "extract_flat") as extract:
+            items, title = adult_backend.inspect_url(url, config=config)
+
+        get.assert_called_once_with(
+            url, headers={"User-Agent": adult_backend._UA}, timeout=30)
+        extract.assert_not_called()
+        self.assertEqual(title, "cop")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["title"], "LEATHER MUSCLE PIG !")
+        self.assertEqual(items[0]["adult_category"], adult_backend.CONTENT_GAY)
+        self.assertEqual(items[0]["cookies_from_browser"], "firefox")
+
+    def test_mymusclevideo_empty_playlist_has_clear_error(self):
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response("<title>Empty</title>")):
+            with self.assertRaisesRegex(RuntimeError, "no public videos"):
+                adult_backend.inspect_url(
+                    "https://mymusclevideo.com/playlist/1/empty/")
 
     def test_search_skips_gay_only_provider_for_other_categories(self):
         with mock.patch.object(
