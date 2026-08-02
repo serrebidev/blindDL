@@ -1,0 +1,10 @@
+# Copyright (c) serrebidev and contributors
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=blindDL
+Comment=Accessible media downloader
+Exec=blinddl
+Terminal=false
+Categories=AudioVideo;Audio;Network;
+StartupNotify=true

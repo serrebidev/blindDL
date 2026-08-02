@@ -1,0 +1,41 @@
+# Copyright (c) serrebidev and contributors
+# This file is part of blindDL.
+# SPDX-License-Identifier: MIT
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: License and secret audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Reject committed ARL credentials
+        run: python scripts/check_no_arl.py
+      - name: Scan for other secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify Python syntax
+        run: python -m compileall -q main.py blinddl scripts tools tests
+      - name: Verify SPDX headers
+        run: |
+          missing="$(find blinddl scripts tools tests -name '*.py' -type f -print0 | xargs -0 grep -L 'SPDX-License-Identifier: MIT' || true)"
+          if [ -n "$missing" ]; then
+            printf 'Missing MIT SPDX header:\n%s\n' "$missing" >&2
+            exit 1
+          fi

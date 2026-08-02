@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test and analysis caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Builds and release artifacts
+build/
+dist/
+release/
+
+# Local application and smoke-test data
+.dlhistory
+.smoke_*/
+*.log
+*.pkl
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.wav
+config.json
+subscriptions.json
+cookies.txt
+.env
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

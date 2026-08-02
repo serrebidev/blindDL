@@ -1,0 +1,13 @@
+wxPython>=4.2; platform_system != "Linux"
+# The updater keeps yt-dlp on the nightly (pre-release) builds; this is
+# just the baseline for a fresh install.
+yt-dlp>=2025.1.1
+musicdl>=2.5.0
+sideb @ git+https://github.com/mosaddiqdev/sideb
+requests>=2.32
+mutagen>=1.47
+pycryptodome>=3.20
+platformdirs>=4.3
+# Avoid known PyInstaller hook warnings in newer mypyc/packaging layouts.
+chardet>=7,<7.4
+pycparser>=2.23,<3
