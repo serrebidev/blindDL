@@ -78,7 +78,8 @@ Adult providers are included by the normal dependency installation and in
 packaged releases. Adult features are disabled by default. Enabling **Enable
 adult sites** in Settings adds separate Straight, Gay, Lesbian, Bisexual, and
 Trans porn choices to the Search source combo box. Search-capable providers
-can be selected in the Search sites dialog.
+can be selected in the Search sites dialog. Gay searches reject results with
+explicit trans metadata even when a provider mixes them into its gay feed.
 Beeg, Porngo, AEBN, OnlyFans, and JustForFans currently support URL downloads
 only. SpankBang and archived Sex.com are also URL-only while their public search
 pages block or no longer match their upstream parsers. BoyfriendTV URLs work

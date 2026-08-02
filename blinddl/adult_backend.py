@@ -92,6 +92,17 @@ XHAMSTER_CONTENT_PATHS = {
     CONTENT_TRANS: "shemale/search/",
 }
 
+# Some sites mix explicitly trans-tagged videos into their nominal gay feeds.
+# Keep this deliberately limited to unambiguous metadata terms: gender
+# expression such as "femboy" or "crossdresser" is not itself trans content.
+_TRANS_RESULT_PATTERN = re.compile(
+    r"(?ix)\b(?:"
+    r"shemales?|tranny|trannies|trans|transgender(?:ed)?|transsexuals?|"
+    r"trans(?:woman|women|man|men|girl|girls|boy|boys)|"
+    r"ladyboys?|t[-\s]?girls?|futanari|ftm|mtf|ts"
+    r")\b"
+)
+
 
 # All repositories explicitly named unofficial-api-for-* on the upstream
 # account as of 2026-08-02, plus ThisVid through yt-dlp and native public-page
@@ -685,6 +696,17 @@ def _normalize(provider, media):
     }
 
 
+def _matches_content_category(item, category):
+    """Enforce category boundaries when a site's own feed is imprecise."""
+    if category != CONTENT_GAY:
+        return True
+    url_path = urlparse(str(item.get("url", ""))).path
+    searchable = " ".join((
+        str(item.get("title", "")), str(item.get("artist", "")), url_path,
+    ))
+    return _TRANS_RESULT_PATTERN.search(searchable) is None
+
+
 def _search_parameters(provider, query, category):
     """Return a category-aware query and provider keyword arguments."""
     if category not in CONTENT_CATEGORIES:
@@ -808,6 +830,10 @@ def search(query, timeout_s=10.0, on_site=None, stop=None, sources=None,
                 with _silence_provider_logging():
                     items = asyncio.run(
                         _collect_search(provider, query, stop, category))
+                items = [
+                    item for item in items
+                    if _matches_content_category(item, category)
+                ]
             except Exception:  # noqa: BLE001 - one provider cannot kill the rest
                 items = []
         with found_lock:

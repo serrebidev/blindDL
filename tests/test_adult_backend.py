@@ -137,6 +137,34 @@ class AdultProviderTests(unittest.TestCase):
 
         self.assertEqual(query, "gay massage")
 
+    def test_gay_results_exclude_explicit_trans_metadata(self):
+        trans_results = (
+            {"title": "Asian shemale massage", "artist": "", "url": ""},
+            {"title": "Massage", "artist": "Trans Woman", "url": ""},
+            {"title": "Massage", "artist": "", "url": "/ladyboy/video/"},
+            {"title": "FTM men together", "artist": "", "url": ""},
+            {"title": "T-girl massage", "artist": "", "url": ""},
+        )
+
+        for item in trans_results:
+            with self.subTest(item=item):
+                self.assertFalse(adult_backend._matches_content_category(
+                    item, adult_backend.CONTENT_GAY))
+                self.assertTrue(adult_backend._matches_content_category(
+                    item, adult_backend.CONTENT_TRANS))
+
+    def test_gay_filter_keeps_gender_expression_terms(self):
+        for title in ("Gay femboy massage", "Sissy men together",
+                      "Crossdresser boyfriend"):
+            with self.subTest(title=title):
+                self.assertTrue(adult_backend._matches_content_category(
+                    {"title": title}, adult_backend.CONTENT_GAY))
+
+        self.assertTrue(adult_backend._matches_content_category({
+            "title": "Gay massage",
+            "url": "https://example.invalid/video?ts=123456",
+        }, adult_backend.CONTENT_GAY))
+
     def test_pornhub_search_loads_api_metadata(self):
         kwargs = adult_backend.PROVIDERS["pornhub"].search_kwargs
 
