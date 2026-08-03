@@ -91,6 +91,27 @@ VIDEO_PREFERENCE = (".mp4", ".m4v", ".webm", ".ogv", ".mkv", ".avi", ".mpeg",
 _SKIP_NAMES = re.compile(r"(_thumb|_itemimage|__ia_thumb|_512kb\.mp4$)",
                          re.IGNORECASE)
 
+# The Archive names formats for people ("VBR MP3", "512Kb MPEG4"), so the
+# search rows are read back through these needles rather than a file name.
+# item_files() still decides the real download; this is the same preference
+# order, so what a result says is what arrives.
+_FORMAT_NAMES = (
+    (".mp3", ("mp3",)),
+    (".m4a", ("m4a", "aac")),
+    (".m4b", ("m4b",)),
+    (".ogg", ("ogg vorbis", "ogg audio")),
+    (".opus", ("opus",)),
+    (".flac", ("flac",)),
+    (".wav", ("wave", "wav")),
+    (".mp4", ("mpeg4", "mp4", "h.264", "h264")),
+    (".m4v", ("m4v",)),
+    (".webm", ("webm",)),
+    (".ogv", ("ogg video", "ogv", "theora")),
+    (".mkv", ("matroska", "mkv")),
+    (".avi", ("avi",)),
+    (".mpeg", ("mpeg2", "mpeg1", "mpeg")),
+)
+
 _session_lock = threading.Lock()
 _session = None
 
@@ -132,22 +153,38 @@ def is_video_category(source):
 # -- search ----------------------------------------------------------------
 
 
+def _best_format(formats, video):
+    """The file type item_files() will pick, read off the search row."""
+    listed = " | ".join(str(name).casefold() for name in formats or ()
+                        if name)
+    if not listed:
+        return ""
+    available = {extension for extension, needles in _FORMAT_NAMES
+                 if any(needle in listed for needle in needles)}
+    for extension in (VIDEO_PREFERENCE if video else AUDIO_PREFERENCE):
+        if extension in available:
+            return extension.lstrip(".").upper()
+    return ""
+
+
 def _item(source, doc):
     identifier = doc.get("identifier")
     creator = doc.get("creator")
     if isinstance(creator, list):
         creator = ", ".join(str(part) for part in creator if part)
     size = int(doc.get("item_size") or 0)
+    video = is_video_category(source)
     return {
         "id": f"archive:{identifier}",
         "kind": "archive",
+        "format": _best_format(doc.get("format"), video),
         "title": str(doc.get("title") or identifier or "Untitled").strip(),
         # The results list shows creators in its artist column.
         "artist": str(creator or "").strip(),
         "creator": str(creator or "").strip(),
         "source": source,
         "identifier": identifier,
-        "video": is_video_category(source),
+        "video": video,
         "year": str(doc.get("year") or ""),
         "size_bytes": size,
         "file_size": format_size(size),
@@ -163,7 +200,7 @@ def search_category(source, query, timeout=HTTP_TIMEOUT_S):
         params={
             "q": f"({escaped}) AND {CATEGORY_QUERIES[source]}",
             "fl[]": ["identifier", "title", "creator", "year", "item_size",
-                     "downloads", "mediatype"],
+                     "downloads", "mediatype", "format"],
             "rows": SEARCH_ROWS,
             "page": 1,
             "output": "json",
@@ -280,6 +317,7 @@ def item_files(identifier, video=False, timeout=HTTP_TIMEOUT_S):
                 size = 0
             rows.append({
                 "kind": "archive",
+                "format": extension.lstrip(".").upper(),
                 "title": str(entry.get("title") or
                              os.path.splitext(os.path.basename(name))[0]),
                 "artist": str(entry.get("creator") or ""),

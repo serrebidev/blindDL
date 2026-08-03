@@ -52,3 +52,15 @@ def open_file(path: str) -> None:
     blindDL would have to grow.
     """
     _open(path)
+
+
+def open_magnet(magnet: str) -> None:
+    """Hand a magnet link to the user's default BitTorrent client.
+
+    Same reasoning as open_file: the client the user already runs knows
+    where their downloads go and how they seed, so blindDL passes the link
+    to the registered magnet: handler rather than moving the bytes itself.
+    """
+    if not str(magnet or "").startswith("magnet:"):
+        raise RuntimeError("That is not a magnet link.")
+    _open(magnet)

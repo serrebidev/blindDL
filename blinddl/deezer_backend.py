@@ -37,11 +37,14 @@ _KEY_SECRET = b"g4el58wc0zvf9na1"
 _CHUNK = 2048
 HTTP_TIMEOUT_S = 30
 
-# Preference order per blindDL audio-format setting: flac gets lossless
-# first, everything else gets MP3 320. No silent drop to 128 kbps -- if
-# the account cannot serve these, the caller falls back to Side B.
+# Preference order per blindDL audio-format setting: flac and "original"
+# get lossless first, everything else gets MP3 320. No silent drop to
+# 128 kbps -- if the account cannot serve these, the caller falls back to
+# Side B.
 _PREFERRED_FORMATS = {
     "flac": ["FLAC", "MP3_320"],
+    # Deezer's own master is the FLAC, so "no conversion" means taking it.
+    "original": ["FLAC", "MP3_320"],
 }
 _DEFAULT_FORMATS = ["MP3_320"]
 

@@ -2,7 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Pick which music, book, audiobook and adult sites a search covers.
+"""Pick which music, book, audiobook, torrent and adult sites a search covers.
 
 Every site musicdl registers is listed, all of them on by default. The
 config stores the switched-off ones, so sites added by a later musicdl
@@ -13,7 +13,7 @@ import wx
 
 from .. import (
     adult_backend, archive_backend, audiobook_backend, book_backend,
-    musicdl_backend,
+    musicdl_backend, torrent_backend,
 )
 
 NEEDS_ACCOUNT = " (account required)"
@@ -113,6 +113,28 @@ class SourcesDialog(wx.Dialog):
         if self.archive_sources:
             self.archive_check_list.SetSelection(0)
 
+        # Includes the user's own feeds, so a private tracker reached through
+        # Prowlarr or Jackett switches off like any other indexer.
+        self.torrent_sources = torrent_backend.sources_by_label(config)
+        self.torrent_check_list = wx.CheckListBox(
+            self,
+            choices=[torrent_backend.source_label(source)
+                     for source in self.torrent_sources],
+        )
+        self.torrent_check_list.SetName("Torrent indexers")
+        self.torrent_check_list.SetHelpText(
+            "Space toggles an indexer. Context Menu selects or clears all.")
+        disabled_torrents = set(config["disabled_torrent_sources"])
+        for index, source in enumerate(self.torrent_sources):
+            self.torrent_check_list.Check(index, source not in disabled_torrents)
+        self.torrent_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
+        self.torrent_check_list.Bind(
+            wx.EVT_CONTEXT_MENU,
+            lambda event: self.on_context_menu(event, self.torrent_check_list),
+        )
+        if self.torrent_sources:
+            self.torrent_check_list.SetSelection(0)
+
         disabled_adult = set(config["disabled_adult_sources"])
         self.adult_check_list = self._create_adult_list(
             self.adult_sources, adult_unavailable, disabled_adult,
@@ -136,6 +158,9 @@ class SourcesDialog(wx.Dialog):
             self, label="&Internet Archive collections:")
         sizer.Add(archive_label, 0, wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.archive_check_list, 1, wx.EXPAND | wx.ALL, 8)
+        torrent_label = wx.StaticText(self, label="&Torrent indexers:")
+        sizer.Add(torrent_label, 0, wx.LEFT | wx.RIGHT, 8)
+        sizer.Add(self.torrent_check_list, 1, wx.EXPAND | wx.ALL, 8)
         adult_label = wx.StaticText(self, label="&Adult sites:")
         sizer.Add(adult_label, 0, wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.adult_check_list, 1, wx.EXPAND | wx.ALL, 8)
@@ -190,6 +215,10 @@ class SourcesDialog(wx.Dialog):
         return sum(1 for index in range(len(self.archive_sources))
                    if self.archive_check_list.IsChecked(index))
 
+    def _torrent_checked_count(self):
+        return sum(1 for index in range(len(self.torrent_sources))
+                   if self.torrent_check_list.IsChecked(index))
+
     def _update_count(self):
         self.count_text.SetLabel(
             f"{self._checked_count()} of {len(self.sources)} music sites, "
@@ -197,7 +226,9 @@ class SourcesDialog(wx.Dialog):
             f"libraries, {self._audiobook_checked_count()} of "
             f"{len(self.audiobook_sources)} audiobook sites, "
             f"{self._archive_checked_count()} of {len(self.archive_sources)} "
-            f"Archive collections and {self._adult_checked_count()} of "
+            f"Archive collections, {self._torrent_checked_count()} of "
+            f"{len(self.torrent_sources)} torrent indexers and "
+            f"{self._adult_checked_count()} of "
             f"{len(self.adult_sources)} adult sites selected.")
 
     def _set_all(self, control, checked):
@@ -238,6 +269,9 @@ class SourcesDialog(wx.Dialog):
         self.config["disabled_archive_sources"] = [
             source for index, source in enumerate(self.archive_sources)
             if not self.archive_check_list.IsChecked(index)]
+        self.config["disabled_torrent_sources"] = [
+            source for index, source in enumerate(self.torrent_sources)
+            if not self.torrent_check_list.IsChecked(index)]
         self.config.save()
 
     def summary(self):
@@ -245,6 +279,7 @@ class SourcesDialog(wx.Dialog):
             f"{self._checked_count()} music sites, "
             f"{self._book_checked_count()} book libraries, "
             f"{self._audiobook_checked_count()} audiobook sites, "
-            f"{self._archive_checked_count()} Archive collections and "
+            f"{self._archive_checked_count()} Archive collections, "
+            f"{self._torrent_checked_count()} torrent indexers and "
             f"{self._adult_checked_count()} adult sites selected."
         )

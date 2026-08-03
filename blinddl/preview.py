@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from . import (
     adult_backend, archive_backend, audiobook_backend, sideb_backend,
-    ytdlp_backend,
+    torrent_backend, ytdlp_backend,
 )
 
 DIRECT_MEDIA_EXTENSIONS = {
@@ -54,6 +54,12 @@ def result_url(item):
     than a short-lived CDN stream. Music results carry no page URL, so their
     download URL is the only thing worth copying.
     """
+    if item.get("kind") == "torrent":
+        # The magnet is the useful thing to paste into a torrent client; the
+        # indexer's own page is not what anyone copies a torrent for.
+        magnet = torrent_backend.magnet_for(item)
+        if magnet:
+            return magnet
     for key in ("url", "direct_url"):
         found = _first_http_url(item.get(key))
         if found:

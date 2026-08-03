@@ -14,6 +14,31 @@ import re
 
 import yt_dlp
 
+# The audio_format / video_format value meaning "leave the file alone".
+ORIGINAL_FORMAT = "original"
+
+# yt-dlp's audio-quality scale runs 0 (best) to 10 (worst) and is remapped
+# per encoder, so one number asks every lossy codec for its top VBR setting:
+# -q:a 0 for LAME, which is V0, and the equivalent for AAC and Vorbis. It is
+# ignored when the source already is the requested codec -- that stays a
+# lossless copy -- and for FLAC and WAV, which have no lossy setting.
+AUDIO_QUALITY = "0"
+
+# Opus is the one lossy codec yt-dlp's scale does not cover, so it would fall
+# to libopus's own default of roughly 96 kbps. ffmpeg's libopus encoder has
+# no minrate/maxrate of its own -- it takes them and ignores them -- so the
+# wanted 160-400 kbps band is set as an unconstrained VBR target in the
+# middle of it, which is where real music then floats.
+AUDIO_EXTRA_ARGS = {"opus": ("-vbr", "on", "-b:a", "256k")}
+
+# Long-term-storage preset: HEVC at a visually near-transparent CRF, with the
+# original audio copied across untouched. hvc1 is the tag Apple players need
+# before they will open HEVC in MP4.
+X265_ARGS = (
+    "-c:v", "libx265", "-crf", "24", "-preset", "medium",
+    "-tag:v", "hvc1", "-c:a", "copy",
+)
+
 
 class DownloadCancelled(Exception):
     """Raised inside progress hooks when the user cancels a download."""
@@ -197,9 +222,14 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
 
 
 def download(url, out_dir, audio_only=True, audio_format="mp3",
-             progress_cb=None, cancel_event=None, http_headers=None,
-             cookies_from_browser=None):
-    """Download one URL. progress_cb receives yt-dlp progress dicts."""
+             video_format="mp4", progress_cb=None, cancel_event=None,
+             http_headers=None, cookies_from_browser=None):
+    """Download one URL. progress_cb receives yt-dlp progress dicts.
+
+    audio_format and video_format both accept "original", which means the
+    file is kept in whatever container the site serves: no ffmpeg pass, so
+    nothing is re-encoded and the download finishes as soon as the bytes do.
+    """
     os.makedirs(out_dir, exist_ok=True)
 
     def hook(d):
@@ -224,13 +254,44 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     if audio_only:
         opts["format"] = "bestaudio/best"
-        opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": audio_format,
-        }]
+        if audio_format and audio_format != ORIGINAL_FORMAT:
+            opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": audio_format,
+                "preferredquality": AUDIO_QUALITY,
+            }]
+            extra = AUDIO_EXTRA_ARGS.get(audio_format)
+            if extra:
+                opts["postprocessor_args"] = {"extractaudio": list(extra)}
     else:
+        # Always the best streams the site has, whatever they are encoded in;
+        # the container is settled afterwards so nothing is thrown away to
+        # satisfy it.
         opts["format"] = "bestvideo+bestaudio/best"
-        opts["merge_output_format"] = "mp4"
+        if video_format in ("mp4", "mkv"):
+            # A remux, not a re-encode: the picture and sound are the site's
+            # own, moved into the container the user asked for.
+            opts["merge_output_format"] = video_format
+        elif video_format == "avi":
+            # AVI cannot hold the codecs modern sites stream, so this one is
+            # a real conversion. yt-dlp supplies the Xvid settings itself.
+            opts["postprocessors"] = [{
+                "key": "FFmpegVideoConvertor",
+                "preferedformat": "avi",
+            }]
+        elif video_format == "x265":
+            # Merging into Matroska first guarantees the convertor has
+            # something to convert -- MP4 merges can silently fall back to
+            # mkv, and yt-dlp skips a conversion that is already in target
+            # format. Audio is copied, so only the picture is re-encoded.
+            opts["merge_output_format"] = "mkv"
+            opts["postprocessors"] = [{
+                "key": "FFmpegVideoConvertor",
+                "preferedformat": "mp4",
+            }]
+            opts["postprocessor_args"] = {"videoconvertor": list(X265_ARGS)}
+        # "original" (and anything unrecognized) leaves the container to
+        # yt-dlp, which keeps the streams as they came.
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])

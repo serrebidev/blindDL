@@ -509,10 +509,10 @@ class AdultProviderTests(unittest.TestCase):
         }
         with mock.patch.object(
                 adult_backend.ytdlp_backend, "download") as download:
-            adult_backend.download(payload, "output")
+            adult_backend.download(payload, "output", video_format="mkv")
 
         download.assert_called_once_with(
-            payload["url"], "output", audio_only=False,
+            payload["url"], "output", audio_only=False, video_format="mkv",
             progress_cb=None, cancel_event=None,
             cookies_from_browser=None,
         )

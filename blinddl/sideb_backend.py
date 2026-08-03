@@ -109,7 +109,8 @@ def _settings(config, out_dir=None):
         output_dir=Path(out_dir or config["download_dir"]),
         # sideb keeps YouTube's native container (opus, remuxed to .ogg, or
         # m4a) and does not transcode; blindDL's other audio formats are
-        # yt-dlp-only, so they map to opus here.
+        # yt-dlp-only, so they map to opus here -- which is also what
+        # "original" asks for.
         audio_format="m4a" if config["audio_format"] == "m4a" else "opus",
         enable_lyrics=bool(config["sideb_lyrics"]),
         deezer_arl=config["deezer_arl"] or None,

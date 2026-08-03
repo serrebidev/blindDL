@@ -152,11 +152,28 @@ def _item(source, identifier, title, author, **extra):
         "chapters": 0,
         "streams": [],
         "url": "",
+        "format": "",
     }
     item.update(extra)
     if item["size_bytes"] and not item["file_size"]:
         item["file_size"] = format_size(item["size_bytes"])
+    if not item["format"]:
+        item["format"] = _stream_format(item["streams"])
     return item
+
+
+def _stream_format(streams):
+    """The file type the chapters will arrive as, named for a reader.
+
+    download() falls back to .mp3 for a stream whose URL hides the
+    extension, so the search row says the same thing the file will be.
+    """
+    for url in streams or ():
+        name = unquote(os.path.basename(urlparse(str(url)).path))
+        extension = os.path.splitext(name)[1].lower()
+        if extension in AUDIO_EXTENSIONS:
+            return extension.lstrip(".").upper()
+    return "MP3"
 
 
 def _name(person):

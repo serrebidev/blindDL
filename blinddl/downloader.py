@@ -22,6 +22,7 @@ from . import (
     deezer_backend,
     musicdl_backend,
     sideb_backend,
+    torrent_backend,
     ytdlp_backend,
 )
 
@@ -47,13 +48,17 @@ def format_speed(bytes_per_second):
 
 
 class DownloadItem:
-    def __init__(self, title, kind, payload, audio_only=True, audio_format="mp3"):
+    def __init__(self, title, kind, payload, audio_only=True,
+                 audio_format="mp3", video_format="mp4"):
         self.id = uuid.uuid4().hex
         self.title = title
-        self.kind = kind  # "ytdlp", "musicdl", "sideb", "adult" or "book"
-        self.payload = payload  # URL string, or musicdl SongInfo
+        # "ytdlp", "musicdl", "sideb", "adult", "book", "audiobook",
+        # "archive" or "torrent"
+        self.kind = kind
+        self.payload = payload  # URL string, musicdl SongInfo, or result dict
         self.audio_only = audio_only
         self.audio_format = audio_format
+        self.video_format = video_format
         self.status = STATUS_QUEUED
         self.percent = 0.0
         self.speed = ""
@@ -109,7 +114,8 @@ class DownloadQueue:
             audio_only = self.config["audio_only"]
         item = DownloadItem(title=title, kind="ytdlp", payload=url,
                             audio_only=audio_only,
-                            audio_format=self.config["audio_format"])
+                            audio_format=self.config["audio_format"],
+                            video_format=self.config["video_format"])
         self.add(item)
         return item
 
@@ -125,7 +131,8 @@ class DownloadQueue:
 
     def add_adult(self, payload, title):
         item = DownloadItem(title=title, kind="adult", payload=payload,
-                            audio_only=False)
+                            audio_only=False,
+                            video_format=self.config["video_format"])
         self.add(item)
         return item
 
@@ -137,6 +144,12 @@ class DownloadQueue:
 
     def add_audiobook(self, payload, title):
         item = DownloadItem(title=title, kind="audiobook", payload=payload)
+        self.add(item)
+        return item
+
+    def add_torrent(self, payload, title):
+        item = DownloadItem(title=title, kind="torrent", payload=payload,
+                            audio_only=False)
         self.add(item)
         return item
 
@@ -212,6 +225,8 @@ class DownloadQueue:
                     self._run_audiobook(item)
                 elif item.kind == "archive":
                     self._run_archive(item)
+                elif item.kind == "torrent":
+                    self._run_torrent(item)
                 else:
                     self._run_musicdl(item)
                 item.percent = 100.0
@@ -241,6 +256,7 @@ class DownloadQueue:
             self.config["download_dir"],
             audio_only=item.audio_only,
             audio_format=item.audio_format,
+            video_format=item.video_format,
             progress_cb=progress,
             cancel_event=item.cancel_event,
             cookies_from_browser=self.config["cookies_from_browser"],
@@ -302,7 +318,7 @@ class DownloadQueue:
 
         adult_backend.download(
             item.payload, self.config["download_dir"], progress_cb=progress,
-            cancel_event=item.cancel_event)
+            cancel_event=item.cancel_event, video_format=item.video_format)
 
     def _run_book(self, item):
         started = time.monotonic()
@@ -357,6 +373,17 @@ class DownloadQueue:
         archive_backend.download(
             item.payload, self.config["download_dir"], progress_cb=progress,
             cancel_event=item.cancel_event)
+
+    def _run_torrent(self, item):
+        # blindDL does not move torrent bytes; the user's own client does.
+        # Handing over the magnet is the whole job, so this finishes at once
+        # and the queue row records that the link went out.
+        item.speed = "Opening torrent client"
+        self._notify(item)
+        # out_dir is where a private tracker's .torrent lands when the row
+        # carries no magnet; a magnet never touches the disk.
+        torrent_backend.hand_off(item.payload, self.config["download_dir"])
+        item.speed = ""
 
     def _run_deezer(self, item):
         started = time.monotonic()

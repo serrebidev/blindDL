@@ -1335,12 +1335,18 @@ def _download_aebn(payload, out_dir, progress_cb=None, cancel_event=None):
         raise ytdlp_backend.DownloadCancelled()
 
 
-def download(payload, out_dir, progress_cb=None, cancel_event=None):
-    """Download a normalized adult item with progress and cancellation."""
+def download(payload, out_dir, progress_cb=None, cancel_event=None,
+             video_format="mp4"):
+    """Download a normalized adult item with progress and cancellation.
+
+    video_format only reaches the providers that go through yt-dlp; the
+    others hand back a finished file that is already in its own container.
+    """
     provider_key = payload["provider"]
     if provider_key == BOYFRIEND_KEY:
         ytdlp_backend.download(
             payload["direct_url"], out_dir, audio_only=False,
+            video_format=video_format,
             progress_cb=progress_cb, cancel_event=cancel_event,
             http_headers={"Referer": payload["referer"], "User-Agent": _UA},
         )
@@ -1361,6 +1367,7 @@ def download(payload, out_dir, progress_cb=None, cancel_event=None):
     if provider.download_style == "ytdlp":
         ytdlp_backend.download(
             payload["url"], out_dir, audio_only=False,
+            video_format=video_format,
             progress_cb=progress_cb, cancel_event=cancel_event,
             cookies_from_browser=payload.get("cookies_from_browser"),
         )

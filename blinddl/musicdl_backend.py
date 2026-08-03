@@ -249,6 +249,9 @@ def _normalize(source, songs):
             "source": _short_source(source),
             "duration_s": song.duration_s,
             "file_size": song.file_size or "",
+            # What the site actually serves, so the results list can say so
+            # before anything is downloaded.
+            "format": str(song.ext or "").lstrip(".").upper(),
             "song_info": song,
         })
     return items

@@ -24,8 +24,14 @@ DEFAULTS = {
     "download_dir": os.path.join(os.path.expanduser("~"), "Music", APP_NAME),
     # Prefer audio-only extraction (via ffmpeg) over full video.
     "audio_only": True,
-    # Audio container/codec used when audio_only is on: mp3, m4a, flac, wav, opus...
+    # Audio container/codec used when audio_only is on: mp3, m4a, flac, wav,
+    # opus... "original" keeps whatever the site already serves, so nothing is
+    # re-encoded and no quality is lost.
     "audio_format": "mp3",
+    # Container used when a full video is downloaded: mp4, mkv, avi, x265
+    # (re-encoded small for long-term storage), or "original" to keep
+    # whatever container the streams come in.
+    "video_format": "mp4",
     # Maximum simultaneous downloads. No hard cap beyond this user setting.
     "max_concurrent": 4,
     # Seconds a music search waits for each site before giving up on it.
@@ -46,6 +52,13 @@ DEFAULTS = {
     # Internet Archive media collections the user switched off, by
     # archive_backend category name.
     "disabled_archive_sources": [],
+    # Torrent indexers the user switched off, by torrent_backend source name.
+    "disabled_torrent_sources": [],
+    # The user's own indexer feeds, each {"name", "url", "api_key"}. One
+    # entry can be a whole Prowlarr or Jackett instance, which is how private
+    # trackers are reached: that tool already holds the login and the passkey,
+    # so blindDL never stores a tracker password of its own.
+    "torznab_feeds": [],
     # Anna's Archive membership key. Empty means downloads are resolved
     # through the public LibGen mirrors instead of the fast partner servers.
     "annas_archive_key": "",
@@ -64,6 +77,11 @@ DEFAULTS = {
     "deezer_arl": "",
     # Embed synced lyrics into Side B (Deezer) downloads.
     "sideb_lyrics": True,
+    # Closing the window hides blindDL in the system tray instead of exiting,
+    # so queued downloads and subscription checks keep running. Off by
+    # default: closing a window should close the program unless asked
+    # otherwise. File > Exit always exits either way.
+    "minimize_to_tray": False,
     # How often subscriptions are checked for new items, in hours.
     "sub_check_hours": 6,
     # Automatically update yt-dlp, musicdl, wxPython, Deno and ffmpeg.

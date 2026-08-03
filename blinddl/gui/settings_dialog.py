@@ -6,7 +6,29 @@
 
 import wx
 
-AUDIO_FORMATS = ["mp3", "m4a", "flac", "wav", "opus"]
+# Label, stored value. "Original" means the file is kept exactly as the site
+# serves it: no ffmpeg pass, no quality lost, whatever container comes down.
+AUDIO_FORMAT_CHOICES = [
+    ("Original (no conversion)", "original"),
+    ("MP3", "mp3"),
+    ("M4A", "m4a"),
+    ("FLAC", "flac"),
+    ("WAV", "wav"),
+    ("Opus", "opus"),
+]
+# MP4 and MKV are remuxes, so they keep the site's own picture and sound.
+# The last two re-encode: AVI because it cannot hold modern codecs at all,
+# x265 because shrinking the file is the whole point of it.
+VIDEO_FORMAT_CHOICES = [
+    ("Original (no conversion)", "original"),
+    ("MP4", "mp4"),
+    ("MKV", "mkv"),
+    ("AVI", "avi"),
+    ("Small, x265 for long-term storage", "x265"),
+]
+# Kept for callers that only need the stored values.
+AUDIO_FORMATS = [value for _label, value in AUDIO_FORMAT_CHOICES]
+VIDEO_FORMATS = [value for _label, value in VIDEO_FORMAT_CHOICES]
 BROWSER_COOKIE_CHOICES = [
     ("None", ""),
     ("Chrome", "chrome"),
@@ -35,14 +57,28 @@ class SettingsDialog(wx.Dialog):
             self, label="Download &audio only")
         self.audio_only_check.SetValue(bool(config["audio_only"]))
 
+        def choice_for(choices, current, name):
+            control = wx.Choice(
+                self, choices=[label for label, _value in choices])
+            control.SetName(name)
+            values = [value for _label, value in choices]
+            control.SetSelection(
+                values.index(current) if current in values else 0)
+            return control
+
         fmt_label = wx.StaticText(self, label="Audio f&ormat:")
-        self.format_choice = wx.Choice(self, choices=AUDIO_FORMATS)
-        self.format_choice.SetName("Audio format")
-        if config["audio_format"] in AUDIO_FORMATS:
-            self.format_choice.SetSelection(
-                AUDIO_FORMATS.index(config["audio_format"]))
-        else:
-            self.format_choice.SetSelection(0)
+        self.format_choice = choice_for(
+            AUDIO_FORMAT_CHOICES, config["audio_format"], "Audio format")
+        self.format_choice.SetHelpText(
+            "Used when downloading audio only. Original keeps the site's own "
+            "file untouched.")
+
+        video_fmt_label = wx.StaticText(self, label="&Video format:")
+        self.video_format_choice = choice_for(
+            VIDEO_FORMAT_CHOICES, config["video_format"], "Video format")
+        self.video_format_choice.SetHelpText(
+            "Container used when downloading video. Original keeps whatever "
+            "the site serves; AVI is re-encoded, which takes longer.")
 
         conc_label = wx.StaticText(self, label="&Concurrent downloads:")
         self.conc_spin = wx.SpinCtrl(self, min=1, max=32,
@@ -59,6 +95,13 @@ class SettingsDialog(wx.Dialog):
         self.sub_spin = wx.SpinCtrl(self, min=1, max=168,
                                     initial=int(config["sub_check_hours"]))
         self.sub_spin.SetName("Subscription interval in hours")
+
+        self.tray_check = wx.CheckBox(
+            self, label="Closing the window minimizes to the s&ystem tray")
+        self.tray_check.SetValue(bool(config["minimize_to_tray"]))
+        self.tray_check.SetHelpText(
+            "Downloads and subscription checks keep running. Windows plus B "
+            "reaches the tray icon. File, Exit always exits.")
 
         self.update_check = wx.CheckBox(
             self, label="&Update download tools automatically")
@@ -143,9 +186,12 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.dir_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
         sizer.Add(row(fmt_label, self.format_choice), 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(row(video_fmt_label, self.video_format_choice),
+                  0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(row(conc_label, self.conc_spin), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(row(search_label, self.search_spin), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(row(sub_label, self.sub_spin), 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(self.tray_check, 0, wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
         sizer.Add(self.lyrics_check, 0, wx.ALL, 8)
         sizer.Add(row(cookies_label, self.cookies_choice),
@@ -164,10 +210,14 @@ class SettingsDialog(wx.Dialog):
         """Write the dialog values back into the config object."""
         self.config["download_dir"] = self.dir_picker.GetPath()
         self.config["audio_only"] = self.audio_only_check.GetValue()
-        self.config["audio_format"] = self.format_choice.GetStringSelection()
+        self.config["audio_format"] = AUDIO_FORMAT_CHOICES[
+            self.format_choice.GetSelection()][1]
+        self.config["video_format"] = VIDEO_FORMAT_CHOICES[
+            self.video_format_choice.GetSelection()][1]
         self.config["max_concurrent"] = self.conc_spin.GetValue()
         self.config["search_timeout_s"] = self.search_spin.GetValue()
         self.config["sub_check_hours"] = self.sub_spin.GetValue()
+        self.config["minimize_to_tray"] = self.tray_check.GetValue()
         self.config["auto_update"] = self.update_check.GetValue()
         self.config["sideb_lyrics"] = self.lyrics_check.GetValue()
         self.config["adult_sites_enabled"] = self.adult_sites_check.GetValue()

@@ -16,11 +16,13 @@ from ..downloader import DownloadQueue, STATUS_DONE, STATUS_ERROR
 from ..runtime import open_folder
 from ..subscriptions import SubscriptionStore
 from .downloads_panel import DownloadsPanel
+from .feeds_dialog import FeedsDialog
 from .library_panel import LibraryPanel
 from .search_panel import SearchPanel
 from .settings_dialog import SettingsDialog
 from .sources_dialog import SourcesDialog
 from .subs_panel import SubsPanel
+from .tray import TrayIcon
 from .update_dialog import UpdateDialog
 from .url_panel import UrlPanel
 
@@ -36,6 +38,10 @@ class MainFrame(wx.Frame):
         super().__init__(None, title=APP_NAME, size=(950, 650))
 
         self._closing = False
+        # Set when the user asks to leave outright -- File > Exit or the
+        # tray's own Exit -- so that path is never turned into a hide.
+        self._quitting = False
+        self.tray = None
         self.config = Config()
         self.queue = DownloadQueue(self.config, self._queue_notify)
         self.subs = SubscriptionStore(self.config, self.queue,
@@ -48,6 +54,7 @@ class MainFrame(wx.Frame):
 
         self.subs.start()
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        self._apply_tray_setting()
         self._maybe_auto_update()
         # Build the music-site clients now so the first search does not pay
         # for it, and clear last session's search scratch files.
@@ -83,6 +90,8 @@ class MainFrame(wx.Frame):
         tools_menu = wx.Menu()
         self.ID_SOURCES = wx.NewIdRef()
         tools_menu.Append(self.ID_SOURCES, "Search &sites...\tCtrl+Shift+S")
+        self.ID_FEEDS = wx.NewIdRef()
+        tools_menu.Append(self.ID_FEEDS, "My torrent &indexers...")
         tools_menu.AppendSeparator()
         self.ID_ADD_SUB = wx.NewIdRef()
         tools_menu.Append(self.ID_ADD_SUB, "&Add subscription...")
@@ -104,8 +113,9 @@ class MainFrame(wx.Frame):
 
         self.Bind(wx.EVT_MENU, self.on_open_folder, id=wx.ID_OPEN)
         self.Bind(wx.EVT_MENU, self.on_settings, id=wx.ID_PREFERENCES)
-        self.Bind(wx.EVT_MENU, lambda e: self.Close(), id=wx.ID_EXIT)
+        self.Bind(wx.EVT_MENU, self.on_exit, id=wx.ID_EXIT)
         self.Bind(wx.EVT_MENU, self.on_choose_sources, id=self.ID_SOURCES)
+        self.Bind(wx.EVT_MENU, self.on_edit_feeds, id=self.ID_FEEDS)
         self.Bind(wx.EVT_MENU, self.on_add_subscription, id=self.ID_ADD_SUB)
         self.Bind(wx.EVT_MENU, self.on_check_updates, id=self.ID_UPDATE)
         self.Bind(wx.EVT_MENU, self.on_check_subs, id=self.ID_CHECK_SUBS)
@@ -223,11 +233,19 @@ class MainFrame(wx.Frame):
             self.library_panel.refresh(announce=False)
             self.queue.set_concurrency(self.config["max_concurrent"])
             self.subs.wake()
+            self._apply_tray_setting()
             self.announce("Settings saved.")
         dialog.Destroy()
 
     def on_choose_sources(self, event=None):
         dialog = SourcesDialog(self, self.config)
+        if dialog.ShowModal() == wx.ID_OK:
+            dialog.apply()
+            self.announce(dialog.summary())
+        dialog.Destroy()
+
+    def on_edit_feeds(self, event=None):
+        dialog = FeedsDialog(self, self.config)
         if dialog.ShowModal() == wx.ID_OK:
             dialog.apply()
             self.announce(dialog.summary())
@@ -264,17 +282,66 @@ class MainFrame(wx.Frame):
             "to play completed downloads.\n"
             "Search also finds free books, audiobooks, old-time radio, "
             "movies and TV. Downloaded books open in your usual reader "
-            "from the Library tab.",
+            "from the Library tab.\n"
+            "Torrent results open in your own BitTorrent client. Add your "
+            "Prowlarr or Jackett in Tools, My torrent indexers to search "
+            "private trackers too.",
             f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self)
+
+    # -- closing and the system tray --------------------------------------------
+
+    def on_exit(self, event=None):
+        """File > Exit: leave for good, whatever closing is set to do."""
+        self._quitting = True
+        self.Close()
+
+    def _apply_tray_setting(self):
+        """Add or remove the tray icon to match the current setting."""
+        wanted = bool(self.config["minimize_to_tray"])
+        if wanted and self.tray is None:
+            self.tray = TrayIcon(self, on_restore=self.restore_from_tray,
+                                 on_exit=self.on_exit)
+        elif not wanted and self.tray is not None:
+            # Nothing can bring the window back once the icon is gone, so it
+            # only leaves while the window is on screen.
+            self.restore_from_tray()
+            self.tray.dispose()
+            self.tray = None
+
+    def restore_from_tray(self):
+        """Bring the window back and put the user where they left off."""
+        if self._closing:
+            return
+        self.Show()
+        if self.IsIconized():
+            self.Iconize(False)
+        self.Raise()
+        page = self.notebook.GetSelection()
+        if page != wx.NOT_FOUND:
+            self.show_tab(page)
+
+    def _hide_to_tray(self):
+        self.Hide()
+        self.announce(
+            f"{APP_NAME} is in the system tray. Windows plus B reaches it; "
+            "downloads keep running.")
 
     def on_close(self, event):
         if self._closing:
+            return
+        if (not self._quitting and self.tray is not None and
+                event.CanVeto()):
+            event.Veto()
+            self._hide_to_tray()
             return
         self._closing = True
         self.search_panel.shutdown()
         self.url_panel.shutdown()
         self.library_panel.shutdown()
         self.subs.stop()
+        if self.tray is not None:
+            self.tray.dispose()
+            self.tray = None
         self.Destroy()
 
     # -- automatic dependency updates -------------------------------------------
