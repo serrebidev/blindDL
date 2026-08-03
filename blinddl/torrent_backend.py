@@ -63,6 +63,9 @@ ALL_SOURCES = [
 
 PIRATEBAY_URL = "https://apibay.org/q.php"
 EZTV_URL = "https://eztvx.to/api/get-torrents"
+# EZTV's API is keyed on IMDb ids, so a title is resolved to one first.
+# TVmaze covers television only and needs no key, which suits both ends.
+TVMAZE_URL = "https://api.tvmaze.com/singlesearch/shows"
 NYAA_URL = "https://nyaa.si/"
 TORRENTS_CSV_URL = "https://torrents-csv.com/service/search"
 LIMETORRENTS_URL = "https://www.limetorrents.lol/search/all"
@@ -378,15 +381,42 @@ def search_piratebay(query, timeout=HTTP_TIMEOUT_S):
 # -- EZTV -------------------------------------------------------------------
 
 
+def imdb_id_for(query, timeout=HTTP_TIMEOUT_S):
+    """The IMDb id of the programme a query names, or "".
+
+    TVmaze answers this without a key and only about television, which is
+    exactly the question being asked -- a film title finds nothing here, and
+    EZTV would have nothing for it either.
+    """
+    try:
+        response = _http().get(TVMAZE_URL, params={"q": query},
+                               timeout=timeout)
+        if response.status_code != 200:
+            return ""
+        imdb = (response.json().get("externals") or {}).get("imdb")
+    except Exception:  # noqa: BLE001 - a name lookup must not fail the search
+        return ""
+    return str(imdb or "").strip()
+
+
 def search_eztv(query, timeout=HTTP_TIMEOUT_S):
     """EZTV indexes television only, and answers with a magnet per row.
 
-    Its API filters by IMDb id rather than by text, so the query is matched
-    against a page of recent releases. That is what the site can do without
-    an account; _rank drops whatever does not answer the query.
+    Its API is keyed on IMDb ids and cannot be given text at all, which is
+    why every other EZTV tool asks its user to supply the id by hand. The
+    programme is looked up by name first instead, so a search for "the
+    office" reaches the whole run of it rather than whatever happens to be
+    on the front page.
+
+    Without an id -- a film, or a show TVmaze does not know -- the recent
+    releases are scanned instead, and _rank drops what does not match.
     """
-    response = _http().get(
-        EZTV_URL, params={"limit": 100, "page": 1}, timeout=timeout)
+    imdb = imdb_id_for(query, timeout=timeout)
+    params = {"limit": "100", "page": "1"}
+    if imdb:
+        # The API wants the bare number; the tt prefix returns nothing.
+        params["imdb_id"] = imdb[2:] if imdb.lower().startswith("tt") else imdb
+    response = _http().get(EZTV_URL, params=params, timeout=timeout)
     response.raise_for_status()
     items = []
     for doc in response.json().get("torrents") or ():
