@@ -71,7 +71,7 @@ The Search source combo box switches between music, books, audiobooks, and the I
 
 Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder, and open in whatever reader you already use. Audiobooks download as a folder of numbered chapters and resume where they stopped if you cancel. One Internet Archive item is often a whole series, so choosing a single result opens the same checked list used for playlists.
 
-Ctrl+Shift+S chooses which sites each source searches. Newly supported sites are enabled automatically.
+Ctrl+Shift+S chooses which sites each source searches, and newly supported sites are enabled automatically. Anna's Archive results resolve through the public LibGen mirrors; if you have a membership, put its key in Settings to use the fast partner servers instead.
 
 ## Subscriptions
 
