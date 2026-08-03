@@ -35,7 +35,7 @@ datas = [
 binaries = []
 hiddenimports = []
 
-for package in ("sideb", "mutagen"):
+for package in ("sideb", "mutagen", "audiobooker", "mediavocab"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries

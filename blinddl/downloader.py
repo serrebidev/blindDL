@@ -16,6 +16,9 @@ import uuid
 
 from . import (
     adult_backend,
+    archive_backend,
+    audiobook_backend,
+    book_backend,
     deezer_backend,
     musicdl_backend,
     sideb_backend,
@@ -47,7 +50,7 @@ class DownloadItem:
     def __init__(self, title, kind, payload, audio_only=True, audio_format="mp3"):
         self.id = uuid.uuid4().hex
         self.title = title
-        self.kind = kind  # "ytdlp", "musicdl", "sideb" or "adult"
+        self.kind = kind  # "ytdlp", "musicdl", "sideb", "adult" or "book"
         self.payload = payload  # URL string, or musicdl SongInfo
         self.audio_only = audio_only
         self.audio_format = audio_format
@@ -126,6 +129,23 @@ class DownloadQueue:
         self.add(item)
         return item
 
+    def add_book(self, payload, title):
+        item = DownloadItem(title=title, kind="book", payload=payload,
+                            audio_only=False)
+        self.add(item)
+        return item
+
+    def add_audiobook(self, payload, title):
+        item = DownloadItem(title=title, kind="audiobook", payload=payload)
+        self.add(item)
+        return item
+
+    def add_archive(self, payload, title):
+        item = DownloadItem(title=title, kind="archive", payload=payload,
+                            audio_only=not payload.get("video"))
+        self.add(item)
+        return item
+
     def cancel(self, item_id):
         item = self._find(item_id)
         if item is None:
@@ -186,11 +206,20 @@ class DownloadQueue:
                     self._run_sideb(item)
                 elif item.kind == "adult":
                     self._run_adult(item)
+                elif item.kind == "book":
+                    self._run_book(item)
+                elif item.kind == "audiobook":
+                    self._run_audiobook(item)
+                elif item.kind == "archive":
+                    self._run_archive(item)
                 else:
                     self._run_musicdl(item)
                 item.percent = 100.0
                 item.status = STATUS_DONE
-            except ytdlp_backend.DownloadCancelled:
+            except (ytdlp_backend.DownloadCancelled,
+                    book_backend.BookDownloadCancelled,
+                    audiobook_backend.AudiobookDownloadCancelled,
+                    archive_backend.ArchiveDownloadCancelled):
                 item.status = STATUS_CANCELLED
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 if item.cancel_event.is_set():
@@ -272,6 +301,60 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         adult_backend.download(
+            item.payload, self.config["download_dir"], progress_cb=progress,
+            cancel_event=item.cancel_event)
+
+    def _run_book(self, item):
+        started = time.monotonic()
+
+        def progress(downloaded, total):
+            elapsed = max(time.monotonic() - started, 0.001)
+            rate = downloaded / elapsed
+            item.speed = format_speed(rate)
+            if total:
+                item.percent = min(100.0, downloaded * 100.0 / total)
+                if rate:
+                    item.eta = ytdlp_backend.format_duration(
+                        max(total - downloaded, 0) / rate)
+            self._notify(item, throttle=True)
+
+        book_backend.download(
+            item.payload, self.config["download_dir"], self.config,
+            progress_cb=progress, cancel_event=item.cancel_event)
+
+    def _run_audiobook(self, item):
+        started = time.monotonic()
+
+        def progress(downloaded, total):
+            elapsed = max(time.monotonic() - started, 0.001)
+            rate = downloaded / elapsed
+            item.speed = format_speed(rate)
+            if total:
+                item.percent = min(100.0, downloaded * 100.0 / total)
+                if rate:
+                    item.eta = ytdlp_backend.format_duration(
+                        max(total - downloaded, 0) / rate)
+            self._notify(item, throttle=True)
+
+        audiobook_backend.download(
+            item.payload, self.config["download_dir"], progress_cb=progress,
+            cancel_event=item.cancel_event)
+
+    def _run_archive(self, item):
+        started = time.monotonic()
+
+        def progress(downloaded, total):
+            elapsed = max(time.monotonic() - started, 0.001)
+            rate = downloaded / elapsed
+            item.speed = format_speed(rate)
+            if total:
+                item.percent = min(100.0, downloaded * 100.0 / total)
+                if rate:
+                    item.eta = ytdlp_backend.format_duration(
+                        max(total - downloaded, 0) / rate)
+            self._notify(item, throttle=True)
+
+        archive_backend.download(
             item.payload, self.config["download_dir"], progress_cb=progress,
             cancel_event=item.cancel_event)
 

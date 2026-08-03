@@ -31,10 +31,21 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui import media_player
     from blinddl.gui.search_panel import (
         ADULT_ENGINE_CATEGORIES,
+        ARCHIVE_COLUMN_HEADINGS,
+        ARCHIVE_SORT_LABELS,
+        AUDIOBOOK_COLUMN_HEADINGS,
+        BOOK_COLUMN_HEADINGS,
+        BOOK_SORT_LABELS,
+        COLUMN_HEADINGS,
         ENGINE_ADULT,
+        ENGINE_ARCHIVE_AUDIO,
+        ENGINE_ARCHIVE_VIDEO,
+        ENGINE_AUDIOBOOKS,
+        ENGINE_BOOKS,
         ENGINE_LABELS,
         ENGINE_MUSIC,
         ENGINE_TRANS,
+        GENERAL_ENGINE_COUNT,
         SORT_ARTIST,
         SORT_LABELS,
         SORT_LONGEST,
@@ -76,6 +87,15 @@ class _Queue:
 
     def add_adult(self, payload, title):
         self.calls.append(("adult", payload, title))
+
+    def add_book(self, payload, title):
+        self.calls.append(("book", payload, title))
+
+    def add_audiobook(self, payload, title):
+        self.calls.append(("audiobook", payload, title))
+
+    def add_archive(self, payload, title):
+        self.calls.append(("archive", payload, title))
 
     def _find(self, item_id):
         return next((item for item in self.items if item.id == item_id), None)
@@ -119,6 +139,9 @@ class _Frame:
         self.config = {
             "disabled_music_sources": [],
             "disabled_adult_sources": [],
+            "disabled_book_sources": [],
+            "disabled_audiobook_sources": [],
+            "disabled_archive_sources": [],
             "adult_sites_enabled": True,
             "search_timeout_s": 5,
             "audio_only": True,
@@ -390,7 +413,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(
             [panel.engine_choice.GetString(index)
              for index in range(panel.engine_choice.GetCount())],
-            ENGINE_LABELS[:2],
+            ENGINE_LABELS[:GENERAL_ENGINE_COUNT],
         )
 
         self.frame.config["adult_sites_enabled"] = True
@@ -404,7 +427,7 @@ class GuiInteractionTests(unittest.TestCase):
         panel.engine_choice.SetSelection(ENGINE_TRANS)
         self.frame.config["adult_sites_enabled"] = False
         panel.refresh_engine_choices()
-        self.assertEqual(panel.engine_choice.GetCount(), 2)
+        self.assertEqual(panel.engine_choice.GetCount(), GENERAL_ENGINE_COUNT)
         self.assertEqual(panel.engine_choice.GetSelection(), ENGINE_MUSIC)
 
     def test_search_sort_choices_and_ordering(self):
@@ -482,6 +505,141 @@ class GuiInteractionTests(unittest.TestCase):
                 panel._search("example", engine, token, stop, ["pornhub"])
 
             self.assertEqual(search.call_args.kwargs["category"], category)
+
+    def test_book_engine_relabels_columns_and_sort_choices(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.engine_choice.SetSelection(ENGINE_BOOKS)
+        panel.on_engine_changed(wx.CommandEvent())
+
+        self.assertEqual(
+            [panel.sort_choice.GetString(index)
+             for index in range(panel.sort_choice.GetCount())],
+            BOOK_SORT_LABELS,
+        )
+        # Nothing to play, so the preview button must not offer itself.
+        self.assertFalse(panel.preview_btn.IsEnabled())
+
+        panel._apply_engine_columns(ENGINE_BOOKS)
+        self.assertEqual(
+            [panel.results_list.GetColumn(index).GetText()
+             for index in range(panel.results_list.GetColumnCount())],
+            list(BOOK_COLUMN_HEADINGS),
+        )
+
+        panel.engine_choice.SetSelection(ENGINE_MUSIC)
+        panel.on_engine_changed(wx.CommandEvent())
+        panel._apply_engine_columns(ENGINE_MUSIC)
+        self.assertEqual(
+            [panel.results_list.GetColumn(index).GetText()
+             for index in range(panel.results_list.GetColumnCount())],
+            list(COLUMN_HEADINGS),
+        )
+        self.assertTrue(panel.preview_btn.IsEnabled())
+
+    def test_media_engines_relabel_their_own_columns(self):
+        panel = SearchPanel(self.host, self.frame)
+        for engine, headings in (
+                (ENGINE_AUDIOBOOKS, AUDIOBOOK_COLUMN_HEADINGS),
+                (ENGINE_ARCHIVE_AUDIO, ARCHIVE_COLUMN_HEADINGS),
+                (ENGINE_ARCHIVE_VIDEO, ARCHIVE_COLUMN_HEADINGS)):
+            panel._apply_engine_columns(engine)
+            self.assertEqual(
+                [panel.results_list.GetColumn(index).GetText()
+                 for index in range(panel.results_list.GetColumnCount())],
+                list(headings),
+            )
+        panel.engine_choice.SetSelection(ENGINE_ARCHIVE_VIDEO)
+        panel.on_engine_changed(wx.CommandEvent())
+        self.assertEqual(
+            [panel.sort_choice.GetString(index)
+             for index in range(panel.sort_choice.GetCount())],
+            ARCHIVE_SORT_LABELS,
+        )
+
+    def test_year_sorts_replace_duration_sorts_for_books(self):
+        items = [
+            {"title": "Middle", "year": "1900", "_search_order": 0},
+            {"title": "Newest", "year": "2001", "_search_order": 1},
+            {"title": "Undated", "year": "", "_search_order": 2},
+            {"title": "Oldest", "year": "1851", "_search_order": 3},
+        ]
+
+        self.assertEqual(
+            [item["title"]
+             for item in _sorted_results(items, SORT_SHORTEST, ENGINE_BOOKS)],
+            ["Oldest", "Middle", "Newest", "Undated"],
+        )
+        self.assertEqual(
+            [item["title"]
+             for item in _sorted_results(items, SORT_LONGEST,
+                                         ENGINE_ARCHIVE_VIDEO)],
+            ["Newest", "Middle", "Oldest", "Undated"],
+        )
+
+    def test_search_queues_book_and_audiobook_results(self):
+        panel = SearchPanel(self.host, self.frame)
+        for engine, kind in ((ENGINE_BOOKS, "book"),
+                             (ENGINE_AUDIOBOOKS, "audiobook")):
+            self.frame.queue.calls = []
+            panel.result_engine = engine
+            item = {"title": "One", "kind": kind, "identifier": "one"}
+            panel.results = [item]
+            panel.results_list.DeleteAllItems()
+            panel.results_list.InsertItem(0, item["title"])
+            panel.results_list.Select(0)
+
+            panel.on_download_selected(None)
+
+            self.assertEqual(self.frame.queue.calls, [(kind, item, "One")])
+
+    def test_archive_item_with_one_file_queues_without_asking(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_ARCHIVE_AUDIO
+        item = {"title": "Dragnet", "kind": "archive", "identifier": "dragnet",
+                "video": False}
+        files = [{"title": "Episode 1", "file_name": "ep1.mp3",
+                  "identifier": "dragnet",
+                  "direct_url": "https://archive.org/download/dragnet/ep1.mp3"}]
+
+        panel._archive_files_ready(panel.archive_token, item, files)
+
+        self.assertEqual(len(self.frame.queue.calls), 1)
+        kind, payload, title = self.frame.queue.calls[0]
+        self.assertEqual((kind, title), ("archive", "Episode 1"))
+        # The show's name rides along so the episode lands in its own folder.
+        self.assertEqual(payload["collection_title"], "Dragnet")
+
+    def test_archive_item_with_many_files_offers_a_picker(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_ARCHIVE_AUDIO
+        item = {"title": "Dragnet", "kind": "archive", "identifier": "dragnet",
+                "video": False}
+        files = [
+            {"title": f"Episode {number}", "file_name": f"ep{number}.mp3",
+             "identifier": "dragnet", "direct_url": f"https://x/ep{number}.mp3"}
+            for number in (1, 2, 3)
+        ]
+
+        with mock.patch.object(ItemPickerDialog, "ShowModal",
+                               return_value=wx.ID_OK), \
+                mock.patch.object(ItemPickerDialog, "selected_items",
+                                  return_value=files[:2]):
+            panel._archive_files_ready(panel.archive_token, item, files)
+
+        self.assertEqual([call[2] for call in self.frame.queue.calls],
+                         ["Episode 1", "Episode 2"])
+        self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
+
+    def test_books_cannot_be_previewed(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_BOOKS
+        panel.results = [{"title": "One"}]
+        panel.results_list.InsertItem(0, "One")
+        panel.results_list.Select(0)
+
+        panel.on_preview_selected(None)
+
+        self.assertIn("cannot be previewed", self.frame.messages[-1])
 
     def test_settings_adult_sites_default_off_and_auth_paths_save(self):
         config = _SettingsConfig()

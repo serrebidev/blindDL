@@ -25,6 +25,9 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Downloads ordinary media that the signed-in user can access from OnlyFans
   and JustForFans creator or post URLs; protected/DRM media is skipped.
 - Downloads BoyfriendTV video URLs through a native MP4/HLS extractor.
+- Finds free ebooks across the Internet Archive, Open Library, Project Gutenberg, Standard Ebooks, and Anna's Archive, and opens finished books in your usual reader.
+- Finds free audiobooks on LibriVox, LoyalBooks, and the Internet Archive, and downloads a book's chapters in order.
+- Finds old-time radio, live concerts, music, movies, classic TV, and TV news on the Internet Archive, with a checked episode list for series.
 - Finds music across Spotify, TIDAL, SoundCloud, Netease, QQ, Kugou, Kuwo, Migu, and dozens of other services.
 - Downloads Deezer tracks, albums, playlists, and artists as tagged music with cover art and synced lyrics.
 - Lets you choose exactly which music sites are searched, with newly supported sites enabled automatically.
@@ -98,6 +101,41 @@ AEBN support uses the MIT-licensed `aebn-vod-downloader`; the other
 adult API libraries retain their upstream licenses and require Python 3.12 or
 newer.
 
+### Books, audiobooks, and Internet Archive media
+
+The Search source combo box also covers **Books**, **Audiobooks**, **Old-time
+radio and music**, and **Movies and TV**. Each searches its sites in parallel
+and fills the results list as they answer, exactly like a music search. The
+result columns rename themselves per source, so a book search reads Title,
+Author, Library, Year, Size, and a radio search reads Title, Creator,
+Collection, Year, Size.
+
+Books come from the Internet Archive, Open Library, Project Gutenberg,
+Standard Ebooks, and Anna's Archive. EPUB and plain text are preferred over
+scanned PDFs. Internet Archive items that are lending-only are never listed,
+because their files cannot be downloaded. Finished books land in a `Books`
+subfolder and open in whatever reader you already use — press Enter on them in
+the Library tab.
+
+Anna's Archive is an index rather than a file server: its own free download
+sits behind a browser check that returns 403 to any application. blindDL
+therefore resolves a record's MD5 through the public LibGen mirrors, and
+prefers records LibGen actually holds. If you have an Anna's Archive
+membership, put its key in Settings and downloads use the fast partner servers
+instead. When neither can serve a file, blindDL says so and Ctrl+C copies the
+record's URL for the site's own slow download.
+
+Audiobooks come from LibriVox, LoyalBooks, and the other free sites the
+`audiobooker` package covers, plus a direct Internet Archive search. A book
+downloads as a folder of numbered chapters and resumes where it stopped if you
+cancel it. Preview plays the opening chapter.
+
+Internet Archive media is grouped into collections you can switch off
+individually: Old-time radio, Live concerts, Music & audio, Movies, Classic
+TV, and TV & news. One Archive item is often a whole radio series, so choosing
+a single result opens the same checked list used for playlists — take one
+episode or all of them.
+
 For sites already signed into in a local browser, **Use cookies from browser**
 in Settings lets yt-dlp read that browser profile. This is useful for standard
 login-only MyMuscleVideo and ThisVid pages.
@@ -150,7 +188,7 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 - Ctrl+, — open Settings
 - Ctrl+U — check for updates
 - Ctrl+Shift+C — check all subscriptions now
-- Ctrl+Shift+S — choose which music and adult sites to search
+- Ctrl+Shift+S — choose which music, book, audiobook, Archive, and adult sites to search
 
 ## Config and downloads
 

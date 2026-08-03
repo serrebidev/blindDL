@@ -4,6 +4,10 @@ wxPython>=4.2; platform_system != "Linux"
 yt-dlp>=2025.1.1
 musicdl>=2.5.0
 sideb @ git+https://github.com/mosaddiqdev/sideb
+# Free audiobook sites (LibriVox, LoyalBooks and friends). The git build
+# carries the chapter/narrator fields the Search tab shows; PyPI's 0.7 does
+# not.
+audiobooker @ git+https://github.com/LeMetadatarr/audiobooker
 requests>=2.32
 mutagen>=1.47
 pycryptodome>=3.20

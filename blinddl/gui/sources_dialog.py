@@ -2,7 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Pick which music and adult sites a search covers.
+"""Pick which music, book, audiobook and adult sites a search covers.
 
 Every site musicdl registers is listed, all of them on by default. The
 config stores the switched-off ones, so sites added by a later musicdl
@@ -11,7 +11,10 @@ update arrive switched on.
 
 import wx
 
-from .. import adult_backend, musicdl_backend
+from .. import (
+    adult_backend, archive_backend, audiobook_backend, book_backend,
+    musicdl_backend,
+)
 
 NEEDS_ACCOUNT = " (account required)"
 UNAVAILABLE = " (provider unavailable)"
@@ -46,6 +49,70 @@ class SourcesDialog(wx.Dialog):
         if labels:
             self.check_list.SetSelection(0)
 
+        self.book_sources = book_backend.sources_by_label()
+        self.book_check_list = wx.CheckListBox(
+            self,
+            choices=[book_backend.source_label(source)
+                     for source in self.book_sources],
+        )
+        self.book_check_list.SetName("Book libraries")
+        self.book_check_list.SetHelpText(
+            "Space toggles a library. Context Menu selects or clears all.")
+        disabled_books = set(config["disabled_book_sources"])
+        for index, source in enumerate(self.book_sources):
+            self.book_check_list.Check(index, source not in disabled_books)
+        self.book_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
+        self.book_check_list.Bind(
+            wx.EVT_CONTEXT_MENU,
+            lambda event: self.on_context_menu(event, self.book_check_list),
+        )
+        if self.book_sources:
+            self.book_check_list.SetSelection(0)
+
+        # Sites whose package is not installed are not listed at all, so
+        # nothing here can be checked and then quietly do nothing.
+        self.audiobook_sources = audiobook_backend.sources_by_label()
+        self.audiobook_check_list = wx.CheckListBox(
+            self,
+            choices=[audiobook_backend.source_label(source)
+                     for source in self.audiobook_sources],
+        )
+        self.audiobook_check_list.SetName("Audiobook sites")
+        self.audiobook_check_list.SetHelpText(
+            "Space toggles a site. Context Menu selects or clears all.")
+        disabled_audiobooks = set(config["disabled_audiobook_sources"])
+        for index, source in enumerate(self.audiobook_sources):
+            self.audiobook_check_list.Check(
+                index, source not in disabled_audiobooks)
+        self.audiobook_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
+        self.audiobook_check_list.Bind(
+            wx.EVT_CONTEXT_MENU,
+            lambda event: self.on_context_menu(event,
+                                               self.audiobook_check_list),
+        )
+        if self.audiobook_sources:
+            self.audiobook_check_list.SetSelection(0)
+
+        self.archive_sources = archive_backend.sources_by_label()
+        self.archive_check_list = wx.CheckListBox(
+            self,
+            choices=[archive_backend.source_label(source)
+                     for source in self.archive_sources],
+        )
+        self.archive_check_list.SetName("Internet Archive collections")
+        self.archive_check_list.SetHelpText(
+            "Space toggles a collection. Context Menu selects or clears all.")
+        disabled_archive = set(config["disabled_archive_sources"])
+        for index, source in enumerate(self.archive_sources):
+            self.archive_check_list.Check(index, source not in disabled_archive)
+        self.archive_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
+        self.archive_check_list.Bind(
+            wx.EVT_CONTEXT_MENU,
+            lambda event: self.on_context_menu(event, self.archive_check_list),
+        )
+        if self.archive_sources:
+            self.archive_check_list.SetSelection(0)
+
         disabled_adult = set(config["disabled_adult_sources"])
         self.adult_check_list = self._create_adult_list(
             self.adult_sources, adult_unavailable, disabled_adult,
@@ -59,13 +126,23 @@ class SourcesDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(list_label, 0, wx.TOP | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.check_list, 1, wx.EXPAND | wx.ALL, 8)
+        book_label = wx.StaticText(self, label="&Book libraries:")
+        sizer.Add(book_label, 0, wx.LEFT | wx.RIGHT, 8)
+        sizer.Add(self.book_check_list, 1, wx.EXPAND | wx.ALL, 8)
+        audiobook_label = wx.StaticText(self, label="A&udiobook sites:")
+        sizer.Add(audiobook_label, 0, wx.LEFT | wx.RIGHT, 8)
+        sizer.Add(self.audiobook_check_list, 1, wx.EXPAND | wx.ALL, 8)
+        archive_label = wx.StaticText(
+            self, label="&Internet Archive collections:")
+        sizer.Add(archive_label, 0, wx.LEFT | wx.RIGHT, 8)
+        sizer.Add(self.archive_check_list, 1, wx.EXPAND | wx.ALL, 8)
         adult_label = wx.StaticText(self, label="&Adult sites:")
         sizer.Add(adult_label, 0, wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.adult_check_list, 1, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.count_text, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizerAndFit(sizer)
-        self.SetSize((560, 700))
+        self.SetSize((600, 760))
         self.check_list.SetFocus()
 
     # -- helpers -------------------------------------------------------------
@@ -101,11 +178,27 @@ class SourcesDialog(wx.Dialog):
         return sum(1 for index in range(len(self.adult_sources))
                    if self.adult_check_list.IsChecked(index))
 
+    def _book_checked_count(self):
+        return sum(1 for index in range(len(self.book_sources))
+                   if self.book_check_list.IsChecked(index))
+
+    def _audiobook_checked_count(self):
+        return sum(1 for index in range(len(self.audiobook_sources))
+                   if self.audiobook_check_list.IsChecked(index))
+
+    def _archive_checked_count(self):
+        return sum(1 for index in range(len(self.archive_sources))
+                   if self.archive_check_list.IsChecked(index))
+
     def _update_count(self):
         self.count_text.SetLabel(
-            f"{self._checked_count()} of {len(self.sources)} music and "
-            f"{self._adult_checked_count()} of {len(self.adult_sources)} "
-            "adult sites selected.")
+            f"{self._checked_count()} of {len(self.sources)} music sites, "
+            f"{self._book_checked_count()} of {len(self.book_sources)} book "
+            f"libraries, {self._audiobook_checked_count()} of "
+            f"{len(self.audiobook_sources)} audiobook sites, "
+            f"{self._archive_checked_count()} of {len(self.archive_sources)} "
+            f"Archive collections and {self._adult_checked_count()} of "
+            f"{len(self.adult_sources)} adult sites selected.")
 
     def _set_all(self, control, checked):
         for index in range(control.GetCount()):
@@ -136,10 +229,22 @@ class SourcesDialog(wx.Dialog):
         self.config["disabled_adult_sources"] = [
             source for index, source in enumerate(self.adult_sources)
             if not self.adult_check_list.IsChecked(index)]
+        self.config["disabled_book_sources"] = [
+            source for index, source in enumerate(self.book_sources)
+            if not self.book_check_list.IsChecked(index)]
+        self.config["disabled_audiobook_sources"] = [
+            source for index, source in enumerate(self.audiobook_sources)
+            if not self.audiobook_check_list.IsChecked(index)]
+        self.config["disabled_archive_sources"] = [
+            source for index, source in enumerate(self.archive_sources)
+            if not self.archive_check_list.IsChecked(index)]
         self.config.save()
 
     def summary(self):
         return (
-            f"{self._checked_count()} music and "
+            f"{self._checked_count()} music sites, "
+            f"{self._book_checked_count()} book libraries, "
+            f"{self._audiobook_checked_count()} audiobook sites, "
+            f"{self._archive_checked_count()} Archive collections and "
             f"{self._adult_checked_count()} adult sites selected."
         )

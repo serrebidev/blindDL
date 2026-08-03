@@ -39,6 +39,16 @@ DEFAULTS = {
     # Adult sites the user switched off. These are separate from music
     # sources so the two provider lists can be configured independently.
     "disabled_adult_sources": [],
+    # Book libraries the user switched off, by book_backend source name.
+    "disabled_book_sources": [],
+    # Audiobook sites the user switched off, by audiobook_backend source name.
+    "disabled_audiobook_sources": [],
+    # Internet Archive media collections the user switched off, by
+    # archive_backend category name.
+    "disabled_archive_sources": [],
+    # Anna's Archive membership key. Empty means downloads are resolved
+    # through the public LibGen mirrors instead of the fast partner servers.
+    "annas_archive_key": "",
     # Master privacy/content switch. Adult integrations are hidden until the
     # user explicitly enables them in Settings.
     "adult_sites_enabled": False,

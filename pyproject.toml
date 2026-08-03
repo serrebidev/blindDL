@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.3.4"
+version = "0.4.0"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,9 @@ dependencies = [
   "yt-dlp>=2025.1.1",
   "musicdl>=2.5.0",
   "sideb @ git+https://github.com/mosaddiqdev/sideb",
+  # Free audiobook sites. The git build carries the chapter and narrator
+  # fields the Search tab shows; the 0.7 release on PyPI does not.
+  "audiobooker @ git+https://github.com/LeMetadatarr/audiobooker",
   "requests>=2.32",
   "mutagen>=1.47",
   "pycryptodome>=3.20",

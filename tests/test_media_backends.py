@@ -1,0 +1,297 @@
+# Copyright (c) serrebidev and contributors
+# This file is part of blindDL.
+# SPDX-License-Identifier: MIT
+
+"""Internet Archive media and free-audiobook backends."""
+
+import os
+import tempfile
+import threading
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+from blinddl import archive_backend, audiobook_backend, preview
+
+from tests.test_book_backend import _Response
+
+
+class ArchiveSearchTests(unittest.TestCase):
+    DOCS = {"response": {"docs": [
+        {"identifier": "dragnet", "title": "Dragnet", "creator": ["NBC"],
+         "year": "1951", "item_size": "1048576"},
+        {"identifier": "other", "title": "Something else", "creator": "X"},
+    ]}}
+
+    def test_a_category_query_excludes_sub_collections(self):
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=self.DOCS)
+            items = archive_backend.search_category(
+                archive_backend.CATEGORY_OTR, "dragnet")
+            query = http.return_value.get.call_args.kwargs["params"]["q"]
+
+        self.assertIn("collection:(oldtimeradio)", query)
+        self.assertIn("NOT mediatype:(collection)", query)
+        self.assertEqual(items[0]["title"], "Dragnet")
+        self.assertEqual(items[0]["creator"], "NBC")
+        self.assertEqual(items[0]["file_size"], "1.0 MB")
+        self.assertFalse(items[0]["video"])
+
+    def test_video_categories_are_marked_as_video(self):
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=self.DOCS)
+            items = archive_backend.search_category(
+                archive_backend.CATEGORY_MOVIES, "dragnet")
+
+        self.assertTrue(items[0]["video"])
+        self.assertTrue(archive_backend.is_video_category(
+            archive_backend.CATEGORY_CLASSIC_TV))
+        self.assertFalse(archive_backend.is_video_category(
+            archive_backend.CATEGORY_OTR))
+
+    def test_each_category_reports_separately(self):
+        seen = []
+        with mock.patch.object(archive_backend, "search_category",
+                               side_effect=lambda source, query, **kwargs: [
+                                   {"title": source, "creator": "",
+                                    "source": source}]):
+            items, answered, asked = archive_backend.search(
+                "dragnet", timeout_s=5,
+                on_site=lambda source, rows: seen.append(source))
+
+        self.assertEqual(asked, archive_backend.ALL_SOURCES)
+        self.assertEqual(sorted(seen), sorted(archive_backend.ALL_SOURCES))
+        self.assertEqual(len(items), len(archive_backend.ALL_SOURCES))
+        self.assertEqual(sorted(answered), sorted(archive_backend.ALL_SOURCES))
+
+    def test_one_engine_asks_only_its_own_categories(self):
+        with mock.patch.object(archive_backend, "search_category",
+                               return_value=[]):
+            _items, _answered, asked = archive_backend.search(
+                "dragnet", timeout_s=5,
+                sources=archive_backend.VIDEO_CATEGORIES)
+
+        self.assertEqual(asked, archive_backend.VIDEO_CATEGORIES)
+
+    def test_switched_off_collections_are_left_out(self):
+        enabled = archive_backend.enabled_sources(
+            [archive_backend.CATEGORY_TV_NEWS],
+            archive_backend.VIDEO_CATEGORIES)
+
+        self.assertEqual(enabled, [archive_backend.CATEGORY_MOVIES,
+                                   archive_backend.CATEGORY_CLASSIC_TV])
+
+
+class ArchiveFileTests(unittest.TestCase):
+    PAYLOAD = {"files": [
+        {"name": "__ia_thumb.jpg", "format": "Item Tile"},
+        {"name": "dragnet_02.mp3", "format": "VBR MP3", "size": "200",
+         "length": "29:56", "title": "Big Actor"},
+        {"name": "dragnet_01.mp3", "format": "VBR MP3", "size": "100",
+         "length": "1796.64", "title": "Benny Trounsel"},
+        {"name": "dragnet_01.ogg", "format": "Ogg Vorbis", "size": "90"},
+    ]}
+
+    def _files(self, video=False):
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=self.PAYLOAD)
+            return archive_backend.item_files("dragnet", video=video)
+
+    def test_episodes_come_back_in_order_in_one_format(self):
+        files = self._files()
+
+        self.assertEqual([entry["file_name"] for entry in files],
+                         ["dragnet_01.mp3", "dragnet_02.mp3"])
+        self.assertEqual(files[0]["title"], "Benny Trounsel")
+        self.assertAlmostEqual(files[0]["duration_s"], 1796.64)
+        self.assertAlmostEqual(files[1]["duration_s"], 29 * 60 + 56)
+        self.assertTrue(files[0]["direct_url"].endswith(
+            "/download/dragnet/dragnet_01.mp3"))
+
+    def test_an_item_without_the_wanted_media_says_so(self):
+        with self.assertRaises(RuntimeError):
+            self._files(video=True)
+
+    def test_preview_plays_the_first_file_of_an_item(self):
+        item = {"kind": "archive", "title": "Dragnet", "identifier": "dragnet"}
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=self.PAYLOAD)
+            location, title = preview.resolve_search_result(
+                item, audio_only=True, config={})
+
+        self.assertTrue(location.endswith("dragnet_01.mp3"))
+        self.assertEqual(title, "Dragnet")
+
+    def test_preview_of_a_chosen_episode_needs_no_lookup(self):
+        item = {"kind": "archive", "title": "Episode 1",
+                "direct_url": "https://archive.org/download/d/ep1.mp3"}
+        with mock.patch.object(archive_backend, "_http") as http:
+            location, _title = preview.resolve_search_result(
+                item, audio_only=True, config={})
+            http.assert_not_called()
+
+        self.assertEqual(location, "https://archive.org/download/d/ep1.mp3")
+
+
+class ArchiveDownloadTests(unittest.TestCase):
+    def test_a_single_file_lands_next_to_the_other_downloads(self):
+        entry = {"title": "Episode 1", "file_name": "ep1.mp3",
+                 "identifier": "dragnet", "collection_title": "Dragnet",
+                 "direct_url": "https://x/ep1.mp3", "size_bytes": 4}
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(archive_backend, "_http") as http:
+                http.return_value.get.return_value = _Response(content=b"data")
+                path = archive_backend.download(entry, folder)
+
+            self.assertEqual(os.path.relpath(path, folder), "ep1.mp3")
+            self.assertTrue(os.path.isfile(path))
+
+    def test_a_whole_item_becomes_a_numbered_folder(self):
+        item = {"title": "Dragnet", "identifier": "dragnet", "video": False}
+        files = [
+            {"title": "One", "file_name": "a.mp3", "direct_url": "https://x/a",
+             "size_bytes": 4},
+            {"title": "Two", "file_name": "b.mp3", "direct_url": "https://x/b",
+             "size_bytes": 4},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            with (mock.patch.object(archive_backend, "item_files",
+                                    return_value=files),
+                  mock.patch.object(archive_backend, "_http") as http):
+                http.return_value.get.return_value = _Response(content=b"data")
+                path = archive_backend.download(item, folder)
+
+            self.assertEqual(sorted(os.listdir(path)),
+                             ["01 - a.mp3", "02 - b.mp3"])
+
+    def test_cancelling_removes_the_partial_file(self):
+        cancel = threading.Event()
+        cancel.set()
+        entry = {"title": "Episode 1", "file_name": "ep1.mp3",
+                 "direct_url": "https://x/ep1.mp3", "identifier": "d"}
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(archive_backend, "_http") as http:
+                http.return_value.get.return_value = _Response(content=b"data")
+                with self.assertRaises(
+                        archive_backend.ArchiveDownloadCancelled):
+                    archive_backend.download(entry, folder,
+                                             cancel_event=cancel)
+
+            self.assertEqual(os.listdir(folder), [])
+
+
+class AudiobookTests(unittest.TestCase):
+    def test_an_audiobooker_book_becomes_a_result_row(self):
+        book = SimpleNamespace(
+            title="The Return of Sherlock Holmes",
+            authors=[SimpleNamespace(first_name="Arthur Conan",
+                                     last_name="Doyle")],
+            narrators=[SimpleNamespace(first_name="Mark", last_name="Smith")],
+            streams=["https://archive.org/download/x/01.mp3",
+                     "https://archive.org/download/x/02.mp3"],
+            chapters=[object(), object()],
+            runtime=40018, year=1905, source="Librivox",
+            external_ids={"librivox_id": "123"},
+        )
+
+        item = audiobook_backend._from_audiobook(book)
+
+        self.assertEqual(item["kind"], "audiobook")
+        self.assertEqual(item["source"], "LibriVox")
+        self.assertEqual(item["author"], "Arthur Conan Doyle")
+        self.assertEqual(item["narrator"], "Mark Smith")
+        self.assertEqual(item["chapters"], 2)
+        self.assertEqual(item["duration_s"], 40018)
+        self.assertEqual(item["identifier"], "123")
+
+    def test_source_labels_read_as_names_not_class_names(self):
+        self.assertEqual(audiobook_backend.source_label("Librivox"), "LibriVox")
+        self.assertEqual(
+            audiobook_backend.source_label("StephenKingAudioBooks"),
+            "Stephen King Audio Books")
+
+    def test_the_archive_source_works_without_audiobooker(self):
+        # A missing audiobooker must not take the whole engine down, and the
+        # sites it would have provided are not offered rather than failing.
+        with mock.patch.object(audiobook_backend, "_audiobooker_classes",
+                               return_value={}):
+            self.assertEqual(audiobook_backend.all_sources(),
+                             [audiobook_backend.SOURCE_ARCHIVE_AUDIO])
+            self.assertEqual(
+                audiobook_backend.search_audiobooker("Librivox", "sherlock"),
+                [])
+
+    def test_installed_audiobooker_sites_join_the_source_list(self):
+        with mock.patch.object(audiobook_backend, "_audiobooker_classes",
+                               return_value={"Librivox": object(),
+                                             "LoyalBooks": object()}):
+            sources = audiobook_backend.all_sources()
+
+        self.assertEqual(sources, [audiobook_backend.SOURCE_ARCHIVE_AUDIO,
+                                   "Librivox", "LoyalBooks"])
+
+    def test_chapters_download_into_one_numbered_folder(self):
+        item = {"title": "Sherlock", "author": "Doyle",
+                "backend_source": audiobook_backend.SOURCE_ARCHIVE_AUDIO,
+                "identifier": "sherlock", "size_bytes": 8}
+        chapters = [("https://x/01.mp3", "01.mp3"),
+                    ("https://x/02.mp3", "02.mp3")]
+        with tempfile.TemporaryDirectory() as folder:
+            with (mock.patch.object(audiobook_backend, "archive_streams",
+                                    return_value=chapters),
+                  mock.patch.object(audiobook_backend, "_http") as http):
+                http.return_value.get.return_value = _Response(content=b"data")
+                path = audiobook_backend.download(item, folder)
+
+            self.assertEqual(
+                os.path.relpath(path, folder),
+                os.path.join(audiobook_backend.AUDIOBOOK_SUBFOLDER,
+                             "Sherlock - Doyle"))
+            self.assertEqual(sorted(os.listdir(path)),
+                             ["01 - 01.mp3", "02 - 02.mp3"])
+
+    def test_a_chapter_already_on_disk_is_not_fetched_again(self):
+        item = {"title": "Sherlock", "author": "",
+                "backend_source": audiobook_backend.SOURCE_ARCHIVE_AUDIO,
+                "identifier": "sherlock"}
+        chapters = [("https://x/01.mp3", "01.mp3")]
+        with tempfile.TemporaryDirectory() as folder:
+            book_folder = os.path.join(
+                folder, audiobook_backend.AUDIOBOOK_SUBFOLDER, "Sherlock")
+            os.makedirs(book_folder)
+            with open(os.path.join(book_folder, "01 - 01.mp3"), "wb") as handle:
+                handle.write(b"already here")
+
+            with (mock.patch.object(audiobook_backend, "archive_streams",
+                                    return_value=chapters),
+                  mock.patch.object(audiobook_backend, "_http") as http):
+                audiobook_backend.download(item, folder)
+                http.return_value.get.assert_not_called()
+
+    def test_librivox_chapters_prefer_mp3_and_keep_their_order(self):
+        payload = {"files": [
+            {"name": "book_02.mp3"},
+            {"name": "book_01.mp3"},
+            {"name": "book_01.ogg"},
+            {"name": "cover.jpg"},
+        ]}
+        with mock.patch.object(audiobook_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=payload)
+            streams = audiobook_backend.archive_streams("book")
+
+        self.assertEqual([name for _url, name in streams],
+                         ["book_01.mp3", "book_02.mp3"])
+
+    def test_preview_plays_an_audiobook_chapter(self):
+        item = {"kind": "audiobook", "title": "Sherlock",
+                "streams": ["https://x/01.mp3"]}
+
+        location, title = preview.resolve_search_result(
+            item, audio_only=True, config={})
+
+        self.assertEqual(location, "https://x/01.mp3")
+        self.assertEqual(title, "Sherlock")
+
+
+if __name__ == "__main__":
+    unittest.main()

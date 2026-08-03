@@ -2,7 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Library tab: discover and play completed audio/video downloads."""
+"""Library tab: discover and play completed audio, video and book downloads."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from pathlib import Path
 
 import wx
 
-from ..runtime import open_folder
+from ..book_backend import BOOK_SUBFOLDER
+from ..runtime import open_file, open_folder
 from .media_player import MediaPlayerPanel
 
 AUDIO_EXTENSIONS = {
@@ -44,11 +45,32 @@ VIDEO_EXTENSIONS = {
     ".webm",
     ".wmv",
 }
-MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+BOOK_EXTENSIONS = {
+    ".azw3",
+    ".djvu",
+    ".epub",
+    ".fb2",
+    ".mobi",
+    ".pdf",
+    ".txt",
+}
+# A .txt is a book only inside the folder books are downloaded to; anywhere
+# else it is far more likely to be the user's own notes.
+BOOK_FOLDER_ONLY_EXTENSIONS = {".txt"}
+MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS | BOOK_EXTENSIONS
+KIND_BOOK = "Book"
+
+
+def _kind_for(extension):
+    if extension in AUDIO_EXTENSIONS:
+        return "Audio"
+    if extension in VIDEO_EXTENSIONS:
+        return "Video"
+    return KIND_BOOK
 
 
 def discover_media(root):
-    """Return media file records below *root*, sorted by relative path."""
+    """Return media and book file records below *root*, by relative path."""
     base = Path(root)
     if not base.is_dir():
         return []
@@ -64,11 +86,14 @@ def discover_media(root):
                 relative_parent = path.parent.relative_to(base)
             except OSError:
                 continue
+            if (extension in BOOK_FOLDER_ONLY_EXTENSIONS and
+                    relative_parent.parts[:1] != (BOOK_SUBFOLDER,)):
+                continue
             records.append(
                 {
                     "path": str(path),
                     "title": path.stem,
-                    "kind": "Audio" if extension in AUDIO_EXTENSIONS else "Video",
+                    "kind": _kind_for(extension),
                     "folder": ""
                     if str(relative_parent) == "."
                     else str(relative_parent),
@@ -100,7 +125,8 @@ class LibraryPanel(wx.Panel):
         self.list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.list.SetName("Downloaded media library")
         self.list.SetHelpText(
-            "Choose a download and press Enter to play it. Context Menu opens actions."
+            "Choose a download and press Enter to play it. Books open in your "
+            "usual reader. Context Menu opens actions."
         )
         for index, heading in enumerate(("Title", "Type", "Folder", "Size")):
             self.list.InsertColumn(index, heading)
@@ -110,7 +136,7 @@ class LibraryPanel(wx.Panel):
         self.list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_play_selected)
         self.list.Bind(wx.EVT_CONTEXT_MENU, self.on_context_menu)
 
-        self.play_btn = wx.Button(self, label="&Play selected")
+        self.play_btn = wx.Button(self, label="&Play or open selected")
         self.refresh_btn = wx.Button(self, label="&Refresh library")
         self.play_btn.Bind(wx.EVT_BUTTON, self.on_play_selected)
         self.refresh_btn.Bind(wx.EVT_BUTTON, self.on_refresh)
@@ -147,7 +173,7 @@ class LibraryPanel(wx.Panel):
         if announce:
             count = len(self.items)
             noun = "file" if count == 1 else "files"
-            self.frame.announce(f"Library refreshed: {count} media {noun}.")
+            self.frame.announce(f"Library refreshed: {count} {noun}.")
 
     def on_refresh(self, event):
         self.refresh()
@@ -162,8 +188,14 @@ class LibraryPanel(wx.Panel):
             self.frame.announce("Select a library item to play first.")
             return
         if not os.path.isfile(item["path"]):
-            self.frame.announce("That media file no longer exists. Refreshing library.")
+            self.frame.announce("That file no longer exists. Refreshing library.")
             self.refresh(announce=False)
+            return
+        if item["kind"] == KIND_BOOK:
+            # blindDL has no reader of its own; the book goes to whichever
+            # application the user already reads books in.
+            self.frame.announce(f"Opening {item['title']} in your reader.")
+            open_file(item["path"])
             return
         self.frame.play_media(self.player, item["path"], item["title"])
 
@@ -175,10 +207,13 @@ class LibraryPanel(wx.Panel):
                 self.list.Select(row)
                 self.list.Focus(row)
         menu = wx.Menu()
-        play = menu.Append(wx.ID_ANY, "&Play")
+        selected = self._selected_item()
+        play = menu.Append(
+            wx.ID_ANY,
+            "&Open" if (selected is not None
+                        and selected["kind"] == KIND_BOOK) else "&Play")
         open_location = menu.Append(wx.ID_ANY, "Open file &location")
         refresh_item = menu.Append(wx.ID_ANY, "&Refresh library")
-        selected = self._selected_item()
         play.Enable(selected is not None)
         open_location.Enable(selected is not None)
         menu.Bind(wx.EVT_MENU, self.on_play_selected, play)

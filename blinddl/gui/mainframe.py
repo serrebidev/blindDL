@@ -261,7 +261,10 @@ class MainFrame(wx.Frame):
             "serrebidev and contributors.\n\n"
             "Tabs: Ctrl+1-5. URL: Ctrl+L. Search: Ctrl+F.\n"
             "Play from URL or Search without downloading, or use Library "
-            "to play completed downloads.",
+            "to play completed downloads.\n"
+            "Search also finds free books, audiobooks, old-time radio, "
+            "movies and TV. Downloaded books open in your usual reader "
+            "from the Library tab.",
             f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self)
 
     def on_close(self, event):

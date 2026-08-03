@@ -31,10 +31,24 @@ def prepare_runtime_path() -> None:
         os.environ["PATH"] = os.pathsep.join(available + [os.environ.get("PATH", "")])
 
 
-def open_folder(path: str) -> None:
-    """Open *path* in the platform's file manager."""
+def _open(path: str) -> None:
     if sys.platform == "win32":
         os.startfile(path)  # type: ignore[attr-defined]
         return
     command = ["open", path] if sys.platform == "darwin" else ["xdg-open", path]
     subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def open_folder(path: str) -> None:
+    """Open *path* in the platform's file manager."""
+    _open(path)
+
+
+def open_file(path: str) -> None:
+    """Open *path* in whatever application the user has set for its type.
+
+    Books are handed to the reader the user already knows -- their browser,
+    Adobe Reader, Calibre, or an NVDA add-on -- rather than to a viewer
+    blindDL would have to grow.
+    """
+    _open(path)

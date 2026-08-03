@@ -9,7 +9,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
-from . import adult_backend, sideb_backend, ytdlp_backend
+from . import (
+    adult_backend, archive_backend, audiobook_backend, sideb_backend,
+    ytdlp_backend,
+)
 
 DIRECT_MEDIA_EXTENSIONS = {
     ".3gp", ".aac", ".aiff", ".avi", ".flac", ".flv", ".m3u8", ".m4a",
@@ -71,6 +74,22 @@ def resolve_search_result(item, audio_only, config):
         if stream:
             return stream, title
         raise RuntimeError("This music source did not provide a preview stream.")
+
+    if kind == "archive":
+        # A whole item previews from its first file; a chosen episode has
+        # its own URL already.
+        stream = archive_backend.first_stream(item)
+        if not stream:
+            raise RuntimeError("This item has no playable file.")
+        return stream, title
+
+    if kind == "audiobook":
+        # Preview plays the opening chapter; the rest arrive with the
+        # download. Its URL points straight at an audio file.
+        stream = audiobook_backend.first_stream(item)
+        if not stream:
+            raise RuntimeError("This audiobook has no playable chapter.")
+        return stream, title
 
     if kind == "sideb":
         query = " ".join(

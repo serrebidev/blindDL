@@ -15,6 +15,14 @@ and their transitive dependencies:
 - FFmpeg — LGPL v2.1 or later, or GPL when built with GPL components
 - python-vlc / libVLC — GNU Lesser General Public License v2.1 or later
 - aebn-vod-downloader — MIT License
+- audiobooker — MIT License
+- mediavocab — Apache License 2.0
+- feedparser — BSD 2-Clause License
+- Beautiful Soup — MIT License
+
+Book, audiobook and Internet Archive searches use each site's own public API:
+archive.org, openlibrary.org, gutendex.com, standardebooks.org, and Anna's
+Archive. blindDL redistributes none of their content.
 
 blindDL distributions include the EchterAlsFake adult API provider set. As of
 2026-08-02, `eaf_base_api` and the active video API packages are AGPL-3.0,

@@ -2,7 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Search tab: music, adult API providers, or yt-dlp/YouTube."""
+"""Search tab: music, books, audiobooks, Archive media, adult sites, yt-dlp."""
 
 import threading
 import time
@@ -10,29 +10,46 @@ import time
 import wx
 
 from .. import (
-    adult_backend, musicdl_backend, preview, sideb_backend, ytdlp_backend,
+    adult_backend, archive_backend, audiobook_backend, book_backend,
+    musicdl_backend, preview, sideb_backend, ytdlp_backend,
 )
+from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 
 ENGINE_MUSIC = 0
 ENGINE_YOUTUBE = 1
-ENGINE_STRAIGHT = 2
-ENGINE_GAY = 3
-ENGINE_LESBIAN = 4
-ENGINE_BISEXUAL = 5
-ENGINE_TRANS = 6
+ENGINE_BOOKS = 2
+ENGINE_AUDIOBOOKS = 3
+ENGINE_ARCHIVE_AUDIO = 4
+ENGINE_ARCHIVE_VIDEO = 5
+ENGINE_STRAIGHT = 6
+ENGINE_GAY = 7
+ENGINE_LESBIAN = 8
+ENGINE_BISEXUAL = 9
+ENGINE_TRANS = 10
 # Kept as an import-compatible name for callers that treated adult search as
 # the first adult choice before content categories were separated.
 ENGINE_ADULT = ENGINE_STRAIGHT
 ENGINE_LABELS = [
     "Music sites",
     "YouTube/web",
+    "Books",
+    "Audiobooks",
+    "Old-time radio and music",
+    "Movies and TV",
     "Straight porn",
     "Gay porn",
     "Lesbian porn",
     "Bisexual porn",
     "Trans porn",
 ]
+# The engines shown before the adult categories, which stay hidden until the
+# user switches them on in Settings.
+GENERAL_ENGINE_COUNT = 6
+ARCHIVE_ENGINE_CATEGORIES = {
+    ENGINE_ARCHIVE_AUDIO: archive_backend.AUDIO_CATEGORIES,
+    ENGINE_ARCHIVE_VIDEO: archive_backend.VIDEO_CATEGORIES,
+}
 ADULT_ENGINE_CATEGORIES = {
     ENGINE_STRAIGHT: adult_backend.CONTENT_STRAIGHT,
     ENGINE_GAY: adult_backend.CONTENT_GAY,
@@ -54,15 +71,92 @@ SORT_LABELS = [
     "Shortest duration",
     "Longest duration",
 ]
+# Same six sort slots, named for what they actually do to a list of books.
+BOOK_SORT_LABELS = [
+    "Relevance",
+    "Title",
+    "Library",
+    "Author",
+    "Oldest first",
+    "Newest first",
+]
+AUDIOBOOK_SORT_LABELS = [
+    "Relevance",
+    "Title",
+    "Site",
+    "Author",
+    "Shortest recording",
+    "Longest recording",
+]
+ARCHIVE_SORT_LABELS = [
+    "Relevance",
+    "Title",
+    "Collection",
+    "Creator",
+    "Oldest first",
+    "Newest first",
+]
+COLUMN_HEADINGS = ("Title", "Artist / channel", "Source", "Duration", "Size")
+BOOK_COLUMN_HEADINGS = ("Title", "Author", "Library", "Year", "Size")
+AUDIOBOOK_COLUMN_HEADINGS = ("Title", "Author", "Site", "Duration", "Chapters")
+ARCHIVE_COLUMN_HEADINGS = ("Title", "Creator", "Collection", "Year", "Size")
 
 
 def _is_adult_engine(engine):
     return engine in ADULT_ENGINE_CATEGORIES
 
 
-def _sorted_results(items, mode):
+def _is_archive_engine(engine):
+    return engine in ARCHIVE_ENGINE_CATEGORIES
+
+
+def _sort_labels(engine):
+    if engine == ENGINE_BOOKS:
+        return BOOK_SORT_LABELS
+    if engine == ENGINE_AUDIOBOOKS:
+        return AUDIOBOOK_SORT_LABELS
+    if _is_archive_engine(engine):
+        return ARCHIVE_SORT_LABELS
+    return SORT_LABELS
+
+
+def _column_headings(engine):
+    if engine == ENGINE_BOOKS:
+        return BOOK_COLUMN_HEADINGS
+    if engine == ENGINE_AUDIOBOOKS:
+        return AUDIOBOOK_COLUMN_HEADINGS
+    if _is_archive_engine(engine):
+        return ARCHIVE_COLUMN_HEADINGS
+    return COLUMN_HEADINGS
+
+
+def _year(item):
+    try:
+        return int(str(item.get("year") or "").strip()[:4])
+    except (TypeError, ValueError):
+        return None
+
+
+def _sorted_results(items, mode, engine=None):
     """Return results in a stable, deterministic display order."""
     indexed = list(enumerate(items))
+
+    if ((engine == ENGINE_BOOKS or _is_archive_engine(engine)) and
+            mode in (SORT_SHORTEST, SORT_LONGEST)):
+        # These results carry a year rather than a duration, so the two
+        # duration slots sort by when the work was published.
+        newest = mode == SORT_LONGEST
+
+        def key(pair):
+            year = _year(pair[1])
+            return (
+                year is None,
+                -(year or 0) if newest else (year or 0),
+                str(pair[1].get("title", "")).casefold(),
+                pair[0],
+            )
+
+        return [item for _index, item in sorted(indexed, key=key)]
 
     def text(item, *names):
         for name in names:
@@ -134,6 +228,7 @@ class SearchPanel(wx.Panel):
         self.closing = False
         self.next_result_order = 0
         self.preview_token = None
+        self.archive_token = None
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -150,6 +245,7 @@ class SearchPanel(wx.Panel):
             self, choices=self._visible_engine_labels())
         self.engine_choice.SetName("Search source")
         self.engine_choice.SetSelection(0)
+        self.engine_choice.Bind(wx.EVT_CHOICE, self.on_engine_changed)
 
         sort_label = wx.StaticText(self, label="Sort &by:")
         self.sort_choice = wx.Choice(self, choices=SORT_LABELS)
@@ -165,8 +261,7 @@ class SearchPanel(wx.Panel):
         self.results_list.SetHelpText(
             "Select results. Enter downloads; Control C copies the URL; "
             "Context Menu opens actions.")
-        for i, heading in enumerate(("Title", "Artist / channel", "Source",
-                                     "Duration", "Size")):
+        for i, heading in enumerate(COLUMN_HEADINGS):
             self.results_list.InsertColumn(i, heading)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_download_selected)
         self.results_list.Bind(wx.EVT_CONTEXT_MENU, self.on_results_menu)
@@ -202,7 +297,7 @@ class SearchPanel(wx.Panel):
     def _visible_engine_labels(self):
         if self.frame.config["adult_sites_enabled"]:
             return ENGINE_LABELS
-        return ENGINE_LABELS[:2]
+        return ENGINE_LABELS[:GENERAL_ENGINE_COUNT]
 
     def refresh_engine_choices(self):
         """Show or hide adult categories after Settings changes."""
@@ -213,6 +308,36 @@ class SearchPanel(wx.Panel):
         if selection < 0 or selection >= len(labels):
             selection = ENGINE_MUSIC
         self.engine_choice.SetSelection(selection)
+        self._apply_engine_controls(selection)
+
+    def _apply_engine_controls(self, engine):
+        """Name the sort choices and the preview button for one engine.
+
+        Books have no duration to sort by and nothing to play, so the same
+        controls are renamed rather than duplicated -- a screen reader then
+        reads "Author" and "Newest first" instead of options that mean
+        nothing for a book.
+        """
+        labels = _sort_labels(engine)
+        if [self.sort_choice.GetString(index)
+                for index in range(self.sort_choice.GetCount())] != labels:
+            selection = self.sort_choice.GetSelection()
+            self.sort_choice.Clear()
+            self.sort_choice.AppendItems(labels)
+            self.sort_choice.SetSelection(
+                selection if 0 <= selection < len(labels) else SORT_RELEVANCE)
+        self.preview_btn.Enable(engine != ENGINE_BOOKS)
+
+    def _apply_engine_columns(self, engine):
+        for index, heading in enumerate(_column_headings(engine)):
+            column = self.results_list.GetColumn(index)
+            if column.GetText() != heading:
+                column.SetText(heading)
+                self.results_list.SetColumn(index, column)
+
+    def on_engine_changed(self, event):
+        self._apply_engine_controls(self.engine_choice.GetSelection())
+        event.Skip()
 
     def shutdown(self):
         """Stop timers and silence worker callbacks before widgets are freed."""
@@ -240,6 +365,29 @@ class SearchPanel(wx.Panel):
             if not sources:
                 self.frame.announce(
                     "No music sites selected. Use Tools, Search sites.")
+                return
+        elif engine == ENGINE_BOOKS:
+            sources = book_backend.enabled_sources(
+                self.frame.config["disabled_book_sources"])
+            if not sources:
+                self.frame.announce(
+                    "No book libraries selected. Use Tools, Search sites.")
+                return
+        elif engine == ENGINE_AUDIOBOOKS:
+            sources = audiobook_backend.enabled_sources(
+                self.frame.config["disabled_audiobook_sources"])
+            if not sources:
+                self.frame.announce(
+                    "No audiobook sites selected. Use Tools, Search sites.")
+                return
+        elif _is_archive_engine(engine):
+            sources = archive_backend.enabled_sources(
+                self.frame.config["disabled_archive_sources"],
+                ARCHIVE_ENGINE_CATEGORIES[engine])
+            if not sources:
+                self.frame.announce(
+                    "No Internet Archive collections selected. Use Tools, "
+                    "Search sites.")
                 return
         elif _is_adult_engine(engine):
             if not self.frame.config["adult_sites_enabled"]:
@@ -274,6 +422,7 @@ class SearchPanel(wx.Panel):
         self.next_result_order = 0
         self.timer.Stop()
         self.results_list.DeleteAllItems()
+        self._apply_engine_columns(engine)
 
         if engine == ENGINE_MUSIC:
             # Side B's Deezer catalog search goes out next to the musicdl
@@ -282,6 +431,24 @@ class SearchPanel(wx.Panel):
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} music {site_word} "
+                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+        elif engine == ENGINE_BOOKS:
+            count = len(sources)
+            library_word = "library" if count == 1 else "libraries"
+            self.frame.announce(
+                f"Searching {count} book {library_word} "
+                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+        elif engine == ENGINE_AUDIOBOOKS:
+            count = len(sources)
+            site_word = "site" if count == 1 else "sites"
+            self.frame.announce(
+                f"Searching {count} audiobook {site_word} "
+                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+        elif _is_archive_engine(engine):
+            count = len(sources)
+            word = "collection" if count == 1 else "collections"
+            self.frame.announce(
+                f"Searching {count} Internet Archive {word} "
                 f"({self.frame.config['search_timeout_s']:g} seconds each)...")
         elif _is_adult_engine(engine):
             count = len(sources)
@@ -310,6 +477,33 @@ class SearchPanel(wx.Panel):
                     on_site=on_site, stop=stop, sources=sources)
                 asked.append(sideb_backend.SIDEB_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
+                items = []
+            elif engine == ENGINE_BOOKS:
+                def on_library(source, items):
+                    wx.CallAfter(self._add_site, token, engine, source, items)
+
+                items, _answered, asked = book_backend.search(
+                    query, self.frame.config["search_timeout_s"],
+                    on_site=on_library, stop=stop, sources=sources)
+                # on_library already delivered these.
+                items = []
+            elif engine == ENGINE_AUDIOBOOKS:
+                def on_audiobook_site(source, items):
+                    wx.CallAfter(self._add_site, token, engine, source, items)
+
+                items, _answered, asked = audiobook_backend.search(
+                    query, self.frame.config["search_timeout_s"],
+                    on_site=on_audiobook_site, stop=stop, sources=sources)
+                # on_audiobook_site already delivered these.
+                items = []
+            elif _is_archive_engine(engine):
+                def on_collection(source, items):
+                    wx.CallAfter(self._add_site, token, engine, source, items)
+
+                items, _answered, asked = archive_backend.search(
+                    query, self.frame.config["search_timeout_s"],
+                    on_site=on_collection, stop=stop, sources=sources)
+                # on_collection already delivered these.
                 items = []
             elif _is_adult_engine(engine):
                 def on_adult_site(source, items):
@@ -362,7 +556,7 @@ class SearchPanel(wx.Panel):
             self.next_result_order += 1
             self.results.append(item)
         self.results = _sorted_results(
-            self.results, self.sort_choice.GetSelection())
+            self.results, self.sort_choice.GetSelection(), engine)
         self._render_results(engine, selected=selected, focused=focused)
         if self.done:
             # A late site: say so on the status bar, but leave focus alone.
@@ -374,7 +568,35 @@ class SearchPanel(wx.Panel):
 
     def _insert_result_row(self, row, item, engine):
         self.results_list.InsertItem(row, item["title"])
-        if engine != ENGINE_YOUTUBE:
+        if engine == ENGINE_BOOKS:
+            self.results_list.SetItem(row, 1, item.get("author", ""))
+            self.results_list.SetItem(row, 2, item.get("source", ""))
+            self.results_list.SetItem(row, 3, str(item.get("year") or ""))
+            size = item.get("file_size") or ""
+            book_format = item.get("format") or ""
+            # The format matters more than the byte count when choosing a
+            # book, so it rides along in the column that has room for it.
+            self.results_list.SetItem(
+                row, 4, f"{book_format} {size}".strip())
+        elif engine == ENGINE_AUDIOBOOKS:
+            author = item.get("author", "")
+            narrator = item.get("narrator", "")
+            if narrator and narrator != author:
+                author = f"{author}, read by {narrator}" if author else \
+                    f"read by {narrator}"
+            self.results_list.SetItem(row, 1, author)
+            self.results_list.SetItem(row, 2, item.get("source", ""))
+            self.results_list.SetItem(
+                row, 3, ytdlp_backend.format_duration(item.get("duration_s")))
+            chapters = item.get("chapters") or 0
+            self.results_list.SetItem(
+                row, 4, str(chapters) if chapters else "")
+        elif _is_archive_engine(engine):
+            self.results_list.SetItem(row, 1, item.get("creator", ""))
+            self.results_list.SetItem(row, 2, item.get("source", ""))
+            self.results_list.SetItem(row, 3, str(item.get("year") or ""))
+            self.results_list.SetItem(row, 4, item.get("file_size", ""))
+        elif engine != ENGINE_YOUTUBE:
             self.results_list.SetItem(row, 1, item.get("artist", ""))
             self.results_list.SetItem(row, 2, item.get("source", ""))
             self.results_list.SetItem(
@@ -398,6 +620,7 @@ class SearchPanel(wx.Panel):
 
     def _render_results(self, engine, selected=(), focused=None):
         selected_ids = {id(item) for item in selected}
+        self._apply_engine_columns(engine)
         self.results_list.DeleteAllItems()
         for row, item in enumerate(self.results):
             self._insert_result_row(row, item, engine)
@@ -410,10 +633,11 @@ class SearchPanel(wx.Panel):
         selected = self._selected_result_objects()
         focused = self._focused_result_object()
         mode = self.sort_choice.GetSelection()
-        self.results = _sorted_results(self.results, mode)
+        self.results = _sorted_results(self.results, mode, self.result_engine)
         self._render_results(
             self.result_engine, selected=selected, focused=focused)
-        label = SORT_LABELS[mode] if 0 <= mode < len(SORT_LABELS) else "selected order"
+        labels = _sort_labels(self.result_engine)
+        label = labels[mode] if 0 <= mode < len(labels) else "selected order"
         if self.results:
             self.frame.announce(f"Sorted {self._result_count()} by {label}.")
         else:
@@ -494,6 +718,62 @@ class SearchPanel(wx.Panel):
             self.results_list.Select(index, False)
         self.frame.announce("Selection cleared.")
 
+    # -- Internet Archive items ---------------------------------------------
+
+    def _queue_archive_item(self, item):
+        """Resolve one Archive item's files, then queue or offer a choice."""
+        token = self.archive_token = object()
+        self.frame.announce(f"Reading file list: {item['title']}")
+        threading.Thread(
+            target=self._resolve_archive_files,
+            args=(token, item),
+            daemon=True,
+            name="blinddl-archive-files",
+        ).start()
+
+    def _resolve_archive_files(self, token, item):
+        try:
+            files = archive_backend.item_files(
+                item["identifier"], video=bool(item.get("video")))
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            wx.CallAfter(self._archive_files_failed, token, str(exc))
+            return
+        wx.CallAfter(self._archive_files_ready, token, item, files)
+
+    def _archive_files_failed(self, token, error):
+        if self.closing or token is not self.archive_token:
+            return
+        self.frame.announce("Could not read that item's file list.")
+        wx.MessageBox(f"Could not read that item:\n{error}", "blindDL",
+                      wx.OK | wx.ICON_ERROR, self)
+
+    def _archive_files_ready(self, token, item, files):
+        if self.closing or token is not self.archive_token:
+            return
+        if len(files) == 1:
+            chosen = files
+        else:
+            dialog = ItemPickerDialog(self, files, item["title"])
+            try:
+                if dialog.ShowModal() != wx.ID_OK:
+                    self.frame.announce("Download cancelled.")
+                    return
+                chosen = dialog.selected_items()
+            finally:
+                dialog.Destroy()
+            self.results_list.SetFocus()
+        if not chosen:
+            self.frame.announce("Nothing selected.")
+            return
+        for entry in chosen:
+            payload = dict(entry)
+            payload["collection_title"] = item["title"]
+            self.frame.queue.add_archive(payload, entry["title"])
+        if len(chosen) == 1:
+            self.frame.announce(f"Queued: {chosen[0]['title']}")
+        else:
+            self.frame.announce(f"Queued {len(chosen)} downloads.")
+
     def on_results_char(self, event):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
             self.on_copy_url(event)
@@ -560,7 +840,7 @@ class SearchPanel(wx.Panel):
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear = menu.Append(wx.ID_ANY, "&Clear selection")
         has_selection = bool(self._selected_indices())
-        preview_item.Enable(has_selection)
+        preview_item.Enable(has_selection and self.result_engine != ENGINE_BOOKS)
         download.Enable(has_selection)
         copy_url.Enable(has_selection)
         clear.Enable(has_selection)
@@ -576,6 +856,11 @@ class SearchPanel(wx.Panel):
         menu.Destroy()
 
     def on_preview_selected(self, event):
+        if self.result_engine == ENGINE_BOOKS:
+            self.frame.announce(
+                "Books cannot be previewed. Press Enter to download, then "
+                "open it from the Library tab.")
+            return
         indices = [index for index in self._selected_indices()
                    if index < len(self.results)]
         if not indices:
@@ -585,7 +870,7 @@ class SearchPanel(wx.Panel):
         if index not in indices:
             index = indices[0]
         item = self.results[index]
-        audio_only = self.result_engine == ENGINE_MUSIC
+        audio_only = self.result_engine in (ENGINE_MUSIC, ENGINE_AUDIOBOOKS)
         token = self.preview_token = object()
         self.preview_btn.Disable()
         self.frame.announce(f"Preparing preview: {item['title']}")
@@ -628,6 +913,11 @@ class SearchPanel(wx.Panel):
             self.frame.announce("Select a result first.")
             return
         engine = self.result_engine
+        if _is_archive_engine(engine) and len(indices) == 1:
+            # One Archive item can be a whole radio series. Ask which
+            # episodes to take before filling the queue with hundreds.
+            self._queue_archive_item(self.results[indices[0]])
+            return
         for index in indices:
             item = self.results[index]
             if engine == ENGINE_MUSIC:
@@ -636,6 +926,12 @@ class SearchPanel(wx.Panel):
                 else:
                     self.frame.queue.add_musicdl(
                         item["song_info"], item["title"])
+            elif engine == ENGINE_BOOKS:
+                self.frame.queue.add_book(item, item["title"])
+            elif engine == ENGINE_AUDIOBOOKS:
+                self.frame.queue.add_audiobook(item, item["title"])
+            elif _is_archive_engine(engine):
+                self.frame.queue.add_archive(item, item["title"])
             elif _is_adult_engine(engine):
                 self.frame.queue.add_adult(item, item["title"])
             else:

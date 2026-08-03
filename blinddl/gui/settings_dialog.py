@@ -122,6 +122,15 @@ class SettingsDialog(wx.Dialog):
                                     style=wx.TE_PASSWORD)
         self.arl_text.SetName("Deezer ARL cookie")
 
+        annas_label = wx.StaticText(
+            self, label="Anna's Archive &membership key:")
+        self.annas_text = wx.TextCtrl(self, value=config["annas_archive_key"],
+                                      style=wx.TE_PASSWORD)
+        self.annas_text.SetName("Anna's Archive membership key")
+        self.annas_text.SetHelpText(
+            "Optional. With a key, book downloads use the fast partner "
+            "servers; without one they come from the public LibGen mirrors.")
+
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
 
         def row(label_ctrl, ctrl):
@@ -147,6 +156,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(justforfans_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.justforfans_auth_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(row(arl_label, self.arl_text), 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(row(annas_label, self.annas_text), 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizerAndFit(sizer)
 
@@ -168,4 +178,5 @@ class SettingsDialog(wx.Dialog):
         self.config["justforfans_auth_file"] = (
             self.justforfans_auth_picker.GetPath().strip())
         self.config["deezer_arl"] = self.arl_text.GetValue().strip()
+        self.config["annas_archive_key"] = self.annas_text.GetValue().strip()
         self.config.save()
