@@ -37,7 +37,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -49,9 +49,8 @@ SOURCE_EZTV = "EZTV"
 SOURCE_NYAA = "Nyaa"
 SOURCE_TORRENTS_CSV = "Torrents-CSV"
 SOURCE_LIMETORRENTS = "LimeTorrents"
-SOURCE_BITSEARCH = "BitSearch"
+SOURCE_BITSEARCH = "BitSearch / SolidTorrents"
 SOURCE_KNABEN = "Knaben"
-SOURCE_SOLIDTORRENTS = "SolidTorrents"
 ALL_SOURCES = [
     SOURCE_KNABEN,
     SOURCE_PIRATEBAY,
@@ -60,7 +59,6 @@ ALL_SOURCES = [
     SOURCE_TORRENTS_CSV,
     SOURCE_LIMETORRENTS,
     SOURCE_BITSEARCH,
-    SOURCE_SOLIDTORRENTS,
 ]
 
 PIRATEBAY_URL = "https://apibay.org/q.php"
@@ -68,9 +66,9 @@ EZTV_URL = "https://eztvx.to/api/get-torrents"
 NYAA_URL = "https://nyaa.si/"
 TORRENTS_CSV_URL = "https://torrents-csv.com/service/search"
 LIMETORRENTS_URL = "https://www.limetorrents.lol/search/all"
-BITSEARCH_URL = "https://bitsearch.to/search"
+# The origin. solidtorrents.to and bitsearch.to are both 301s onto it.
+BITSEARCH_URL = "https://bitsearch.eu/api/v1/search"
 KNABEN_URL = "https://api.knaben.org/v1"
-SOLIDTORRENTS_URL = "https://solidtorrents.to/api/v1/search"
 
 SEARCH_TIMEOUT_S = 8.0
 HTTP_TIMEOUT_S = 20
@@ -99,7 +97,6 @@ _PIRATEBAY_CATEGORIES = {
 }
 
 _HASH_RE = re.compile(r"\b([0-9a-fA-F]{40})\b")
-_MAGNET_RE = re.compile(r'href="(magnet:\?[^"]+)"')
 _TAG_RE = re.compile(r"<[^>]+>")
 _NYAA_NS = "{https://nyaa.si/xmlns/nyaa}"
 
@@ -500,43 +497,38 @@ def search_limetorrents(query, timeout=HTTP_TIMEOUT_S):
     return items
 
 
-# -- BitSearch --------------------------------------------------------------
+# -- BitSearch / SolidTorrents ----------------------------------------------
 
 
 def search_bitsearch(query, timeout=HTTP_TIMEOUT_S):
-    """Scrape BitSearch, anchored on its magnet links.
+    """One index, reached through its JSON API.
 
-    Its page markup is rewritten often, so nothing is read from the layout
-    itself: each magnet carries the name and hash, and the swarm counts are
-    taken from the block of text that precedes it.
+    BitSearch and SolidTorrents are the same service: the same torrent ids
+    and the same info hashes come back from both, and solidtorrents.to
+    redirects onto bitsearch.to, which redirects onto bitsearch.eu. They are
+    one source here rather than two, or every result would be listed twice.
+
+    The API is asked directly at the origin, both to skip that redirect pair
+    and because it answers with a hundred rows where either website shows
+    twenty. It publishes no magnet, so the info hash builds one.
     """
-    response = _http().get(BITSEARCH_URL, params={"q": query}, timeout=timeout)
+    response = _http().get(
+        BITSEARCH_URL,
+        params={"q": query, "sort": "seeders", "limit": 100},
+        timeout=timeout,
+    )
     response.raise_for_status()
-    page = html.unescape(response.text)
     items = []
-    previous = 0
-    for match in _MAGNET_RE.finditer(page):
-        magnet = html.unescape(match.group(1))
-        found = _HASH_RE.search(magnet)
-        if not found:
-            continue
-        block = _text(page[previous:match.start()])
-        previous = match.end()
-        name = re.search(r"dn=([^&]+)", magnet)
-        title = unquote(name.group(1).replace("+", " ")) if name else ""
-        # BitSearch stamps its own name onto every display name.
-        title = re.sub(r"^\[\s*Bitsearch\.to\s*\]\s*", "", title,
-                       flags=re.IGNORECASE).strip()
-        counts = re.search(
-            r"(\d[\d,]*)\s+seeders.*?(\d[\d,]*)\s+leechers", block,
-            re.IGNORECASE | re.DOTALL)
-        size = re.search(r"(\d+(?:\.\d+)?\s*[KMGT]i?B)\b", block)
+    for doc in response.json().get("results") or ():
         items.append(_item(
-            SOURCE_BITSEARCH, found.group(1), title, magnet=magnet,
-            seeders=_int(counts.group(1).replace(",", "")) if counts else 0,
-            leechers=_int(counts.group(2).replace(",", "")) if counts else 0,
-            file_size=size.group(1) if size else "",
-            url=f"https://bitsearch.to/torrents/{found.group(1).lower()}",
+            SOURCE_BITSEARCH, doc.get("infohash"), doc.get("title"),
+            seeders=_int(doc.get("seeders")),
+            leechers=_int(doc.get("leechers")),
+            size_bytes=_int(doc.get("size")),
+            # updatedAt is when the row was last re-scraped rather than when
+            # the torrent was posted, which is all this API carries.
+            age=_age(_timestamp(doc.get("updatedAt"))),
+            url=f"https://bitsearch.eu/torrent/{doc.get('id')}",
         ))
     return items
 
@@ -590,27 +582,6 @@ def search_knaben(query, timeout=HTTP_TIMEOUT_S):
         ))
     return items
 
-
-# -- SolidTorrents -----------------------------------------------------------
-
-
-def search_solidtorrents(query, timeout=HTTP_TIMEOUT_S):
-    """SolidTorrents publishes a plain JSON search of its own index."""
-    response = _http().get(SOLIDTORRENTS_URL,
-                           params={"q": query, "sort": "seeders"},
-                           timeout=timeout)
-    response.raise_for_status()
-    items = []
-    for doc in response.json().get("results") or ():
-        items.append(_item(
-            SOURCE_SOLIDTORRENTS, doc.get("infohash"), doc.get("title"),
-            seeders=_int(doc.get("seeders")),
-            leechers=_int(doc.get("leechers")),
-            size_bytes=_int(doc.get("size")),
-            age=_age(_timestamp(doc.get("updatedAt"))),
-            url=f"https://solidtorrents.to/torrents/{doc.get('id')}",
-        ))
-    return items
 
 
 # -- user feeds: Torznab, Newznab and Prowlarr's own API ---------------------
@@ -720,7 +691,6 @@ def search_feed(query, feed, timeout=HTTP_TIMEOUT_S):
 
 _SEARCHERS = {
     SOURCE_KNABEN: search_knaben,
-    SOURCE_SOLIDTORRENTS: search_solidtorrents,
     SOURCE_PIRATEBAY: search_piratebay,
     SOURCE_EZTV: search_eztv,
     SOURCE_NYAA: search_nyaa,
