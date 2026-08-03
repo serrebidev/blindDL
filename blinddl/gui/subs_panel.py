@@ -16,9 +16,14 @@ class AddSubscriptionDialog(wx.Dialog):
         super().__init__(parent, title="Add subscription")
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        url_label = wx.StaticText(self, label="&URL:")
+        url_label = wx.StaticText(
+            self,
+            label="&URL, @handle, #hashtag, or playlist id:")
         self.url_text = wx.TextCtrl(self)
         self.url_text.SetName("Subscription URL")
+        self.url_text.SetHelpText(
+            "Subscribe to a playlist, channel, hashtag, or search results "
+            "page.")
         self.existing_check = wx.CheckBox(
             self, label="&Download existing items")
         self.existing_check.SetName("Download existing items")
@@ -137,7 +142,7 @@ class SubsPanel(wx.Panel):
         if dialog.ShowModal() != wx.ID_OK:
             dialog.Destroy()
             return
-        url = dialog.url_text.GetValue().strip()
+        url = ytdlp_backend.normalize_url(dialog.url_text.GetValue())
         download_existing = dialog.existing_check.GetValue()
         dialog.Destroy()
         if not url:

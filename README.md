@@ -34,7 +34,7 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Returns fast search results without waiting for the slowest provider; late results continue appearing as they arrive.
 - Opens multi-item links as a checked list so you can download everything or only the items you want.
 - Runs as many simultaneous downloads as you choose, with no artificial download limit.
-- Subscribes to playlists and channels, then checks for and downloads new items automatically.
+- Subscribes to playlists, channels, hashtags, and search pages, then checks for and downloads new items automatically.
 - Updates yt-dlp nightly builds, musicdl, Side B, wxPython, Deno, and FFmpeg from inside the app.
 - Uses native wxWidgets controls, labeled fields, status-bar announcements, and complete keyboard operation.
 - Includes context menus for actions in search results, downloads, Library, and subscriptions.
@@ -166,6 +166,24 @@ A JustForFans file uses the cookie and account ID visible on an authenticated
 Treat these files like passwords. Only ordinary MP4, HLS, image, audio, and GIF
 media is supported. blindDL does not accept DRM device keys or decrypt
 protected OnlyFans/JustForFans media.
+
+### Subscriptions
+
+The Subscriptions tab follows a source and queues whatever appears there next.
+The Add subscription field takes a YouTube playlist (including a
+`watch?v=...&list=...` link, which subscribes to the playlist rather than the
+one video), a channel in any of its forms, a hashtag page, or a search results
+page, plus the equivalents on every other site yt-dlp supports. Shorthand is
+accepted too: `@handle`, `#hashtag`, a bare playlist id, or a channel id.
+
+Subscribing to a channel by its plain address follows every tab it publishes —
+Videos, Shorts, and Live — so nothing is missed. Hashtag and search feeds are
+ranked rather than chronological and reshuffle between visits, so blindDL reads
+only their top 100 entries; already-seen items are never queued twice.
+
+**Download existing items** in the Add dialog queues everything currently
+listed. Leave it clear to start from now on. Checks run in the background at
+the interval in Settings, and Ctrl+Shift+C checks everything immediately.
 
 On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`,
 `ffmpeg`, `libvlc5`, `vlc-plugin-base`, and `git` first, then create the virtual environment with

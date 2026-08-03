@@ -10,6 +10,7 @@ them onto the main thread.
 """
 
 import os
+import re
 
 import yt_dlp
 
@@ -43,21 +44,82 @@ def _entry_to_item(entry):
     }
 
 
-def extract_flat(url, cookies_from_browser=None):
+MAX_NESTED_DEPTH = 3
+# Search results and hashtag feeds are ranked, endless, and re-shuffle
+# between visits, so only the top slice is worth listing.
+RANKED_FEED_LIMIT = 100
+
+_CHANNEL_ID_RE = re.compile(r"UC[\w-]{22}")
+_PLAYLIST_ID_RE = re.compile(r"(?:PL|UU|LL|FL|OL|RD)[\w-]{10,}")
+_RANKED_FEED_RE = re.compile(
+    r"https?://[^/]*youtube\.com/(?:results\b|hashtag/)", re.IGNORECASE)
+
+
+def normalize_url(text):
+    """Expand shorthand into something yt-dlp can open.
+
+    Typing a full URL is awkward with a screen reader, so a channel handle
+    ("@veritasium"), a hashtag ("#rimworld"), a bare channel or playlist id,
+    or a scheme-less address are all accepted as subscription targets.
+    """
+    text = (text or "").strip()
+    if not text or "://" in text:
+        return text
+    if text.startswith("@") and " " not in text:
+        return f"https://www.youtube.com/{text}"
+    if text.startswith("#") and " " not in text:
+        return f"https://www.youtube.com/hashtag/{text[1:].lstrip('#')}"
+    if _CHANNEL_ID_RE.fullmatch(text):
+        return f"https://www.youtube.com/channel/{text}"
+    if _PLAYLIST_ID_RE.fullmatch(text):
+        return f"https://www.youtube.com/playlist?list={text}"
+    if "." in text and " " not in text:
+        return f"https://{text}"
+    return text
+
+
+def _iter_entries(entries, depth=MAX_NESTED_DEPTH):
+    """Yield leaf entries, expanding nested containers as we go.
+
+    A bare channel URL extracts as a playlist of tab playlists ("Videos",
+    "Shorts", "Live"). Those tabs carry no URL of their own, so without this
+    expansion a channel yields no items at all.
+    """
+    for entry in entries:
+        if not entry:
+            continue
+        nested = entry.get("entries") if depth > 0 else None
+        if nested is not None and entry.get("_type") in ("playlist",
+                                                         "multi_video"):
+            yield from _iter_entries(nested, depth - 1)
+        else:
+            yield entry
+
+
+def extract_flat(url, cookies_from_browser=None, limit=None):
     """Inspect a URL without downloading.
 
     Returns (items, title): items is a list of normalized dicts (one entry
-    for a single video, many for a playlist/channel), title is the name of
-    the video/playlist/channel itself.
+    for a single video, many for a playlist/channel/hashtag), title is the
+    name of the video/playlist/channel itself. *limit* caps how many entries
+    are listed; ranked feeds get a default cap so they stay responsive.
     """
+    if limit is None and _RANKED_FEED_RE.match(url):
+        limit = RANKED_FEED_LIMIT
     opts = {
-        "extract_flat": True,
+        # "in_playlist" (rather than True) resolves the URL itself before
+        # flattening, so a watch?v=...&list=... link expands to its playlist
+        # and a channel expands to its tabs instead of coming back as a
+        # single unusable redirect entry.
+        "extract_flat": "in_playlist",
         "quiet": True,
         "noprogress": True,
         "no_warnings": True,
         "ignoreerrors": True,
         "noplaylist": False,
     }
+    if limit:
+        opts["playlistend"] = int(limit)
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -67,11 +129,19 @@ def extract_flat(url, cookies_from_browser=None):
     title = info.get("title") or url
     entries = info.get("entries")
     if entries is not None:
-        items = [_entry_to_item(e) for e in entries if e]
+        items = [_entry_to_item(e) for e in _iter_entries(entries)]
     else:
         items = [_entry_to_item(info)]
-    items = [i for i in items if i["url"]]
-    return items, title
+    seen = set()
+    unique = []
+    for item in items:
+        # Channel tabs overlap: a premiere shows up under both Live and
+        # Videos, and the picker should not list it twice.
+        if not item["url"] or item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        unique.append(item)
+    return unique, title
 
 
 def search(query, count=20):

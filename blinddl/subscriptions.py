@@ -113,19 +113,26 @@ class SubscriptionStore:
             return 0, str(exc)
         if title:
             sub["title"] = title
-        seen = set(sub.get("seen_ids") or [])
-        new_items = [i for i in items if i["id"] not in seen]
-        for item in new_items:
+        # Keep insertion order: the trim below has to drop the oldest ids,
+        # and a set would hand back an arbitrary order.
+        seen_ids = list(sub.get("seen_ids") or [])
+        seen = set(seen_ids)
+        new_count = 0
+        for item in items:
+            if item["id"] in seen:
+                continue
             if item.get("kind") == "sideb":
                 self.queue.add_sideb(item["url"], item["title"])
             else:
                 self.queue.add_ytdlp(item["url"], item["title"],
                                      audio_only=audio_only)
             seen.add(item["id"])
-        sub["seen_ids"] = list(seen)[-MAX_SEEN_IDS:]
+            seen_ids.append(item["id"])
+            new_count += 1
+        sub["seen_ids"] = seen_ids[-MAX_SEEN_IDS:]
         sub["last_checked"] = time.strftime("%Y-%m-%d %H:%M")
         self.save()
-        return len(new_items), ""
+        return new_count, ""
 
     def check_all(self):
         for sub in self.snapshot():

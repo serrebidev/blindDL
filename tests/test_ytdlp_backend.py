@@ -32,6 +32,16 @@ class _YoutubeDL:
         self.downloaded.extend(urls)
 
 
+def _playlist_youtube_dl(info):
+    """A YoutubeDL stub whose extract_info returns *info* verbatim."""
+
+    class _Stub(_YoutubeDL):
+        def extract_info(self, url, download=False):
+            return info
+
+    return _Stub
+
+
 class YtDlpBackendTests(unittest.TestCase):
     def setUp(self):
         _YoutubeDL.instances.clear()
@@ -46,6 +56,93 @@ class YtDlpBackendTests(unittest.TestCase):
         self.assertEqual(items[0]["title"], "Example")
         self.assertEqual(
             _YoutubeDL.instances[0].options["cookiesfrombrowser"], ("edge",))
+
+    def test_watch_url_with_list_expands_to_the_whole_playlist(self):
+        # yt-dlp only redirects watch?v=...&list=... to its playlist when the
+        # top-level URL is resolved, which "in_playlist" does and True does not.
+        playlist = {
+            "_type": "playlist", "title": "Let's Play",
+            "entries": [
+                {"id": "a", "title": "Part 1", "ie_key": "Youtube", "url": "a"},
+                {"id": "b", "title": "Part 2", "ie_key": "Youtube", "url": "b"},
+            ],
+        }
+        with mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL",
+                _playlist_youtube_dl(playlist)):
+            items, title = ytdlp_backend.extract_flat(
+                "https://www.youtube.com/watch?v=a&list=PL1")
+
+        self.assertEqual(title, "Let's Play")
+        self.assertEqual([i["id"] for i in items], ["a", "b"])
+        self.assertEqual(items[0]["url"], "https://www.youtube.com/watch?v=a")
+        self.assertEqual(
+            _YoutubeDL.instances[0].options["extract_flat"], "in_playlist")
+
+    def test_channel_tabs_are_flattened_and_deduplicated(self):
+        # A bare channel URL comes back as a playlist of tab playlists.
+        channel = {
+            "_type": "playlist", "title": "Veritasium",
+            "entries": [
+                {"_type": "playlist", "title": "Videos", "entries": [
+                    {"id": "a", "title": "One", "ie_key": "Youtube",
+                     "url": "a"},
+                ]},
+                {"_type": "playlist", "title": "Live", "entries": [
+                    {"id": "a", "title": "One", "ie_key": "Youtube",
+                     "url": "a"},
+                    {"id": "b", "title": "Two", "ie_key": "Youtube",
+                     "url": "b"},
+                ]},
+            ],
+        }
+        with mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL",
+                _playlist_youtube_dl(channel)):
+            items, title = ytdlp_backend.extract_flat(
+                "https://www.youtube.com/@veritasium")
+
+        self.assertEqual(title, "Veritasium")
+        self.assertEqual([i["id"] for i in items], ["a", "b"])
+
+    def test_ranked_feeds_are_capped_but_playlists_are_not(self):
+        listing = {"_type": "playlist", "title": "Feed", "entries": []}
+        stub = _playlist_youtube_dl(listing)
+        with mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL", stub):
+            ytdlp_backend.extract_flat(
+                "https://www.youtube.com/results?search_query=rimworld")
+            ytdlp_backend.extract_flat(
+                "https://www.youtube.com/hashtag/rimworld")
+            ytdlp_backend.extract_flat(
+                "https://www.youtube.com/playlist?list=PL1")
+            ytdlp_backend.extract_flat(
+                "https://www.youtube.com/hashtag/rimworld", limit=5)
+
+        caps = [i.options.get("playlistend") for i in _YoutubeDL.instances]
+        self.assertEqual(
+            caps,
+            [ytdlp_backend.RANKED_FEED_LIMIT, ytdlp_backend.RANKED_FEED_LIMIT,
+             None, 5])
+
+    def test_shorthand_subscription_targets_become_urls(self):
+        self.assertEqual(
+            ytdlp_backend.normalize_url("  @veritasium "),
+            "https://www.youtube.com/@veritasium")
+        self.assertEqual(
+            ytdlp_backend.normalize_url("#rimworld"),
+            "https://www.youtube.com/hashtag/rimworld")
+        self.assertEqual(
+            ytdlp_backend.normalize_url("PLdvFbaCu1RVgZtWw0_2Pkd"),
+            "https://www.youtube.com/playlist?list=PLdvFbaCu1RVgZtWw0_2Pkd")
+        self.assertEqual(
+            ytdlp_backend.normalize_url("UCHnyfMqiRRG1u-2MsSQLbXA"),
+            "https://www.youtube.com/channel/UCHnyfMqiRRG1u-2MsSQLbXA")
+        self.assertEqual(
+            ytdlp_backend.normalize_url("youtube.com/@x/videos"),
+            "https://youtube.com/@x/videos")
+        self.assertEqual(
+            ytdlp_backend.normalize_url("https://example.invalid/v"),
+            "https://example.invalid/v")
 
     def test_download_suppresses_console_progress_but_keeps_hook(self):
         with mock.patch.object(
