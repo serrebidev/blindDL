@@ -44,6 +44,23 @@ def _is_direct_media_url(url):
     return any(path.endswith(extension) for extension in DIRECT_MEDIA_EXTENSIONS)
 
 
+def result_url(item):
+    """Return the best shareable URL for one search result, or ``None``.
+
+    Prefers the human-facing page URL so a copied link opens the site rather
+    than a short-lived CDN stream. Music results carry no page URL, so their
+    download URL is the only thing worth copying.
+    """
+    for key in ("url", "direct_url"):
+        found = _first_http_url(item.get(key))
+        if found:
+            return found
+    song_info = item.get("song_info")
+    if song_info is not None:
+        return _first_http_url(getattr(song_info, "download_url", None))
+    return None
+
+
 def resolve_search_result(item, audio_only, config):
     """Return ``(stream URI, title)`` for one normalized search result."""
     title = str(item.get("title") or "Preview")

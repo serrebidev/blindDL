@@ -22,6 +22,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         STATUS_DONE,
         STATUS_QUEUED,
     )
+    from blinddl import config as config_module
     from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
@@ -47,6 +48,16 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui.settings_dialog import SettingsDialog
     from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import SubsPanel
+
+
+def _clipboard_text():
+    data = wx.TextDataObject()
+    wx.TheClipboard.Open()
+    try:
+        wx.TheClipboard.GetData(data)
+    finally:
+        wx.TheClipboard.Close()
+    return data.GetText()
 
 
 class _Queue:
@@ -209,6 +220,80 @@ class GuiInteractionTests(unittest.TestCase):
             location, "https://media.example/live/video.mp4?token=one")
         self.assertEqual(title, location)
         resolve.assert_not_called()
+
+    def test_preview_accepts_the_real_config_object(self):
+        # The app hands preview a Config, not a dict. Dicts have .get, so a
+        # dict here would hide a missing Config.get entirely.
+        with mock.patch.object(config_module, "app_data_dir",
+                               return_value=tempfile.mkdtemp()):
+            config = config_module.Config()
+        item = {
+            "kind": "adult",
+            "title": "One",
+            "source": "EPorner",
+            "url": "https://www.eporner.com/video-one/",
+        }
+
+        with mock.patch.object(ytdlp_backend, "resolve_stream",
+                               return_value="https://cdn.example/one.mp4"):
+            location, title = preview.resolve_search_result(
+                item, audio_only=False, config=config)
+
+        self.assertEqual(location, "https://cdn.example/one.mp4")
+        self.assertEqual(title, "One")
+
+    def test_result_url_prefers_page_url_then_falls_back(self):
+        self.assertEqual(
+            preview.result_url({"url": "https://www.eporner.com/video-one/",
+                                "direct_url": "https://cdn.example/one.mp4"}),
+            "https://www.eporner.com/video-one/",
+        )
+        self.assertEqual(
+            preview.result_url({"direct_url": "https://cdn.example/one.mp4"}),
+            "https://cdn.example/one.mp4",
+        )
+        self.assertEqual(
+            preview.result_url({"song_info": SimpleNamespace(
+                download_url=[{"url": "https://media.example/one.mp3"}])}),
+            "https://media.example/one.mp3",
+        )
+        self.assertIsNone(preview.result_url({"title": "No URL"}))
+
+    def test_copy_url_puts_selected_result_links_on_the_clipboard(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_ADULT
+        panel.results = [
+            {"title": "One", "url": "https://www.eporner.com/video-one/"},
+            {"title": "Two", "url": "https://www.eporner.com/video-two/"},
+            {"title": "Three"},
+        ]
+        for row, item in enumerate(panel.results):
+            panel.results_list.InsertItem(row, item["title"])
+
+        panel.results_list.Select(0)
+        panel.on_copy_url(None)
+        self.assertEqual(_clipboard_text(), "https://www.eporner.com/video-one/")
+        self.assertEqual(self.frame.messages[-1], "Copied 1 URL.")
+
+        panel.results_list.Select(1)
+        panel.results_list.Select(2)
+        panel.on_copy_url(None)
+        self.assertEqual(
+            _clipboard_text(),
+            "https://www.eporner.com/video-one/\n"
+            "https://www.eporner.com/video-two/",
+        )
+        self.assertEqual(self.frame.messages[-1], "Copied 2 URLs. 1 had no URL.")
+
+    def test_copy_url_reports_when_no_result_has_a_link(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.results = [{"title": "One"}]
+        panel.results_list.InsertItem(0, "One")
+        panel.results_list.Select(0)
+
+        panel.on_copy_url(None)
+
+        self.assertEqual(self.frame.messages[-1], "No URL for that result.")
 
     def test_bundled_vlc_runtime_paths_are_configured(self):
         with tempfile.TemporaryDirectory() as folder:

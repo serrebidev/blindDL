@@ -163,12 +163,14 @@ class SearchPanel(wx.Panel):
         self.results_list = wx.ListCtrl(self, style=wx.LC_REPORT)
         self.results_list.SetName("Search results")
         self.results_list.SetHelpText(
-            "Select results. Enter downloads; Context Menu opens actions.")
+            "Select results. Enter downloads; Control C copies the URL; "
+            "Context Menu opens actions.")
         for i, heading in enumerate(("Title", "Artist / channel", "Source",
                                      "Duration", "Size")):
             self.results_list.InsertColumn(i, heading)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_download_selected)
         self.results_list.Bind(wx.EVT_CONTEXT_MENU, self.on_results_menu)
+        self.results_list.Bind(wx.EVT_CHAR, self.on_results_char)
 
         self.preview_btn = wx.Button(self, label="&Preview selected")
         self.preview_btn.SetHelpText(
@@ -492,6 +494,44 @@ class SearchPanel(wx.Panel):
             self.results_list.Select(index, False)
         self.frame.announce("Selection cleared.")
 
+    def on_results_char(self, event):
+        if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
+            self.on_copy_url(event)
+            return
+        event.Skip()
+
+    def on_copy_url(self, event):
+        indices = [index for index in self._selected_indices()
+                   if index < len(self.results)]
+        if not indices:
+            self.frame.announce("Select a result first.")
+            return
+        urls = []
+        missing = 0
+        for index in indices:
+            url = preview.result_url(self.results[index])
+            if not url:
+                missing += 1
+            elif url not in urls:
+                urls.append(url)
+        if not urls:
+            self.frame.announce("No URL for that result.")
+            return
+        if not wx.TheClipboard.Open():
+            self.frame.announce("Could not open the clipboard.")
+            return
+        try:
+            wx.TheClipboard.SetData(wx.TextDataObject("\n".join(urls)))
+            # Keep the URL on the clipboard after blindDL exits.
+            wx.TheClipboard.Flush()
+        finally:
+            wx.TheClipboard.Close()
+        noun = "URL" if len(urls) == 1 else "URLs"
+        message = f"Copied {len(urls)} {noun}."
+        if missing:
+            message += f" {missing} had no URL."
+        self.frame.announce(message)
+
     def _target_context_item(self, event):
         """Make a right-clicked row the target while preserving a group click."""
         position = event.GetPosition()
@@ -515,18 +555,21 @@ class SearchPanel(wx.Panel):
         menu = wx.Menu()
         preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
         download = menu.Append(wx.ID_ANY, "&Download selected")
+        copy_url = menu.Append(wx.ID_ANY, "Copy &URL\tCtrl+C")
         menu.AppendSeparator()
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear = menu.Append(wx.ID_ANY, "&Clear selection")
         has_selection = bool(self._selected_indices())
         preview_item.Enable(has_selection)
         download.Enable(has_selection)
+        copy_url.Enable(has_selection)
         clear.Enable(has_selection)
         select_all.Enable(
             self.results_list.GetSelectedItemCount() <
             self.results_list.GetItemCount())
         menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
+        menu.Bind(wx.EVT_MENU, self.on_copy_url, copy_url)
         menu.Bind(wx.EVT_MENU, self._select_all, select_all)
         menu.Bind(wx.EVT_MENU, self._clear_selection, clear)
         self.results_list.PopupMenu(menu)
