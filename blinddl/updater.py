@@ -22,6 +22,10 @@ import sys
 import time
 
 PIP_PACKAGES = ["musicdl", "wxPython", "python-vlc"]
+# Upgraded only when already present, like the git packages below: libtorrent
+# is the optional in-app torrent engine, and a user who has never turned it
+# on should not have it installed behind their back.
+OPTIONAL_PACKAGES = ["libtorrent"]
 # yt-dlp tracks the nightly builds (pip pre-releases), so it upgrades with
 # --pre in its own command instead of waiting for stable releases.
 PRE_PACKAGES = ["yt-dlp"]
@@ -99,8 +103,13 @@ def update_pip_packages(log):
         if name in installed:
             ok = _run([sys.executable, "-m", "pip", "install", "--upgrade",
                        "--quiet", url], log) and ok
+    present = [name for name in OPTIONAL_PACKAGES if name in installed]
+    if present:
+        ok = _run([sys.executable, "-m", "pip", "install", "--upgrade",
+                   "--quiet", *present], log) and ok
     after = _installed_versions()
-    changed = [p for p in (*PIP_PACKAGES, *PRE_PACKAGES, *GIT_PACKAGES)
+    changed = [p for p in (*PIP_PACKAGES, *PRE_PACKAGES, *GIT_PACKAGES,
+                           *OPTIONAL_PACKAGES)
                if before.get(p) != after.get(p)]
     if changed:
         log("Updated: " + ", ".join(
@@ -115,7 +124,8 @@ def _installed_versions():
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "show",
-             *PIP_PACKAGES, *PRE_PACKAGES, *GIT_PACKAGES],
+             *PIP_PACKAGES, *PRE_PACKAGES, *GIT_PACKAGES,
+             *OPTIONAL_PACKAGES],
             capture_output=True, text=True, timeout=60,
             encoding="utf-8", errors="replace", **_subprocess_options(),
         )

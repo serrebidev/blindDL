@@ -96,6 +96,13 @@ for package in ADULT_MODULES:
     hiddenimports += package_hidden
     hiddenimports.append(package)
 
+# libtorrent powers the optional in-app torrent engine. It is one binary
+# extension module, so naming it is enough -- and it is only named when the
+# build machine actually has it, because it publishes no wheel for the newest
+# Python releases and a release build must not fail over an optional feature.
+if importlib.util.find_spec("libtorrent") is not None:
+    hiddenimports.append("libtorrent")
+
 for distribution in (
     "wxPython",
     "yt-dlp",

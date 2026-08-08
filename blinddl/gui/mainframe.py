@@ -10,7 +10,7 @@ import time
 
 import wx
 
-from .. import APP_NAME, musicdl_backend, updater
+from .. import APP_NAME, musicdl_backend, torrent_engine, updater
 from ..config import Config
 from ..downloader import DownloadQueue, STATUS_DONE, STATUS_ERROR
 from ..runtime import open_folder
@@ -54,6 +54,7 @@ class MainFrame(wx.Frame):
 
         self.subs.start()
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        self.Bind(wx.EVT_ICONIZE, self.on_iconize)
         self._apply_tray_setting()
         self._maybe_auto_update()
         # Build the music-site clients now so the first search does not pay
@@ -234,8 +235,57 @@ class MainFrame(wx.Frame):
             self.queue.set_concurrency(self.config["max_concurrent"])
             self.subs.wake()
             self._apply_tray_setting()
+            self._apply_torrent_setting()
             self.announce("Settings saved.")
         dialog.Destroy()
+
+    def _apply_torrent_setting(self):
+        """Follow up on the torrent engine setting once Settings is closed.
+
+        libtorrent is not a blindDL dependency -- most people never turn the
+        engine on -- so the package is fetched the first time somebody asks
+        for it rather than at install time.
+        """
+        if not self.config["torrent_engine"]:
+            return
+        if torrent_engine.available():
+            # Rate limits, seeding limits and the rest reach a session that
+            # is already running; a new one picks them up when it starts.
+            if torrent_engine.running():
+                torrent_engine.engine(self.config)
+            return
+        answer = wx.MessageBox(
+            "Downloading torrents in blindDL needs the libtorrent package, "
+            "which is not installed yet.\n\nInstall it now? It is a few "
+            "megabytes and takes about a minute.",
+            "Install libtorrent", wx.YES_NO | wx.ICON_QUESTION, self)
+        if answer != wx.YES:
+            self.config["torrent_engine"] = False
+            self.config.save()
+            self.announce(
+                "Left off. Torrents will keep opening in your own client.")
+            return
+        self.announce("Installing libtorrent; this takes about a minute...")
+        threading.Thread(target=self._install_torrent_engine, daemon=True,
+                         name="blinddl-libtorrent").start()
+
+    def _install_torrent_engine(self):
+        ok = torrent_engine.install()
+        if ok:
+            wx.CallAfter(self.announce,
+                         "libtorrent installed. blindDL now downloads "
+                         "torrents itself.")
+            return
+        self.config["torrent_engine"] = False
+        self.config.save()
+        wx.CallAfter(self._report_engine_failure)
+
+    def _report_engine_failure(self):
+        if self._closing:
+            return
+        self.announce("libtorrent could not be installed.")
+        wx.MessageBox(torrent_engine.install_hint(), "Install libtorrent",
+                      wx.OK | wx.ICON_INFORMATION, self)
 
     def on_choose_sources(self, event=None):
         dialog = SourcesDialog(self, self.config)
@@ -283,9 +333,10 @@ class MainFrame(wx.Frame):
             "Search also finds free books, audiobooks, old-time radio, "
             "movies and TV. Downloaded books open in your usual reader "
             "from the Library tab.\n"
-            "Torrent results open in your own BitTorrent client. Add your "
-            "Prowlarr or Jackett in Tools, My torrent indexers to search "
-            "private trackers too.",
+            "Torrent results open in your own BitTorrent client, or download "
+            "here when Settings, Torrents says so. Add your Prowlarr or "
+            "Jackett in Tools, My torrent indexers to search private "
+            "trackers too.",
             f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self)
 
     # -- closing and the system tray --------------------------------------------
@@ -296,8 +347,13 @@ class MainFrame(wx.Frame):
         self.Close()
 
     def _apply_tray_setting(self):
-        """Add or remove the tray icon to match the current setting."""
-        wanted = bool(self.config["minimize_to_tray"])
+        """Add or remove the tray icon to match the current settings.
+
+        One icon serves both ways of getting there, so it exists while either
+        closing or minimizing is set to hide the window.
+        """
+        wanted = bool(self.config["minimize_to_tray"] or
+                      self.config["tray_on_minimize"])
         if wanted and self.tray is None:
             self.tray = TrayIcon(self, on_restore=self.restore_from_tray,
                                  on_exit=self.on_exit)
@@ -326,11 +382,22 @@ class MainFrame(wx.Frame):
             f"{APP_NAME} is in the system tray. Windows plus B reaches it; "
             "downloads keep running.")
 
+    def on_iconize(self, event):
+        """Minimizing hides the window in the tray when that is switched on."""
+        event.Skip()
+        if (self._closing or not event.IsIconized() or
+                self.tray is None or not self.config["tray_on_minimize"]):
+            return
+        # Undo the iconize first: a window that is hidden while minimized
+        # comes back minimized, and the taskbar keeps a button for it.
+        self.Iconize(False)
+        self._hide_to_tray()
+
     def on_close(self, event):
         if self._closing:
             return
         if (not self._quitting and self.tray is not None and
-                event.CanVeto()):
+                self.config["minimize_to_tray"] and event.CanVeto()):
             event.Veto()
             self._hide_to_tray()
             return
@@ -339,6 +406,9 @@ class MainFrame(wx.Frame):
         self.url_panel.shutdown()
         self.library_panel.shutdown()
         self.subs.stop()
+        # Seeding stops here, so this is the last chance to write down how
+        # far each torrent got.
+        torrent_engine.shutdown()
         if self.tray is not None:
             self.tray.dispose()
             self.tray = None

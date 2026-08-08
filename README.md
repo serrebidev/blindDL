@@ -73,6 +73,16 @@ Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder,
 
 Ctrl+Shift+S chooses which sites each source searches, and newly supported sites are enabled automatically. Anna's Archive results resolve through the public LibGen mirrors; if you have a membership, put its key in Settings to use the fast partner servers instead.
 
+## Torrents
+
+The Torrents source searches Knaben, The Pirate Bay, EZTV, Nyaa, Torrents-CSV, LimeTorrents and BitSearch at once. Tools, My torrent indexers adds your own Prowlarr or Jackett instance, which is how private trackers are reached — that tool already holds the login and the passkey, so BlindDL never stores a tracker password.
+
+A chosen torrent opens in whatever BitTorrent client you already use. Tick **Download torrents in BlindDL** in Settings, Torrents and BlindDL downloads it itself instead: progress, speed and the swarm's seed and peer counts appear in the Downloads tab, and finished files land in the Library with everything else. It offers to install libtorrent the first time you switch it on.
+
+That page also holds a separate folder for torrents, download and upload speed limits, how many run at once, the peer connection limit, seeding limits by ratio and by time, the incoming port and whether the router is asked to forward it, encryption, sequential download for playing a file before it finishes, and a SOCKS5 or HTTP proxy for swarm traffic. Seeding carries on after a download finishes, under those limits; Stop seeding on the Downloads tab ends it early.
+
+BlindDL joins swarms as the current qBittorrent release, which is what trackers that check the client expect to see. The version is looked up from qBittorrent's own releases once a day, and Settings can pin a particular one.
+
 ## Subscriptions
 
 The Subscriptions tab follows a source and queues whatever appears there next. The Add subscription field takes a playlist, a channel, a hashtag page, or a search results page — a `watch?v=...&list=...` link subscribes to the playlist rather than the one video — plus the equivalents on the other sites yt-dlp supports. Shorthand works too: `@handle`, `#hashtag`, a bare playlist id, or a channel id.
@@ -97,6 +107,10 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 - Ctrl+U — check for updates
 - Ctrl+Shift+C — check all subscriptions now
 - Ctrl+Shift+S — choose which sites are searched
+
+## The system tray
+
+Closing the window and minimizing it both put BlindDL in the system tray, where Windows+B reaches it. Queued downloads, seeding torrents and subscription checks keep running while it is there; the tray icon's menu and its double-click bring the window back. File, Exit always exits for real. Either behaviour can be switched off in Settings, Window.
 
 ## Config and downloads
 

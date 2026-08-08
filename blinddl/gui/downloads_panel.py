@@ -6,6 +6,7 @@
 
 import wx
 
+from .. import torrent_engine
 from ..downloader import ACTIVE_STATUSES, FINISHED_STATUSES, STATUS_DOWNLOADING
 
 
@@ -96,17 +97,20 @@ class DownloadsPanel(wx.Panel):
         selected = self._selected_items()
         menu = wx.Menu()
         cancel = menu.Append(wx.ID_ANY, "&Cancel selected")
+        stop_seeding = menu.Append(wx.ID_ANY, "Stop &seeding")
         clear_finished = menu.Append(wx.ID_ANY, "Clear &finished")
         menu.AppendSeparator()
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear_selection = menu.Append(wx.ID_ANY, "Clear &selection")
         cancel.Enable(any(item.status in ACTIVE_STATUSES for item in selected))
+        stop_seeding.Enable(bool(self._seeding_keys(selected)))
         clear_finished.Enable(any(
             item.status in FINISHED_STATUSES for item in self.frame.queue.items))
         clear_selection.Enable(bool(selected))
         select_all.Enable(
             self.list.GetSelectedItemCount() < self.list.GetItemCount())
         menu.Bind(wx.EVT_MENU, self.on_cancel, cancel)
+        menu.Bind(wx.EVT_MENU, self.on_stop_seeding, stop_seeding)
         menu.Bind(wx.EVT_MENU, self.on_clear, clear_finished)
         menu.Bind(wx.EVT_MENU, self._select_all, select_all)
         menu.Bind(wx.EVT_MENU, self._clear_selection, clear_selection)
@@ -137,6 +141,35 @@ class DownloadsPanel(wx.Panel):
             self.frame.announce(f"Cancelled: {items[0].title}")
         else:
             self.frame.announce(f"Cancelled {len(items)} downloads.")
+
+    def _seeding_keys(self, items):
+        """Info hashes of the selected torrents that are still seeding.
+
+        A torrent's row says Done the moment its files are complete, but the
+        engine keeps sharing it until the ratio or time limit in Settings is
+        reached. This is how that is called off early.
+        """
+        active = {key for key, _title, _ratio, _rate in torrent_engine.seeding()}
+        keys = []
+        for item in items:
+            if item.kind != "torrent" or not isinstance(item.payload, dict):
+                continue
+            key = str(item.payload.get("infohash") or "").lower()
+            if key in active:
+                keys.append((key, item.title))
+        return keys
+
+    def on_stop_seeding(self, event):
+        stopping = self._seeding_keys(self._selected_items())
+        if not stopping:
+            self.frame.announce("None of the selected downloads are seeding.")
+            return
+        stopped = [title for key, title in stopping
+                   if torrent_engine.stop_seeding(key)]
+        if len(stopped) == 1:
+            self.frame.announce(f"Stopped seeding: {stopped[0]}")
+        else:
+            self.frame.announce(f"Stopped seeding {len(stopped)} torrents.")
 
     def on_clear(self, event):
         count = sum(item.status in FINISHED_STATUSES

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.5.2"
+version = "0.6.0"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,6 +31,11 @@ dependencies = [
   # fields the Search tab shows; the 0.7 release on PyPI does not.
   "audiobooker @ git+https://github.com/LeMetadatarr/audiobooker",
   "requests>=2.32",
+  # Optional: the in-app torrent engine (Settings, Torrents). blindDL runs
+  # without it and hands magnets to the user's own client instead, so the
+  # marker keeps a fresh install from failing on a Python version libtorrent
+  # has not published wheels for yet. Settings offers to install it on demand.
+  "libtorrent>=2.0.11; python_version < '3.14'",
   "mutagen>=1.47",
   "pycryptodome>=3.20",
   "platformdirs>=4.3",

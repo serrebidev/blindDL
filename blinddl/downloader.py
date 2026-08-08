@@ -23,6 +23,7 @@ from . import (
     musicdl_backend,
     sideb_backend,
     torrent_backend,
+    torrent_engine,
     ytdlp_backend,
 )
 
@@ -85,17 +86,39 @@ class DownloadQueue:
         self.items = []
         self._cond = threading.Condition()
         self._workers = []
+        self._torrent_workers = []
         self._ensure_workers()
 
     # -- worker management ------------------------------------------------
 
     def _ensure_workers(self):
+        """Grow both worker pools to match the current settings.
+
+        Torrents get a pool of their own because they are slow in a way
+        nothing else here is: one can hold a thread for hours while it seeds
+        out of a thin swarm. Sharing the ordinary pool would let a handful of
+        them starve every other download in the queue.
+        """
         wanted = max(1, int(self.config["max_concurrent"]))
         while len(self._workers) < wanted:
             t = threading.Thread(target=self._worker, daemon=True,
+                                 args=(False,),
                                  name=f"blinddl-worker-{len(self._workers)}")
             t.start()
             self._workers.append(t)
+
+        # With the engine off a torrent is an instant hand-off, so two
+        # threads are plenty; with it on, one per simultaneous torrent.
+        torrents = 2
+        if self.config.get("torrent_engine"):
+            torrents = max(2, int(self.config.get("torrent_max_active", 3)))
+        while len(self._torrent_workers) < torrents:
+            index = len(self._torrent_workers)
+            t = threading.Thread(target=self._worker, daemon=True,
+                                 args=(True,),
+                                 name=f"blinddl-torrent-{index}")
+            t.start()
+            self._torrent_workers.append(t)
 
     def set_concurrency(self, n):
         self.config["max_concurrent"] = n
@@ -106,7 +129,9 @@ class DownloadQueue:
     def add(self, item):
         with self._cond:
             self.items.append(item)
-            self._cond.notify()
+            # Two pools wait on this condition and only one of them can take
+            # a given item, so every waiter has to look.
+            self._cond.notify_all()
         self._notify(item)
 
     def add_ytdlp(self, url, title, audio_only=None):
@@ -199,15 +224,18 @@ class DownloadQueue:
         if self.notify is not None:
             self.notify(item)
 
-    def _worker(self):
+    def _worker(self, torrents_only=False):
         while True:
             with self._cond:
                 item = None
                 while item is None:
                     for candidate in self.items:
-                        if candidate.status == STATUS_QUEUED:
-                            item = candidate
-                            break
+                        if candidate.status != STATUS_QUEUED:
+                            continue
+                        if (candidate.kind == "torrent") != torrents_only:
+                            continue
+                        item = candidate
+                        break
                     if item is None:
                         self._cond.wait()
                 item.status = STATUS_DOWNLOADING
@@ -234,7 +262,8 @@ class DownloadQueue:
             except (ytdlp_backend.DownloadCancelled,
                     book_backend.BookDownloadCancelled,
                     audiobook_backend.AudiobookDownloadCancelled,
-                    archive_backend.ArchiveDownloadCancelled):
+                    archive_backend.ArchiveDownloadCancelled,
+                    torrent_engine.TorrentDownloadCancelled):
                 item.status = STATUS_CANCELLED
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 if item.cancel_event.is_set():
@@ -375,15 +404,42 @@ class DownloadQueue:
             cancel_event=item.cancel_event)
 
     def _run_torrent(self, item):
-        # blindDL does not move torrent bytes; the user's own client does.
-        # Handing over the magnet is the whole job, so this finishes at once
-        # and the queue row records that the link went out.
+        if self.config.get("torrent_engine") and torrent_engine.available():
+            self._run_torrent_engine(item)
+            return
+        # With the engine off, blindDL does not move torrent bytes; the user's
+        # own client does. Handing over the magnet is the whole job, so this
+        # finishes at once and the queue row records that the link went out.
         item.speed = "Opening torrent client"
         self._notify(item)
         # out_dir is where a private tracker's .torrent lands when the row
         # carries no magnet; a magnet never touches the disk.
         torrent_backend.hand_off(item.payload, self.config["download_dir"])
         item.speed = ""
+
+    def _run_torrent_engine(self, item):
+        """Download a torrent inside blindDL, with real progress on the row."""
+        def progress(info):
+            item.percent = info["percent"]
+            state = info["state"]
+            if state:
+                # No byte rate to show yet -- say what the engine is doing
+                # instead, so the row is never silently blank.
+                item.speed = state
+                item.eta = ""
+            else:
+                rate = format_speed(info["rate"])
+                swarm = f"{info['seeds']} seeds, {info['peers']} peers"
+                item.speed = f"{rate}, {swarm}" if rate else swarm
+                item.eta = (ytdlp_backend.format_duration(info["eta"])
+                            if info["eta"] else "")
+            self._notify(item, throttle=True)
+
+        item.speed = "Starting torrent"
+        self._notify(item)
+        torrent_engine.download(
+            item.payload, self.config["download_dir"], self.config,
+            progress_cb=progress, cancel_event=item.cancel_event)
 
     def _run_deezer(self, item):
         started = time.monotonic()

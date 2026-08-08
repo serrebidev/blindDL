@@ -9,6 +9,11 @@ sideb @ git+https://github.com/mosaddiqdev/sideb
 # not.
 audiobooker @ git+https://github.com/LeMetadatarr/audiobooker
 requests>=2.32
+# Optional: the in-app torrent engine (Settings, Torrents). blindDL runs
+# without it and hands magnets to the user's own client instead, so the
+# marker keeps a fresh install from failing on a Python version libtorrent
+# has not published wheels for yet. Settings offers to install it on demand.
+libtorrent>=2.0.11; python_version < "3.14"
 mutagen>=1.47
 pycryptodome>=3.20
 platformdirs>=4.3
