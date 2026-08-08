@@ -7,7 +7,7 @@ and their transitive dependencies:
 - wxPython — wxWindows Library Licence
 - yt-dlp — The Unlicense
 - musicdl — PolyForm Noncommercial License 1.0.0
-- Side B — MIT License
+- Side B — MIT License (vendored in `sideb/`; see `sideb/VENDORED.md`)
 - Requests — Apache License 2.0
 - Mutagen — GNU General Public License v2 or later
 - PyCryptodome — BSD/Public Domain

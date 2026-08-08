@@ -26,7 +26,15 @@ dependencies = [
   "wxPython>=4.2; platform_system != 'Linux'",
   "yt-dlp>=2025.1.1",
   "musicdl>=2.5.0",
-  "sideb @ git+https://github.com/mosaddiqdev/sideb",
+  # Side B is vendored in ./sideb -- its upstream repository was deleted in
+  # August 2026, so there is nothing left to install from. These are the
+  # dependencies its code imports; see THIRD_PARTY_NOTICES.md.
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "questionary>=2.0",
+  "rich>=13.7",
+  "ytmusicapi>=1.9",
   # Free audiobook sites. The git build carries the chapter and narrator
   # fields the Search tab shows; the 0.7 release on PyPI does not.
   "audiobooker @ git+https://github.com/LeMetadatarr/audiobooker",
@@ -74,7 +82,7 @@ Issues = "https://github.com/serrebidev/blindDL/issues"
 blinddl = "blinddl.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["blinddl*"]
+include = ["blinddl*", "sideb*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

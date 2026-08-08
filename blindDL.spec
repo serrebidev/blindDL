@@ -16,6 +16,10 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 
 ROOT = Path(SPECPATH)
+# Side B is vendored in the repo rather than installed, so the collectors
+# below have to be able to find it the way an ordinary import would.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 ORIGINAL_LOCALAPPDATA = os.environ.get("LOCALAPPDATA", "")
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 warnings.simplefilter("ignore", SyntaxWarning)
@@ -35,7 +39,7 @@ datas = [
 binaries = []
 hiddenimports = []
 
-for package in ("sideb", "mutagen", "audiobooker", "mediavocab"):
+for package in ("mutagen", "audiobooker", "mediavocab"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -68,6 +72,13 @@ def collect_package_from_filesystem(package_name):
 musicdl_datas, musicdl_hidden = collect_package_from_filesystem("musicdl")
 datas += musicdl_datas
 hiddenimports += musicdl_hidden
+
+# Side B lives in the repo now that its upstream is gone. Collected the same
+# way as musicdl -- from the filesystem, without importing it.
+sideb_datas, sideb_hidden = collect_package_from_filesystem("sideb")
+datas += sideb_datas
+hiddenimports += sideb_hidden
+hiddenimports.append("sideb")
 
 ADULT_MODULES = (
     "aebn_dl",

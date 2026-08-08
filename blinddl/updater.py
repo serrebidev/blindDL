@@ -5,8 +5,9 @@
 """Keeps blindDL's runtime dependencies up to date.
 
 Covers everything the app relies on:
-- Python packages (pip): yt-dlp, musicdl, wxPython, python-vlc, and the rest of
-  requirements.txt.
+- Python packages (pip): yt-dlp, musicdl, wxPython, python-vlc, ytmusicapi,
+  and the rest of requirements.txt. Side B is not among them -- it is
+  vendored in ./sideb and travels with blindDL's own releases.
 - Deno: the JavaScript runtime yt-dlp needs for YouTube extraction.
 - ffmpeg: needed for audio extraction and video merging.
 
@@ -21,7 +22,9 @@ import subprocess
 import sys
 import time
 
-PIP_PACKAGES = ["musicdl", "wxPython", "python-vlc"]
+# ytmusicapi is here because Side B is vendored: it breaks whenever YouTube
+# Music changes, and there is no upstream release to pull the fix from.
+PIP_PACKAGES = ["musicdl", "wxPython", "python-vlc", "ytmusicapi"]
 # Upgraded only when already present, like the git packages below: libtorrent
 # is the optional in-app torrent engine, and a user who has never turned it
 # on should not have it installed behind their back.
@@ -33,7 +36,6 @@ PRE_PACKAGES = ["yt-dlp"]
 # cannot tell whether a git package is stale, so it is reinstalled on
 # every update check (cheap, and only when already installed).
 GIT_PACKAGES = {
-    "sideb": "git+https://github.com/mosaddiqdev/sideb",
     # Adult providers are refreshed when present; frozen builds update them
     # together with the application release.
     "aebndl": "git+https://github.com/hyper440/aebn-vod-downloader",
