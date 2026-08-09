@@ -16,6 +16,7 @@ import uuid
 
 from . import (
     adult_backend,
+    applemusic_backend,
     archive_backend,
     audiobook_backend,
     book_backend,
@@ -154,6 +155,11 @@ class DownloadQueue:
         self.add(item)
         return item
 
+    def add_applemusic(self, url, title):
+        item = DownloadItem(title=title, kind="applemusic", payload=url)
+        self.add(item)
+        return item
+
     def add_adult(self, payload, title):
         item = DownloadItem(title=title, kind="adult", payload=payload,
                             audio_only=False,
@@ -255,6 +261,8 @@ class DownloadQueue:
                     self._run_archive(item)
                 elif item.kind == "torrent":
                     self._run_torrent(item)
+                elif item.kind == "applemusic":
+                    self._run_applemusic(item)
                 else:
                     self._run_musicdl(item)
                 item.percent = 100.0
@@ -325,6 +333,11 @@ class DownloadQueue:
         sideb_backend.download(
             item.payload, self.config["download_dir"], self.config,
             event_cb=on_event)
+
+    def _run_applemusic(self, item):
+        applemusic_backend.download(
+            item.payload, self.config["download_dir"], self.config,
+            cancel_event=item.cancel_event)
 
     def _run_adult(self, item):
         started = time.monotonic()

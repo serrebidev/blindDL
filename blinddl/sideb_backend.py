@@ -27,6 +27,8 @@ import os
 import re
 import shutil
 
+import requests
+
 from .config import app_data_dir
 
 SIDEB_SOURCE = "Deezer (Side B)"
@@ -77,6 +79,33 @@ def _patch_sideb_ytdlp():
 def is_deezer_url(url):
     """Anything sideb resolves through Deezer (incl. page.link shortlinks)."""
     return bool(_DEEZER_URL_RE.search(url) or _DEEZER_SHORTLINK_RE.search(url))
+
+
+_DEEZER_TRACK_ID_RE = re.compile(
+    r"deezer\.com/(?:[a-z]{2}/)?track/(\d+)", re.IGNORECASE)
+
+
+def get_deezer_preview_url(track_url_or_id):
+    """Return the 30-second preview MP3 URL for a Deezer track.
+
+    Accepts either a full deezer.com/track/… URL or a bare track id.
+    Returns ``None`` when the public API call fails (the track may be
+    geo-blocked or the API may be down).
+    """
+    match = _DEEZER_TRACK_ID_RE.search(str(track_url_or_id))
+    track_id = match.group(1) if match else str(track_url_or_id)
+    try:
+        resp = requests.get(
+            f"https://api.deezer.com/track/{track_id}", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "error" not in data:
+            preview = data.get("preview")
+            if preview:
+                return str(preview)
+    except Exception:
+        pass
+    return None
 
 
 def _ensure_home():

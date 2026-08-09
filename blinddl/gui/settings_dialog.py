@@ -378,6 +378,21 @@ class SettingsDialog(wx.Dialog):
                                     style=wx.TE_PASSWORD)
         self.arl_text.SetName("Deezer ARL cookie")
 
+        am_label = wx.StaticText(page, label="Apple Music cookies &file:")
+        am_box = wx.BoxSizer(wx.HORIZONTAL)
+        self.am_cookies_picker = wx.FilePickerCtrl(
+            page, path=config["apple_music_cookies"],
+            message="Select Apple Music cookies.txt file",
+            wildcard="Cookies files (*.txt)|*.txt|All files (*.*)|*.*")
+        self.am_cookies_picker.SetName("Apple Music cookies file")
+        am_from_browser = wx.Button(page, label="&Copy from browser")
+        am_from_browser.SetHelpText(
+            "Export Apple Music cookies from the browser selected on the "
+            "General tab.")
+        am_from_browser.Bind(wx.EVT_BUTTON, self._on_am_copy_cookies)
+        am_box.Add(self.am_cookies_picker, 1, wx.RIGHT, 6)
+        am_box.Add(am_from_browser, 0)
+
         annas_label = wx.StaticText(
             page, label="Anna's Archive &membership key:")
         self.annas_text = wx.TextCtrl(page, value=config["annas_archive_key"],
@@ -423,6 +438,10 @@ class SettingsDialog(wx.Dialog):
 
         sizer.Add(self.lyrics_check, 0, wx.ALL, 8)
         _row(sizer, arl_label, self.arl_text)
+        am_row = wx.BoxSizer(wx.HORIZONTAL)
+        am_row.Add(am_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        am_row.Add(am_box, 1)
+        sizer.Add(am_row, 0, wx.EXPAND | wx.ALL, 8)
         _row(sizer, annas_label, self.annas_text)
         sizer.Add(self.adult_sites_check, 0, wx.ALL, 8)
         sizer.Add(onlyfans_label, 0, wx.TOP | wx.LEFT, 8)
@@ -431,6 +450,54 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.justforfans_auth_picker, 0, wx.EXPAND | wx.ALL, 8)
         page.SetSizer(sizer)
         return page
+
+    def _on_am_copy_cookies(self, event):
+        import os
+        import tempfile
+
+        import yt_dlp
+
+        browsers_to_try = [
+            "chrome", "firefox", "edge", "brave", "opera",
+            "vivaldi", "librewolf", "chromium",
+        ]
+        configured = self.config.get("cookies_from_browser", "")
+        if configured and configured not in browsers_to_try:
+            browsers_to_try.insert(0, configured)
+        elif configured:
+            browsers_to_try.remove(configured)
+            browsers_to_try.insert(0, configured)
+
+        out = tempfile.mktemp(suffix=".txt", prefix="am_cookies_")
+        errors = []
+        for browser in browsers_to_try:
+            try:
+                opts = {
+                    "cookiesfrombrowser": (browser,),
+                    "cookiefile": out,
+                    "quiet": True,
+                    "noprogress": True,
+                    "skip_download": True,
+                    "extract_flat": True,
+                }
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.extract_info(
+                        "https://music.apple.com", download=False)
+            except Exception as e:
+                errors.append(f"{browser}: {e}")
+                continue
+            if os.path.isfile(out) and os.path.getsize(out) > 0:
+                self.am_cookies_picker.SetPath(out)
+                self.config["apple_music_cookies"] = out
+                self.frame.announce(
+                    f"Apple Music cookies exported from {browser}.")
+                return
+            errors.append(f"{browser}: exported empty file")
+
+        wx.MessageBox(
+            "Could not export Apple Music cookies from any browser:\n\n"
+            + "\n".join(errors),
+            "blindDL", wx.OK | wx.ICON_ERROR, self)
 
     # -- saving --------------------------------------------------------------
 
@@ -485,6 +552,8 @@ class SettingsDialog(wx.Dialog):
         self.config["justforfans_auth_file"] = (
             self.justforfans_auth_picker.GetPath().strip())
         self.config["deezer_arl"] = self.arl_text.GetValue().strip()
+        self.config["apple_music_cookies"] = (
+            self.am_cookies_picker.GetPath().strip())
         self.config["annas_archive_key"] = self.annas_text.GetValue().strip()
         self.config.save()
 

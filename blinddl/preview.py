@@ -10,8 +10,8 @@ from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
 from . import (
-    adult_backend, archive_backend, audiobook_backend, sideb_backend,
-    torrent_backend, ytdlp_backend,
+    adult_backend, archive_backend, audiobook_backend, deezer_backend,
+    sideb_backend, torrent_backend, ytdlp_backend,
 )
 
 DIRECT_MEDIA_EXTENSIONS = {
@@ -97,7 +97,13 @@ def resolve_search_result(item, audio_only, config):
             raise RuntimeError("This audiobook has no playable chapter.")
         return stream, title
 
-    if kind == "sideb":
+    if kind in ("sideb", "deezer"):
+        # Use Deezer's own 30-second preview clip when available — it is
+        # faster and more reliable than searching YouTube.
+        preview_url = sideb_backend.get_deezer_preview_url(
+            item.get("id", ""))
+        if preview_url:
+            return preview_url, title
         query = " ".join(
             filter(
                 None,
@@ -149,7 +155,11 @@ def resolve_url(url, audio_only, config):
         return stream, item_title or title
 
     if sideb_backend.is_deezer_url(url):
-        items, title = sideb_backend.extract_flat(url, config)
+        # Public API first (fast, no sideb dependency), then fall back.
+        try:
+            items, title = deezer_backend.extract_flat(url, config)
+        except Exception:  # noqa: BLE001 - sideb is the fallback
+            items, title = sideb_backend.extract_flat(url, config)
         if not items:
             raise RuntimeError("No playable tracks were found at that URL.")
         stream, item_title = resolve_search_result(

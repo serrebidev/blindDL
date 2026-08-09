@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest import mock
 
-from blinddl import deezer_backend
+from blinddl import deezer_backend, sideb_backend
 
 
 class DeezerBackendTests(unittest.TestCase):
@@ -111,6 +111,35 @@ class DeezerBackendTests(unittest.TestCase):
                     return_value="line synced"):
             result = deezer_backend._fetch_lyrics({"SNG_ID": "1"}, "arl")
         self.assertEqual(result, "line synced")
+
+
+class SidebDeezerPreviewTests(unittest.TestCase):
+    def test_preview_url_from_track_id(self):
+        with mock.patch.object(sideb_backend.requests, "get") as get:
+            get.return_value.json.return_value = {
+                "id": 3135556,
+                "preview": "https://cdns-preview.dzcdn.net/stream/abc123",
+            }
+            get.return_value.raise_for_status = mock.Mock()
+            url = sideb_backend.get_deezer_preview_url("3135556")
+        self.assertEqual(url, "https://cdns-preview.dzcdn.net/stream/abc123")
+
+    def test_preview_url_from_track_url(self):
+        with mock.patch.object(sideb_backend.requests, "get") as get:
+            get.return_value.json.return_value = {
+                "id": 3135556,
+                "preview": "https://cdns-preview.dzcdn.net/stream/abc123",
+            }
+            get.return_value.raise_for_status = mock.Mock()
+            url = sideb_backend.get_deezer_preview_url(
+                "https://www.deezer.com/track/3135556")
+        self.assertEqual(url, "https://cdns-preview.dzcdn.net/stream/abc123")
+
+    def test_preview_url_returns_none_on_error(self):
+        with mock.patch.object(sideb_backend.requests, "get") as get:
+            get.side_effect = OSError("network down")
+            url = sideb_backend.get_deezer_preview_url("3135556")
+        self.assertIsNone(url)
 
 
 if __name__ == "__main__":

@@ -10,30 +10,38 @@ import time
 import wx
 
 from .. import (
-    adult_backend, archive_backend, audiobook_backend, book_backend,
-    musicdl_backend, preview, sideb_backend, torrent_backend, ytdlp_backend,
+    adult_backend, applemusic_backend, archive_backend,
+    audiobook_backend, bandcamp_backend, book_backend, deezer_backend,
+    musicdl_backend, preview, sideb_backend, torrent_backend,
+    ytdlp_backend,
 )
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 
 ENGINE_MUSIC = 0
 ENGINE_YOUTUBE = 1
-ENGINE_BOOKS = 2
-ENGINE_AUDIOBOOKS = 3
-ENGINE_ARCHIVE_AUDIO = 4
-ENGINE_ARCHIVE_VIDEO = 5
-ENGINE_TORRENTS = 6
-ENGINE_STRAIGHT = 7
-ENGINE_GAY = 8
-ENGINE_LESBIAN = 9
-ENGINE_BISEXUAL = 10
-ENGINE_TRANS = 11
+ENGINE_SOUNDCLOUD = 2
+ENGINE_BANDCAMP = 3
+ENGINE_APPLE_MUSIC = 4
+ENGINE_BOOKS = 5
+ENGINE_AUDIOBOOKS = 6
+ENGINE_ARCHIVE_AUDIO = 7
+ENGINE_ARCHIVE_VIDEO = 8
+ENGINE_TORRENTS = 9
+ENGINE_STRAIGHT = 10
+ENGINE_GAY = 11
+ENGINE_LESBIAN = 12
+ENGINE_BISEXUAL = 13
+ENGINE_TRANS = 14
 # Kept as an import-compatible name for callers that treated adult search as
 # the first adult choice before content categories were separated.
 ENGINE_ADULT = ENGINE_STRAIGHT
 ENGINE_LABELS = [
     "Music sites",
     "YouTube/web",
+    "SoundCloud",
+    "Bandcamp",
+    "Apple Music",
     "Books",
     "Audiobooks",
     "Old-time radio and music",
@@ -47,7 +55,7 @@ ENGINE_LABELS = [
 ]
 # The engines shown before the adult categories, which stay hidden until the
 # user switches them on in Settings.
-GENERAL_ENGINE_COUNT = 7
+GENERAL_ENGINE_COUNT = 10
 ARCHIVE_ENGINE_CATEGORIES = {
     ENGINE_ARCHIVE_AUDIO: archive_backend.AUDIO_CATEGORIES,
     ENGINE_ARCHIVE_VIDEO: archive_backend.VIDEO_CATEGORIES,
@@ -564,10 +572,14 @@ class SearchPanel(wx.Panel):
                 threading.Thread(target=self._sideb_search,
                                  args=(query, token, engine, stop),
                                  daemon=True, name="search-sideb").start()
+                threading.Thread(target=self._deezer_search,
+                                 args=(query, token, engine, stop),
+                                 daemon=True, name="search-deezer").start()
                 items, _answered, asked = musicdl_backend.search(
                     query, self.frame.config["search_timeout_s"],
                     on_site=on_site, stop=stop, sources=sources)
                 asked.append(sideb_backend.SIDEB_SOURCE)
+                asked.append(deezer_backend._SEARCH_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
                 items = []
             elif engine == ENGINE_BOOKS:
@@ -607,6 +619,14 @@ class SearchPanel(wx.Panel):
                     on_site=on_collection, stop=stop, sources=sources)
                 # on_collection already delivered these.
                 items = []
+            elif engine == ENGINE_SOUNDCLOUD:
+                items, _title = ytdlp_backend.extract_flat(
+                    f"scsearch30:{query}")
+            elif engine == ENGINE_BANDCAMP:
+                items = bandcamp_backend.search(
+                    query, self.frame.config)
+            elif engine == ENGINE_APPLE_MUSIC:
+                items = []  # Apple Music search needs MusicKit API
             elif _is_adult_engine(engine):
                 def on_adult_site(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
@@ -635,6 +655,16 @@ class SearchPanel(wx.Panel):
         wx.CallAfter(self._add_site, token, engine,
                      sideb_backend.SIDEB_SOURCE, items)
 
+    def _deezer_search(self, query, token, engine, stop):
+        try:
+            items = deezer_backend.search(query, self.frame.config)
+        except Exception:  # noqa: BLE001 - one failing site must not kill the rest
+            items = []
+        if stop.is_set():
+            return
+        wx.CallAfter(self._add_site, token, engine,
+                     deezer_backend._SEARCH_SOURCE, items)
+
     def _search_failed(self, token, error):
         if self.closing or token is not self.token:
             return
@@ -654,12 +684,66 @@ class SearchPanel(wx.Panel):
         selected = self._selected_result_objects()
         focused = self._focused_result_object()
         for item in items:
-            item["_search_order"] = self.next_result_order
-            self.next_result_order += 1
-            self.results.append(item)
+            self._insert_deduped(item)
         self.results = _sorted_results(
             self.results, self.sort_choice.GetSelection(), engine)
         self._render_results(engine, selected=selected, focused=focused)
+
+    @staticmethod
+    def _dedup_key(item):
+        """Normalised artist + title for deduplication."""
+        title = str(item.get("title") or "").strip().lower()
+        artist = str(item.get("artist") or "").strip().lower()
+        # Remove punctuation and extra whitespace for fuzzy matching.
+        import re
+        title = re.sub(r"[^\w\s]", "", title)
+        artist = re.sub(r"[^\w\s]", "", artist)
+        title = " ".join(title.split())
+        artist = " ".join(artist.split())
+        return f"{artist}\x00{title}"
+
+    @staticmethod
+    def _item_quality(item):
+        """Heuristic quality score for dedup: higher is better."""
+        fmt = str(item.get("format", "") or "").upper()
+        if fmt in ("FLAC", "WAV", "AIFF", "ALAC"):
+            score = 100
+        elif fmt in ("MP3", "M4A", "AAC", "OGG", "OPUS"):
+            # Higher bitrate hints come from file_size.
+            score = 50
+        else:
+            score = 20
+        # Large files suggest higher quality.
+        size_str = str(item.get("file_size", "") or "")
+        if "MB" in size_str.upper():
+            try:
+                score += int(float(size_str.upper().replace("MB", "").strip()))
+            except ValueError:
+                pass
+        # Known high-quality sources get a bonus.
+        source = str(item.get("source", "") or "")
+        if source in ("Deezer", "Qobuz", "TIDAL", "Apple Music"):
+            score += 30
+        elif source == "Deezer (Side B)":
+            score += 20
+        return score
+
+    def _insert_deduped(self, item):
+        """Insert *item*, replacing a duplicate if this one is higher quality."""
+        key = self._dedup_key(item)
+        if not key:
+            return
+        for i, existing in enumerate(self.results):
+            if self._dedup_key(existing) == key:
+                if self._item_quality(item) > self._item_quality(existing):
+                    # Replace the lower-quality entry, keeping the newer
+                    # position in the result list.
+                    item["_search_order"] = existing.get("_search_order", 0)
+                    self.results[i] = item
+                return
+        item["_search_order"] = self.next_result_order
+        self.next_result_order += 1
+        self.results.append(item)
         if self.done:
             # A late site: say so on the status bar, but leave focus alone.
             self.frame.announce(
@@ -886,6 +970,9 @@ class SearchPanel(wx.Panel):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
             self.on_copy_url(event)
             return
+        if event.GetKeyCode() == ord("O") and event.ControlDown():  # Ctrl+O
+            self.on_open_browser(event)
+            return
         event.Skip()
 
     def on_copy_url(self, event):
@@ -962,6 +1049,7 @@ class SearchPanel(wx.Panel):
         preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
         download = menu.Append(wx.ID_ANY, "&Download selected")
         copy_url = menu.Append(wx.ID_ANY, "Copy &URL\tCtrl+C")
+        open_browser = menu.Append(wx.ID_ANY, "&Open in browser\tCtrl+O")
         menu.AppendSeparator()
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear = menu.Append(wx.ID_ANY, "&Clear selection")
@@ -969,6 +1057,10 @@ class SearchPanel(wx.Panel):
         preview_item.Enable(has_selection and _plays(self.result_engine))
         download.Enable(has_selection)
         copy_url.Enable(has_selection)
+        open_browser.Enable(has_selection and
+                            self.result_engine in (
+                                ENGINE_MUSIC, ENGINE_YOUTUBE,
+                                ENGINE_SOUNDCLOUD, ENGINE_TORRENTS))
         clear.Enable(has_selection)
         select_all.Enable(
             self.results_list.GetSelectedItemCount() <
@@ -976,10 +1068,23 @@ class SearchPanel(wx.Panel):
         menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
         menu.Bind(wx.EVT_MENU, self.on_copy_url, copy_url)
+        menu.Bind(wx.EVT_MENU, self.on_open_browser, open_browser)
         menu.Bind(wx.EVT_MENU, self._select_all, select_all)
         menu.Bind(wx.EVT_MENU, self._clear_selection, clear)
         self.results_list.PopupMenu(menu)
         menu.Destroy()
+
+    def on_open_browser(self, event):
+        import webbrowser
+        for index in self._selected_indices():
+            if index >= len(self.results):
+                continue
+            url = preview.result_url(self.results[index])
+            if url:
+                webbrowser.open(url)
+        count = len(self._selected_indices())
+        noun = "link" if count == 1 else "links"
+        self.frame.announce(f"Opened {count} {noun} in browser.")
 
     def on_preview_selected(self, event):
         if self.result_engine == ENGINE_BOOKS:
@@ -1001,7 +1106,7 @@ class SearchPanel(wx.Panel):
         if index not in indices:
             index = indices[0]
         item = self.results[index]
-        audio_only = self.result_engine in (ENGINE_MUSIC, ENGINE_AUDIOBOOKS)
+        audio_only = self.result_engine in (ENGINE_MUSIC, ENGINE_SOUNDCLOUD, ENGINE_BANDCAMP, ENGINE_AUDIOBOOKS)
         token = self.preview_token = object()
         self.preview_btn.Disable()
         self.frame.announce(f"Preparing preview: {item['title']}")
@@ -1052,7 +1157,7 @@ class SearchPanel(wx.Panel):
         for index in indices:
             item = self.results[index]
             if engine == ENGINE_MUSIC:
-                if item.get("kind") == "sideb":
+                if item.get("kind") in ("sideb", "deezer"):
                     self.frame.queue.add_sideb(item["url"], item["title"])
                 else:
                     self.frame.queue.add_musicdl(
@@ -1063,6 +1168,12 @@ class SearchPanel(wx.Panel):
                 self.frame.queue.add_audiobook(item, item["title"])
             elif engine == ENGINE_TORRENTS:
                 self.frame.queue.add_torrent(item, item["title"])
+            elif engine == ENGINE_SOUNDCLOUD:
+                self.frame.queue.add_ytdlp(item["url"], item["title"],
+                                           audio_only=True)
+            elif engine == ENGINE_BANDCAMP:
+                self.frame.queue.add_ytdlp(item["url"], item["title"],
+                                           audio_only=True)
             elif _is_archive_engine(engine):
                 self.frame.queue.add_archive(item, item["title"])
             elif _is_adult_engine(engine):

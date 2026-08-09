@@ -2,13 +2,12 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Native Deezer backend: FLAC / MP3 320 downloads unlocked by an ARL cookie.
+"""Native Deezer backend: search, URL inspection, and ARL-backed downloads.
 
-sideb only ever pulls audio from YouTube Music. With a Deezer ARL cookie
-(from a Premium/HiFi account) blindDL can instead fetch Deezer's own
-encrypted streams -- FLAC for the flac audio-format setting, MP3 320 for
-everything else -- decrypt them (BF_CBC_STRIPE, the scheme deemix and
-streamrip use), and tag the result with mutagen.
+Search and URL inspection use the public Deezer REST API (no auth needed)
+and are always available. Downloads use the authenticated gateway API
+(BF_CBC_STRIPE decryption) when an ARL cookie is configured, unlocking
+FLAC and MP3 320.
 
 The download queue tries this first whenever an ARL is configured and
 falls back to Side B if the account cannot serve the requested quality.
@@ -25,7 +24,12 @@ from .ytdlp_backend import DownloadCancelled
 
 _GW_URL = "https://www.deezer.com/ajax/gw-light.php"
 _GET_URL = "https://media.deezer.com/v1/get_url"
+_API_URL = "https://api.deezer.com"
 _TRACK_ID_RE = __import__("re").compile(r"deezer\.com/(?:[a-z]{2}/)?track/(\d+)")
+_DEEZER_URL_RE = __import__("re").compile(
+    r"deezer\.com/(?:[a-z]{2}/)?(track|album|playlist|artist)/(\d+)",
+    __import__("re").IGNORECASE)
+_SEARCH_SOURCE = "Deezer"
 _USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 "
                "Safari/537.36")
@@ -266,6 +270,117 @@ def _tag_mp3(path, meta, cover, lyrics):
         tags.add(APIC(encoding=3, mime="image/jpeg", type=3,
                       desc="Cover", data=cover))
     tags.save(path, v2_version=3)
+
+
+def is_deezer_url(url):
+    """Whether *url* points at a Deezer track/album/playlist/artist."""
+    return bool(_DEEZER_URL_RE.search(url))
+
+
+def _api_get(path, params=None):
+    resp = requests.get(
+        f"{_API_URL}{path}", params=params or {},
+        headers={"User-Agent": _USER_AGENT}, timeout=HTTP_TIMEOUT_S)
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"Deezer API: {data['error'].get('message', 'unknown error')}")
+    return data
+
+
+def _track_to_item(data):
+    artist = (data.get("artist") or {}).get("name", "")
+    album = (data.get("album") or {}).get("title", "")
+    return {
+        "id": f"deezer:{data['id']}",
+        "kind": "deezer",
+        "title": data.get("title") or data.get("name") or "Unknown title",
+        "artist": artist,
+        "album": album,
+        "source": _SEARCH_SOURCE,
+        "duration_s": data.get("duration", 0),
+        "url": data.get("link", f"https://www.deezer.com/track/{data['id']}"),
+    }
+
+
+def search(query, config=None):
+    """Search Deezer tracks via the public API.  Returns normalized items."""
+    try:
+        data = _api_get("/search/track", {"q": query, "limit": 30})
+    except Exception:
+        return []
+    return [_track_to_item(t) for t in data.get("data", [])]
+
+
+def extract_flat(url, config=None):
+    """Resolve a Deezer URL to (items, title) via the public API.
+
+    Same contract as sideb_backend.extract_flat and ytdlp_backend.extract_flat.
+    """
+    match = _DEEZER_URL_RE.search(url)
+    if not match:
+        raise RuntimeError(f"Not a Deezer URL: {url}")
+    kind, obj_id = match.group(1).lower(), match.group(2)
+
+    if kind == "track":
+        data = _api_get(f"/track/{obj_id}")
+        return [_track_to_item(data)], data.get("title") or url
+
+    if kind == "album":
+        album = _api_get(f"/album/{obj_id}")
+        tracks_data = _api_get(f"/album/{obj_id}/tracks")
+        items = []
+        for t in tracks_data.get("data", []):
+            t_copy = dict(t)
+            t_copy["album"] = {"title": album.get("title", "")}
+            t_copy["artist"] = album.get("artist", {})
+            items.append(_track_to_item(t_copy))
+        return items, album.get("title") or url
+
+    if kind == "playlist":
+        playlist = _api_get(f"/playlist/{obj_id}")
+        tracks_data = _api_get(f"/playlist/{obj_id}/tracks")
+        items = []
+        for entry in tracks_data.get("data", []):
+            t = entry.get("track") if isinstance(entry, dict) else entry
+            if t:
+                items.append(_track_to_item(t))
+        return items, playlist.get("title") or url
+
+    if kind == "artist":
+        artist = _api_get(f"/artist/{obj_id}")
+        artist_name = artist.get("name", "")
+        # Fetch the full discography: paginate through all albums, then
+        # collect every track. Large catalogues can take a few seconds.
+        album_ids = []
+        next_path = f"/artist/{obj_id}/albums?limit=100"
+        while next_path:
+            page = _api_get(next_path)
+            for alb in page.get("data", []):
+                album_ids.append(str(alb["id"]))
+            next_path = page.get("next")
+        items = []
+        for alb_id in album_ids:
+            try:
+                tracks_data = _api_get(f"/album/{alb_id}/tracks")
+            except Exception:
+                continue
+            for t in tracks_data.get("data", []):
+                t_copy = dict(t)
+                t_copy["artist"] = {"name": artist_name}
+                if "album" not in t_copy:
+                    t_copy["album"] = {}
+                items.append(_track_to_item(t_copy))
+        if not items:
+            # Fall back to top tracks when discography is empty (rare).
+            top = _api_get(f"/artist/{obj_id}/top", {"limit": 50})
+            for t in top.get("data", []):
+                t_copy = dict(t)
+                t_copy["artist"] = {"name": artist_name}
+                items.append(_track_to_item(t_copy))
+        return items, artist_name or url
+
+    raise RuntimeError(f"Unsupported Deezer URL kind: {kind}")
 
 
 def _sanitize(name):

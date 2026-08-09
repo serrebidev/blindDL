@@ -5,6 +5,8 @@
 import unittest
 from unittest import mock
 
+import yt_dlp
+
 from blinddl import ytdlp_backend
 
 
@@ -171,6 +173,57 @@ class YtDlpBackendTests(unittest.TestCase):
         self.assertIn("acodec!=none", options["format"])
         self.assertIn("vcodec!=none", options["format"])
         self.assertEqual(options["cookiesfrombrowser"], ("edge",))
+
+    def test_format_fallback_when_requested_format_unavailable(self):
+        call_count = [0]
+
+        class _FallbackDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, url, download=False):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    raise yt_dlp.utils.ExtractorError(
+                        "Requested format is not available")
+                return {
+                    "id": "1", "title": "Fallback", "webpage_url": url,
+                    "url": "https://media.example/fallback.mp4",
+                }
+
+        with mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _FallbackDL):
+            stream = ytdlp_backend.resolve_stream(
+                "https://example.invalid/video", audio_only=True)
+
+        self.assertEqual(stream, "https://media.example/fallback.mp4")
+        self.assertEqual(call_count[0], 2)
+
+    def test_format_fallback_passes_through_other_errors(self):
+        class _ErrorDL:
+            def __init__(self, options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def extract_info(self, url, download=False):
+                raise yt_dlp.utils.ExtractorError("Video unavailable")
+
+        with mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _ErrorDL):
+            with self.assertRaises(yt_dlp.utils.ExtractorError):
+                ytdlp_backend.resolve_stream(
+                    "https://example.invalid/video", audio_only=True)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import threading
 
 import wx
 
-from .. import adult_backend, preview, sideb_backend, ytdlp_backend
+from .. import adult_backend, applemusic_backend, deezer_backend, preview, sideb_backend, ytdlp_backend
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 
@@ -134,8 +134,15 @@ class UrlPanel(wx.Panel):
                 adult_error = str(exc)
         sideb_error = None
         if sideb_backend.is_deezer_url(url):
-            # Deezer gets the full Side B treatment (tags, cover, lyrics);
-            # if that fails, yt-dlp still gets its turn below.
+            # Public API first, then fall back to sideb for richer metadata.
+            try:
+                items, title = deezer_backend.extract_flat(
+                    url, self.frame.config)
+                wx.CallAfter(self._inspect_done, items, title, audio_only,
+                             "deezer")
+                return
+            except Exception:  # noqa: BLE001 - sideb is the fallback
+                pass
             try:
                 items, title = sideb_backend.extract_flat(
                     url, self.frame.config)
@@ -143,6 +150,15 @@ class UrlPanel(wx.Panel):
                              "sideb")
                 return
             except Exception as exc:  # noqa: BLE001 - yt-dlp may still cope
+                sideb_error = str(exc)
+        if applemusic_backend.is_apple_music_url(url):
+            try:
+                items, title = applemusic_backend.extract_flat(
+                    url, self.frame.config)
+                wx.CallAfter(self._inspect_done, items, title, True,
+                             "applemusic")
+                return
+            except Exception as exc:
                 sideb_error = str(exc)
         try:
             items, title = ytdlp_backend.extract_flat(
@@ -188,7 +204,9 @@ class UrlPanel(wx.Panel):
                 self.url_text.SetFocus()
                 return
         for item in items:
-            if engine == "sideb":
+            if engine == "applemusic":
+                self.frame.queue.add_applemusic(item["url"], item["title"])
+            elif engine in ("sideb", "deezer"):
                 self.frame.queue.add_sideb(item["url"], item["title"])
             elif engine == "adult":
                 self.frame.queue.add_adult(item, item["title"])

@@ -183,25 +183,40 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
     audio and video. Native desktop players cannot combine yt-dlp's separate
     adaptive audio/video URLs themselves.
     """
+    primary_format = (
+        "bestaudio/best"
+        if audio_only else
+        "best[protocol^=http][vcodec!=none][acodec!=none]/"
+        "best[vcodec!=none][acodec!=none]/best"
+    )
+    fallback_format = "bestaudio/best" if audio_only else "best"
+
     opts = {
         "quiet": True,
         "noprogress": True,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
-        "format": (
-            "bestaudio[protocol^=http]/bestaudio/best"
-            if audio_only else
-            "best[protocol^=http][vcodec!=none][acodec!=none]/"
-            "best[vcodec!=none][acodec!=none]/best"
-        ),
+        "format": primary_format,
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+
+    for attempt, fmt in enumerate((primary_format, fallback_format)):
+        opts["format"] = fmt
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            break
+        except yt_dlp.utils.ExtractorError as exc:
+            if attempt == 0 and "Requested format is not available" in str(exc):
+                continue
+            raise
+    else:
+        raise RuntimeError("No playable media stream was found.")
+
     if not info:
         raise RuntimeError("No playable media stream was found.")
     entries = info.get("entries")
