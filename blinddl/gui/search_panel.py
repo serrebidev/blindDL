@@ -10,7 +10,7 @@ import time
 import wx
 
 from .. import (
-    adult_backend, applemusic_backend, archive_backend,
+    adult_backend, archive_backend,
     audiobook_backend, bandcamp_backend, book_backend, deezer_backend,
     musicdl_backend, preview, sideb_backend, torrent_backend,
     ytdlp_backend,
@@ -746,6 +746,7 @@ class SearchPanel(wx.Panel):
         self.results.append(item)
         if self.done:
             # A late site: say so on the status bar, but leave focus alone.
+            source = str(item.get("source", "") or "")
             self.frame.announce(
                 f"{self._result_count()}, latest from {source}. "
                 f"{self._pending_phrase()}")

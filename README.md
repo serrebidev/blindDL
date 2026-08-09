@@ -88,7 +88,7 @@ Ctrl+Shift+S chooses which sites each source searches, and newly supported sites
 
 ## Torrents
 
-The Torrents source searches Knaben, The Pirate Bay, EZTV, Nyaa, Torrents-CSV, LimeTorrents and BitSearch at once. Tools, My torrent indexers adds your own Prowlarr or Jackett instance, which is how private trackers are reached — that tool already holds the login and the passkey, so BlindDL never stores a tracker password.
+The Torrents source searches Knaben, The Pirate Bay, EZTV, Nyaa, Torrents-CSV, LimeTorrents, BitSearch and the Internet Archive at once. Archive torrents are the dependable ones: every item is seeded by the Archive itself, so they download at full speed even with no other peers, and one torrent brings a whole item rather than a single file. Tools, My torrent indexers adds your own Prowlarr or Jackett instance, which is how private trackers are reached — that tool already holds the login and the passkey, so BlindDL never stores a tracker password.
 
 A chosen torrent opens in whatever BitTorrent client you already use. Tick **Download torrents in BlindDL** in Settings, Torrents and BlindDL downloads it itself instead: progress, speed and the swarm's seed and peer counts appear in the Downloads tab, and finished files land in the Library with everything else. It offers to install libtorrent the first time you switch it on.
 

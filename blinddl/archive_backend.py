@@ -31,6 +31,8 @@ import time
 from urllib.parse import quote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 from .book_backend import (
     HEADERS,
@@ -77,6 +79,11 @@ ALL_SOURCES = AUDIO_CATEGORIES + VIDEO_CATEGORIES
 
 SEARCH_TIMEOUT_S = 5.0
 HTTP_TIMEOUT_S = 20
+# Reading one item's file list is the slow call, not the search: a large
+# item can leave the metadata endpoint thinking for far longer than any
+# query does, and preview and download both wait on it. Give up on a dead
+# host quickly, then be patient with a live one that is simply slow.
+METADATA_TIMEOUT_S = (5, 45)
 DOWNLOAD_TIMEOUT_S = 600
 SEARCH_ROWS = 40
 MAX_RESULTS_PER_SOURCE = 25
@@ -126,6 +133,17 @@ def _http():
         if _session is None:
             session = requests.Session()
             session.headers.update(HEADERS)
+            # One slow response is not a fair test of the Archive: it times
+            # out and returns 5xx often enough that a single attempt fails
+            # previews for items that play perfectly on a second try.
+            adapter = HTTPAdapter(max_retries=Retry(
+                total=3,
+                backoff_factor=1.5,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=("GET", "HEAD"),
+            ))
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
             _session = session
         return _session
 
@@ -194,7 +212,10 @@ def _item(source, doc):
 
 def search_category(source, query, timeout=HTTP_TIMEOUT_S):
     """Run one category's Internet Archive query."""
-    escaped = re.sub(r'["\\]', " ", query).strip()
+    # Brackets break the wrapping ({escaped}) the same way a stray quote
+    # breaks a phrase, and the Archive answers a malformed query with an
+    # empty result set rather than an error, so the search just goes quiet.
+    escaped = re.sub(r'["\\()]', " ", query).strip()
     response = _http().get(
         IA_SEARCH_URL,
         params={
@@ -281,7 +302,7 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
 # -- item files ------------------------------------------------------------
 
 
-def item_files(identifier, video=False, timeout=HTTP_TIMEOUT_S):
+def item_files(identifier, video=False, timeout=METADATA_TIMEOUT_S):
     """Return the playable files of one item as normalized rows.
 
     One item can be a single film or a radio series with hundreds of
@@ -289,10 +310,34 @@ def item_files(identifier, video=False, timeout=HTTP_TIMEOUT_S):
     Only the best available format is returned, never the Archive's other
     derivatives of the same recording.
     """
-    response = _http().get(f"{IA_METADATA_URL}/{quote(str(identifier))}",
-                           timeout=timeout)
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = _http().get(f"{IA_METADATA_URL}/{quote(str(identifier))}",
+                               timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        # The raw urllib3 error names a host and a port and tells the user
+        # nothing they can act on; say which item failed and that waiting
+        # is the answer, since the Archive usually serves it on a retry.
+        raise RuntimeError(
+            "The Internet Archive did not answer for this item. Its servers "
+            "are often slow with large items - please try again in a moment."
+        ) from exc
+    # A broken item still answers 200 and puts the problem in the body,
+    # and an identifier the Archive has never heard of comes back as an
+    # empty object. Neither one means "this item has nothing playable", so
+    # neither should be reported that way.
+    if payload.get("error"):
+        raise RuntimeError(
+            f"The Internet Archive cannot serve this item: {payload['error']}. "
+            "This is a fault on their side, not a problem with your copy."
+        )
+    if not payload:
+        raise RuntimeError(
+            "The Internet Archive has no record of this item. It may have "
+            "been removed since it was listed."
+        )
+
     preference = VIDEO_PREFERENCE if video else AUDIO_PREFERENCE
     by_extension = {}
     for entry in payload.get("files") or ():

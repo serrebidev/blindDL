@@ -8,7 +8,18 @@ from unittest import mock
 
 import pytest
 
-from blinddl import torrent_engine, updater
+from blinddl import __version__, torrent_engine, updater
+
+
+def _newer_version():
+    """One patch above this build.
+
+    The updater only offers a release that outranks what is running, so a
+    fixture pinned to a literal version silently stops testing anything the
+    moment that version ships - which is exactly what happened at 0.8.0.
+    """
+    major, minor, patch = updater._version_tuple(__version__)
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def test_frozen_tool_updates_do_not_invoke_a_system_package_manager():
@@ -39,13 +50,14 @@ def test_frozen_missing_libtorrent_never_asks_for_python_or_pip():
 
 
 def _windows_release():
+    version = _newer_version()
     assets = [
-        "blindDL-Setup-v0.8.0-windows-x64.exe",
-        "blindDL-v0.8.0-windows-x64.zip",
+        f"blindDL-Setup-v{version}-windows-x64.exe",
+        f"blindDL-v{version}-windows-x64.zip",
         "SHA256SUMS-windows-x64.txt",
     ]
     return {
-        "tag_name": "v0.8.0",
+        "tag_name": f"v{version}",
         "html_url": "https://example.invalid/release",
         "assets": [
             {"name": name, "browser_download_url": f"https://example.invalid/{name}"}
@@ -59,6 +71,7 @@ def test_portable_windows_update_selects_the_zip():
             mock.patch.object(updater.platform, "machine", return_value="AMD64"), \
             mock.patch.object(updater, "_windows_installed_build", return_value=False):
         update = updater._select_update(_windows_release())
+    assert update is not None, "a newer release must be offered as an update"
     assert update.package_name.endswith("windows-x64.zip")
     assert update.checksum_name == "SHA256SUMS-windows-x64.txt"
 
@@ -68,6 +81,7 @@ def test_installed_windows_update_selects_the_installer():
             mock.patch.object(updater.platform, "machine", return_value="AMD64"), \
             mock.patch.object(updater, "_windows_installed_build", return_value=True):
         update = updater._select_update(_windows_release())
+    assert update is not None, "a newer release must be offered as an update"
     assert update.package_name.endswith("windows-x64.exe")
 
 
@@ -78,13 +92,14 @@ def test_current_release_does_not_offer_a_downgrade():
 
 
 def test_non_debian_linux_update_selects_the_portable_tarball():
+    version = _newer_version()
     assets = [
-        "blinddl_0.8.0_amd64.deb",
-        "blindDL-v0.8.0-linux-x64.tar.gz",
+        f"blinddl_{version}_amd64.deb",
+        f"blindDL-v{version}-linux-x64.tar.gz",
         "SHA256SUMS-linux-x64.txt",
     ]
     release = {
-        "tag_name": "v0.8.0",
+        "tag_name": f"v{version}",
         "assets": [
             {"name": name, "browser_download_url": f"https://example.invalid/{name}"}
             for name in assets
@@ -94,6 +109,7 @@ def test_non_debian_linux_update_selects_the_portable_tarball():
             mock.patch.object(updater.platform, "machine", return_value="x86_64"), \
             mock.patch.object(updater, "_is_debian_family", return_value=False):
         update = updater._select_update(release)
+    assert update is not None, "a newer release must be offered as an update"
     assert update.package_name.endswith("linux-x64.tar.gz")
 
 

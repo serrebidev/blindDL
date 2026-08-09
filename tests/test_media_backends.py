@@ -11,6 +11,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import requests
+
 from blinddl import archive_backend, audiobook_backend, preview
 
 from tests.test_book_backend import _Response
@@ -111,6 +113,49 @@ class ArchiveFileTests(unittest.TestCase):
     def test_an_item_without_the_wanted_media_says_so(self):
         with self.assertRaises(RuntimeError):
             self._files(video=True)
+
+    def test_a_broken_item_blames_the_archive_not_the_item(self):
+        # The Archive answers 200 with the fault in the body, which used to
+        # read back as "no playable files" and sounded like a blindDL bug.
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(
+                payload={"error": "item metadata may be invalid"})
+            with self.assertRaises(RuntimeError) as caught:
+                archive_backend.item_files("broken", video=True)
+
+        self.assertIn("cannot serve this item", str(caught.exception))
+        self.assertIn("item metadata may be invalid", str(caught.exception))
+
+    def test_an_unknown_identifier_says_there_is_no_record(self):
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload={})
+            with self.assertRaises(RuntimeError) as caught:
+                archive_backend.item_files("gone", video=True)
+
+        self.assertIn("no record", str(caught.exception))
+
+    def test_a_slow_archive_reads_back_as_words_not_a_traceback(self):
+        with mock.patch.object(archive_backend, "_http") as http:
+            http.return_value.get.side_effect = \
+                requests.exceptions.ReadTimeout("read timed out")
+            with self.assertRaises(RuntimeError) as caught:
+                archive_backend.item_files("slow", video=True)
+
+        message = str(caught.exception)
+        self.assertIn("try again", message)
+        self.assertNotIn("HTTPSConnectionPool", message)
+
+    def test_the_session_retries_a_slow_or_failing_archive(self):
+        # A single attempt fails previews for items that answer on a retry;
+        # the metadata endpoint routinely takes longer than a search does.
+        adapter = archive_backend._http().get_adapter(
+            "https://archive.org/metadata/x")
+        retries = getattr(adapter, "max_retries")
+
+        self.assertGreaterEqual(retries.total, 3)
+        self.assertGreater(retries.backoff_factor, 0)
+        self.assertIn(503, retries.status_forcelist)
+        self.assertGreaterEqual(archive_backend.METADATA_TIMEOUT_S[1], 45)
 
     def test_preview_plays_the_first_file_of_an_item(self):
         item = {"kind": "archive", "title": "Dragnet", "identifier": "dragnet"}

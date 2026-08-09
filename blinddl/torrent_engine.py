@@ -480,9 +480,11 @@ class TorrentEngine:
         if magnet:
             atp = lt.parse_magnet_uri(magnet)
         elif item.get("download_url"):
-            # A private tracker publishes an authenticated .torrent instead of
-            # a magnet; the announce URL inside it carries the passkey, so the
-            # file has to be fetched and handed over whole.
+            # Some rows carry a .torrent rather than a magnet: a private
+            # tracker's is authenticated, its announce URL carrying the
+            # passkey, and an Archive item's carries the webseed that makes
+            # it fetchable with no peers. Either way the file itself is the
+            # thing that works, so it is fetched and handed over whole.
             path = torrent_backend.fetch_torrent_file(item, _resume_dir())
             atp = lt.add_torrent_params()
             try:

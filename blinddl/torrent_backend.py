@@ -51,6 +51,7 @@ SOURCE_TORRENTS_CSV = "Torrents-CSV"
 SOURCE_LIMETORRENTS = "LimeTorrents"
 SOURCE_BITSEARCH = "BitSearch / SolidTorrents"
 SOURCE_KNABEN = "Knaben"
+SOURCE_ARCHIVE = "Internet Archive"
 ALL_SOURCES = [
     SOURCE_KNABEN,
     SOURCE_PIRATEBAY,
@@ -59,6 +60,7 @@ ALL_SOURCES = [
     SOURCE_TORRENTS_CSV,
     SOURCE_LIMETORRENTS,
     SOURCE_BITSEARCH,
+    SOURCE_ARCHIVE,
 ]
 
 PIRATEBAY_URL = "https://apibay.org/q.php"
@@ -72,6 +74,12 @@ LIMETORRENTS_URL = "https://www.limetorrents.lol/search/all"
 # The origin. solidtorrents.to and bitsearch.to are both 301s onto it.
 BITSEARCH_URL = "https://bitsearch.eu/api/v1/search"
 KNABEN_URL = "https://api.knaben.org/v1"
+# The Archive publishes every public item as a torrent as well, and indexes
+# that file as a format of its own, so asking for the format is what keeps
+# the results to items BitTorrent can actually fetch.
+ARCHIVE_SEARCH_URL = "https://archive.org/advancedsearch.php"
+ARCHIVE_TORRENT_URL = "https://archive.org/download"
+ARCHIVE_DETAILS_URL = "https://archive.org/details"
 
 SEARCH_TIMEOUT_S = 8.0
 HTTP_TIMEOUT_S = 20
@@ -719,6 +727,59 @@ def search_feed(query, feed, timeout=HTTP_TIMEOUT_S):
     return [item for item in items if item is not None]
 
 
+# -- Internet Archive -------------------------------------------------------
+
+
+def search_archive(query, timeout=HTTP_TIMEOUT_S):
+    """Public-domain and openly licensed media, as torrents.
+
+    These have no swarm worth speaking of and do not need one: every Archive
+    torrent is webseeded by the Archive itself, so it fetches at full speed
+    with no peers at all. The search API reports no swarm figures, and that
+    permanent seed is what the single seeder here stands for -- without it
+    these rows would sort below every dead torrent on a public tracker.
+
+    One torrent covers a whole item, so a show with many episodes arrives in
+    one piece rather than as a row per file.
+    """
+    # Every one of these closes or escapes the wrong thing in the Archive's
+    # query language, and a malformed query comes back as an empty result
+    # set rather than an error -- a search that silently finds nothing.
+    escaped = re.sub(r'["\\()]', " ", query).strip()
+    response = _http().get(
+        ARCHIVE_SEARCH_URL,
+        params={
+            "q": f'({escaped}) AND format:("Archive BitTorrent")',
+            "fl[]": ["identifier", "title", "creator", "item_size"],
+            "rows": SEARCH_ROWS,
+            "page": 1,
+            "output": "json",
+            "sort[]": "downloads desc",
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    items = []
+    for doc in response.json().get("response", {}).get("docs", []) or ():
+        identifier = str(doc.get("identifier") or "").strip()
+        if not identifier:
+            continue
+        creator = doc.get("creator")
+        if isinstance(creator, list):
+            creator = creator[0] if creator else ""
+        name = quote(identifier)
+        items.append(_item(
+            SOURCE_ARCHIVE, "", doc.get("title") or identifier,
+            uploader=str(creator or ""),
+            seeders=1,
+            size_bytes=_int(doc.get("item_size")),
+            download_url=(f"{ARCHIVE_TORRENT_URL}/{name}/"
+                          f"{name}_archive.torrent"),
+            url=f"{ARCHIVE_DETAILS_URL}/{name}",
+        ))
+    return items
+
+
 _SEARCHERS = {
     SOURCE_KNABEN: search_knaben,
     SOURCE_PIRATEBAY: search_piratebay,
@@ -727,6 +788,7 @@ _SEARCHERS = {
     SOURCE_TORRENTS_CSV: search_torrents_csv,
     SOURCE_LIMETORRENTS: search_limetorrents,
     SOURCE_BITSEARCH: search_bitsearch,
+    SOURCE_ARCHIVE: search_archive,
 }
 # Indexers that cannot be given the query, so an unmatched row is noise.
 _STRICT_SOURCES = {SOURCE_EZTV}

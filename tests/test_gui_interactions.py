@@ -419,6 +419,21 @@ class GuiInteractionTests(unittest.TestCase):
         )
         self.assertTrue(panel.search_btn.IsEnabled())
 
+    def test_a_late_result_announces_the_site_it_came_from(self):
+        # _insert_deduped announced a name that only ever existed as a local
+        # in _item_quality, so a result arriving after the search deadline
+        # raised NameError instead of reaching the screen reader.
+        panel = SearchPanel(self.host, self.frame)
+        panel.done = True
+        panel.results = []
+
+        panel._insert_deduped({
+            "title": "Late Arrival", "artist": "Someone",
+            "source": "Bandcamp", "kind": "music",
+        })
+
+        self.assertIn("Bandcamp", self.frame.messages[-1])
+
     def test_adult_combo_choices_follow_master_setting(self):
         self.frame.config["adult_sites_enabled"] = False
         panel = SearchPanel(self.host, self.frame)
