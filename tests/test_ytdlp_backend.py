@@ -7,7 +7,7 @@ from unittest import mock
 
 import yt_dlp
 
-from blinddl import ytdlp_backend
+from blinddl import search_order, ytdlp_backend
 
 
 class _YoutubeDL:
@@ -125,6 +125,28 @@ class YtDlpBackendTests(unittest.TestCase):
             caps,
             [ytdlp_backend.RANKED_FEED_LIMIT, ytdlp_backend.RANKED_FEED_LIMIT,
              None, 5])
+
+    def test_youtube_search_and_hashtag_feeds_receive_native_order(self):
+        recent = ytdlp_backend.search_url(
+            "rimworld", search_order.ORDER_RECENT)
+        popular = ytdlp_backend.ordered_feed_url(
+            "https://www.youtube.com/hashtag/rimworld",
+            search_order.ORDER_POPULAR)
+
+        self.assertIn("search_query=rimworld", recent)
+        self.assertIn("sp=CAISAhAB8AEB", recent)
+        self.assertIn("search_query=%23rimworld", popular)
+        self.assertIn("sp=CAMSAhAB8AEB", popular)
+
+    def test_feed_order_does_not_rewrite_channels_or_playlists(self):
+        for url in (
+                "https://www.youtube.com/@veritasium",
+                "https://www.youtube.com/playlist?list=PL1"):
+            self.assertEqual(
+                ytdlp_backend.ordered_feed_url(
+                    url, search_order.ORDER_POPULAR),
+                url,
+            )
 
     def test_shorthand_subscription_targets_become_urls(self):
         self.assertEqual(

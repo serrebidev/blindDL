@@ -35,7 +35,8 @@ from urllib.parse import quote, urlencode, urljoin, urlparse
 
 import requests
 
-from . import creator_backend, ytdlp_backend
+from . import creator_backend, search_order, ytdlp_backend
+from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 
 
 @dataclass(frozen=True)
@@ -237,6 +238,50 @@ PROVIDERS = {
         ),
     )
 }
+
+# The sort each provider's own search takes, by blindDL order. These were
+# read off the installed wrapper signatures rather than guessed: most of the
+# EchterAlsFake APIs expose only their site's relevance ranking, and the ones
+# that do sort each spell it differently.
+#
+# XNXX is the odd one. Its wrapper puts both the content category and its
+# hits ranking in the same `mode` path segment, and blindDL already spends
+# that on keeping gay results out of a straight search, so popularity has
+# nowhere to go. Its `upload_time` filter is separate, so "most recent"
+# narrows the search to the last month instead -- a real move towards recent
+# uploads, which is why XNXX is listed for that order and not the other.
+PROVIDER_SORTS = {
+    "eporner": {
+        ORDER_RECENT: {"sorting_order": "latest"},
+        ORDER_POPULAR: {"sorting_order": "most-popular"},
+    },
+    "pornhub": {
+        ORDER_RECENT: {"sort_by": "mr"},     # most recent
+        ORDER_POPULAR: {"sort_by": "mv"},    # most viewed
+    },
+    "xhamster": {
+        ORDER_RECENT: {"sort_by": "newest"},
+        ORDER_POPULAR: {"sort_by": "views"},
+    },
+    "xnxx": {
+        ORDER_RECENT: {"upload_time": "/month"},
+    },
+    "xvideos": {
+        ORDER_RECENT: {"sorting_sort": "uploaddate"},
+        ORDER_POPULAR: {"sorting_sort": "views"},
+    },
+    "youporn": {
+        ORDER_RECENT: {"filter_relevance": "date"},
+        ORDER_POPULAR: {"filter_relevance": "views"},
+    },
+}
+ORDER_SUPPORT = {key: frozenset(sorts) for key, sorts in PROVIDER_SORTS.items()}
+
+
+def supports_order(key, order):
+    """Whether one provider's own search can answer *order*."""
+    return search_order.supported(ORDER_SUPPORT, key, order)
+
 
 BOYFRIEND_KEY = "boyfriendtv"
 BOYFRIEND_LABEL = "BoyfriendTV"
@@ -454,14 +499,18 @@ class _XHamsterSearchParser(HTMLParser):
         self.items.append((url, title))
 
 
-def _search_xhamster_fallback(query, category):
+def _search_xhamster_fallback(query, category, order=ORDER_RELEVANCE):
     from curl_cffi.requests import Session
 
     categorized_query, kwargs = _search_parameters(
-        PROVIDERS["xhamster"], query, category)
+        PROVIDERS["xhamster"], query, category, order)
     params = {"quality": kwargs.get("minimum_quality", "720p")}
     if kwargs.get("category"):
         params["cats"] = kwargs["category"]
+    # The same ?sort= the installed xhamster_api would have sent; this
+    # scraper stands in for it, so it has to carry its parameters too.
+    if kwargs.get("sort_by"):
+        params["sort"] = kwargs["sort_by"]
     url = (
         "https://xhamster.com/" + XHAMSTER_CONTENT_PATHS[category]
         + quote(categorized_query, safe="")
@@ -921,12 +970,13 @@ def _matches_content_category(item, category):
     return _GAY_MALE_RESULT_PATTERN.search(searchable) is not None
 
 
-def _search_parameters(provider, query, category):
+def _search_parameters(provider, query, category, order=ORDER_RELEVANCE):
     """Return a category-aware query and provider keyword arguments."""
     if category not in CONTENT_CATEGORIES:
         raise ValueError(f"Unknown adult content category: {category}")
     kwargs = dict(provider.search_kwargs)
     native_filter = False
+    order = search_order.normalize(order)
 
     # XNXX supports category paths for every content choice. Its wrapper's
     # Mode enum omits these paths, but the public method accepts strings and
@@ -972,6 +1022,16 @@ def _search_parameters(provider, query, category):
     if provider.key == "mymusclevideo":
         native_filter = True
 
+    # The site's own sort, where it has one. It goes on last so a provider
+    # note above can never be overwritten by it, and keep_original_order
+    # travels with it: several of these wrappers fetch their pages
+    # concurrently and hand back whichever finished first unless told not
+    # to, which would shuffle the very ordering just asked for.
+    sort = PROVIDER_SORTS.get(provider.key, {}).get(order)
+    if sort:
+        kwargs.update(sort)
+        kwargs["keep_original_order"] = True
+
     term = CONTENT_QUERY_TERMS[category]
     words = set(re.findall(r"[a-z]+", query.casefold()))
     categorized_query = (
@@ -979,7 +1039,8 @@ def _search_parameters(provider, query, category):
     return categorized_query, kwargs
 
 
-async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT):
+async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
+                          order=ORDER_RELEVANCE):
     if provider.key == "thisvid":
         return await asyncio.to_thread(_search_thisvid, query, category)
     if provider.key == "mymusclevideo":
@@ -987,11 +1048,11 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT):
             _search_mymusclevideo, query, category)
     if provider.key == "xhamster":
         return await asyncio.to_thread(
-            _search_xhamster_fallback, query, category)
+            _search_xhamster_fallback, query, category, order)
     _module, client = _import_provider(provider)
     method = getattr(client, provider.search_method)
     categorized_query, kwargs = _search_parameters(
-        provider, query, category)
+        provider, query, category, order)
     results = method(categorized_query, **kwargs)
     if inspect.isawaitable(results):
         results = await results
@@ -1018,14 +1079,21 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT):
 
 
 def search(query, timeout_s=10.0, on_site=None, stop=None, sources=None,
-           category=CONTENT_STRAIGHT):
+           category=CONTENT_STRAIGHT, order=ORDER_RELEVANCE):
     """Search selected API providers concurrently.
 
     Returns ``(items, answered, asked)`` with the same contract as
     :func:`musicdl_backend.search`.  Slow sites may report later through
     ``on_site``; a shared gate prevents repeated searches from multiplying
     active network work.
+
+    ``order`` is one of :mod:`search_order`'s constants.  A provider whose
+    own search cannot sort that way returns its relevance ranking, and these
+    results carry no view count or upload date to reorder them by
+    afterwards, so :func:`supports_order` is the only honest answer about
+    which sites obeyed.
     """
+    order = search_order.normalize(order)
     keys = enabled_sources(()) if sources is None else list(sources)
     keys = [
         key for key in keys
@@ -1043,7 +1111,8 @@ def search(query, timeout_s=10.0, on_site=None, stop=None, sources=None,
             try:
                 with _silence_provider_logging():
                     items = asyncio.run(
-                        _collect_search(provider, query, stop, category))
+                        _collect_search(provider, query, stop, category,
+                                        order))
                 items = [
                     item for item in items
                     if _matches_content_category(item, category)

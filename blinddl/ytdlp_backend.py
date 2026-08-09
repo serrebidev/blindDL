@@ -11,8 +11,12 @@ them onto the main thread.
 
 import os
 import re
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import yt_dlp
+
+from . import search_order
+from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 
 # The audio_format / video_format value meaning "leave the file alone".
 ORIGINAL_FORMAT = "original"
@@ -78,6 +82,73 @@ _CHANNEL_ID_RE = re.compile(r"UC[\w-]{22}")
 _PLAYLIST_ID_RE = re.compile(r"(?:PL|UU|LL|FL|OL|RD)[\w-]{10,}")
 _RANKED_FEED_RE = re.compile(
     r"https?://[^/]*youtube\.com/(?:results\b|hashtag/)", re.IGNORECASE)
+_HASHTAG_URL_RE = re.compile(
+    r"https?://[^/]*youtube\.com/hashtag/([^/?#]+)", re.IGNORECASE)
+_SEARCH_URL_RE = re.compile(
+    r"https?://[^/]*youtube\.com/(?:results|search)\b", re.IGNORECASE)
+
+# YouTube keeps the sort for a search in its `sp` parameter, which is a
+# base64 protobuf rather than a word. Field 1 is the sort -- 2 is upload
+# date, 3 is view count -- and the tail is the "videos only" filter yt-dlp's
+# own ytsearch: prefix sends, kept so a search still returns videos rather
+# than channels and playlists mixed in.
+SEARCH_SORT_PARAMS = {
+    ORDER_RECENT: "CAISAhAB8AEB",
+    ORDER_POPULAR: "CAMSAhAB8AEB",
+}
+YOUTUBE_RESULTS_URL = "https://www.youtube.com/results"
+
+
+def supports_order(order):
+    """YouTube search sorts by upload date and by view count alike."""
+    return search_order.normalize(order) in (ORDER_RELEVANCE, ORDER_RECENT,
+                                             ORDER_POPULAR)
+
+
+def search_url(query, order=ORDER_RELEVANCE):
+    """A YouTube results URL for *query*, sorted the way *order* asks.
+
+    Best match goes through yt-dlp's own ytsearch: prefix, which is what it
+    is for. The other two need the real results page, because the prefix has
+    no way to carry a sort.
+    """
+    sort = SEARCH_SORT_PARAMS.get(search_order.normalize(order))
+    if not sort:
+        return None
+    return (f"{YOUTUBE_RESULTS_URL}?"
+            f"{urlencode({'search_query': query, 'sp': sort})}")
+
+
+def ordered_feed_url(url, order=ORDER_RELEVANCE):
+    """Rewrite a ranked YouTube feed so it answers in *order*.
+
+    Only search and hashtag feeds have an order to choose. A channel already
+    publishes newest first and yt-dlp drops the sort parameters its Videos
+    tab takes, and a playlist is in the order its owner put it in -- so both
+    are returned untouched.
+
+    A hashtag page takes no sort of its own, so it is asked as a search for
+    that tag instead, which does. That is the same set of videos reached the
+    way YouTube itself reaches it from the search box.
+    """
+    order = search_order.normalize(order)
+    sort = SEARCH_SORT_PARAMS.get(order)
+    if not sort or not url:
+        return url
+
+    hashtag = _HASHTAG_URL_RE.match(url)
+    if hashtag:
+        tag = hashtag.group(1).lstrip("#")
+        return (f"{YOUTUBE_RESULTS_URL}?"
+                f"{urlencode({'search_query': f'#{tag}', 'sp': sort})}")
+
+    if _SEARCH_URL_RE.match(url):
+        parts = urlparse(url)
+        query = [(name, value) for name, value in parse_qsl(parts.query)
+                 if name != "sp"]
+        query.append(("sp", sort))
+        return str(urlunparse(parts._replace(query=urlencode(query))))
+    return url
 
 
 def normalize_url(text):
@@ -121,14 +192,19 @@ def _iter_entries(entries, depth=MAX_NESTED_DEPTH):
             yield entry
 
 
-def extract_flat(url, cookies_from_browser=None, limit=None):
+def extract_flat(url, cookies_from_browser=None, limit=None,
+                 order=ORDER_RELEVANCE):
     """Inspect a URL without downloading.
 
     Returns (items, title): items is a list of normalized dicts (one entry
     for a single video, many for a playlist/channel/hashtag), title is the
     name of the video/playlist/channel itself. *limit* caps how many entries
     are listed; ranked feeds get a default cap so they stay responsive.
+
+    *order* only reaches the feeds that have one to choose -- searches and
+    hashtags. See ordered_feed_url.
     """
+    url = ordered_feed_url(url, order)
     if limit is None and _RANKED_FEED_RE.match(url):
         limit = RANKED_FEED_LIMIT
     opts = {
@@ -169,9 +245,18 @@ def extract_flat(url, cookies_from_browser=None, limit=None):
     return unique, title
 
 
-def search(query, count=20):
-    """Search YouTube via yt-dlp's ytsearch extractor."""
-    items, _ = extract_flat(f"ytsearch{count}:{query}")
+def search(query, count=20, order=ORDER_RELEVANCE):
+    """Search YouTube, sorted the way *order* asks.
+
+    Best match uses yt-dlp's ytsearch extractor. The other two go to the
+    results page with a sort parameter, since the extractor cannot carry
+    one; *count* becomes the page cap there.
+    """
+    url = search_url(query, order)
+    if url is None:
+        items, _title = extract_flat(f"ytsearch{count}:{query}")
+    else:
+        items, _title = extract_flat(url, limit=count)
     return items
 
 

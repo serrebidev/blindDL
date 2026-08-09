@@ -135,7 +135,7 @@ def _silence_progress_bars():
         if not name.startswith("musicdl") or module is None:
             continue
         if getattr(module, "Progress", None) is Progress:
-            module.Progress = _QuietProgress
+            setattr(module, "Progress", _QuietProgress)
 
 
 def _install_http_timeout():
@@ -258,7 +258,7 @@ def _normalize(source, songs):
 
 
 def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
-           sources=None):
+           sources=None, order=None):
     """Search the chosen music sites at once and return after timeout_s.
 
     sources is a list of musicdl source names; None means every site that
@@ -269,6 +269,9 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     late ones included, so a caller can keep filling a results list after this
     function has already returned. Set the `stop` event to prevent queued
     sources and late callbacks from a superseded search from doing more work.
+
+    ``order`` is accepted for the shared backend contract. musicdl's site
+    adapters do not expose sorting, so they keep their own best-match order.
 
     Returns (items, answered, asked): items are the normalized result dicts
     available at the deadline, answered is the list of sites that replied by

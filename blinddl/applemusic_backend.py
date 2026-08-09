@@ -28,7 +28,7 @@ def is_apple_music_url(url):
     return bool(_APPLE_URL_RE.search(url))
 
 
-def search(query, config=None):
+def search(query, config=None, order=None):
     """Apple Music search is not available without the MusicKit API.
     When gamdl is installed, users can paste Apple Music URLs directly.
     """

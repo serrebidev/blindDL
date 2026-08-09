@@ -14,8 +14,9 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Searches dozens of music services from one box, and saves tracks tagged, with cover art and synced lyrics where a service provides them.
 - Finds free ebooks, audiobooks, and Internet Archive media — old-time radio, live concerts, movies, and classic TV — from the same search box.
 - Returns results as each site answers instead of waiting for the slowest one, and lets you choose which sites are searched.
+- Asks supported sites for best-match, newest, or most-popular results, while clearly naming sites that cannot provide the chosen order.
 - Opens multi-item links as a checked list, so you take everything or only the items you want.
-- Subscribes to playlists, channels, hashtags, and search pages, then checks for and downloads new items automatically.
+- Subscribes to playlists, channels, hashtags, and search pages with a per-feed order, then checks for and downloads new items automatically.
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.
@@ -82,6 +83,8 @@ On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`, `f
 
 The Search source combo box switches between music, books, audiobooks, and the Internet Archive's radio, music, movie, and TV collections. Every source searches its sites in parallel and fills the list as they answer, and the result columns rename themselves to suit — a book search reads Title, Author, Library, Year, Size.
 
+**Order** changes the request sent to each site: Best match, Most recent, or Most popular. It therefore changes which page of results arrives. **Sort by** only rearranges the rows already in the list. Not every provider exposes every order; BlindDL keeps that provider's best-match results and names it in the status announcement instead of pretending a locally rearranged page is the requested search.
+
 Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder, and open in whatever reader you already use. Audiobooks download as a folder of numbered chapters and resume where they stopped if you cancel. One Internet Archive item is often a whole series, so choosing a single result opens the same checked list used for playlists.
 
 Ctrl+Shift+S chooses which sites each source searches, and newly supported sites are enabled automatically. Anna's Archive results resolve through the public LibGen mirrors; if you have a membership, put its key in Settings to use the fast partner servers instead.
@@ -100,7 +103,9 @@ BlindDL joins swarms as the current qBittorrent release, which is what trackers 
 
 The Subscriptions tab follows a source and queues whatever appears there next. The Add subscription field takes a playlist, a channel, a hashtag page, or a search results page — a `watch?v=...&list=...` link subscribes to the playlist rather than the one video — plus the equivalents on the other sites yt-dlp supports. Shorthand works too: `@handle`, `#hashtag`, a bare playlist id, or a channel id.
 
-Subscribing to a channel by its plain address follows every tab it publishes, so nothing is missed. Hashtag and search feeds are ranked rather than chronological and reshuffle between visits, so BlindDL reads only their top 100 entries; already-seen items are never queued twice.
+Subscribing to a channel by its plain address follows every tab it publishes, so nothing is missed. Hashtag and search feeds can follow Best match, Most recent, or Most popular. Most recent is the default for new subscriptions so a changing trend list does not hide new uploads; existing subscriptions retain their previous best-match behavior until changed. BlindDL reads only the top 100 entries of these ranked feeds, and already-seen items are never queued twice. Channels and playlists keep their natural published or owner-defined order because YouTube does not expose the same feed sort for them.
+
+The Subscriptions tab's **Sort by** control changes only how subscriptions are displayed. It can group by title or site, show recently checked or stale feeds first, rank by tracked-item count, or put enabled feeds first; background checks still use the saved subscription order. Use a subscription's context menu to change its feed order later.
 
 **Download existing items** in the Add dialog queues everything currently listed — leave it clear to start from now on. Checks run in the background at the interval in Settings, and Ctrl+Shift+C checks everything immediately.
 

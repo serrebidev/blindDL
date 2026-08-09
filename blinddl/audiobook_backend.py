@@ -31,8 +31,10 @@ from urllib.parse import quote, unquote, urlparse
 
 import requests
 
+from . import search_order
 from .book_backend import (
     HEADERS,
+    IA_ARCHIVE_SORTS,
     IA_DETAILS_URL,
     IA_DOWNLOAD_URL,
     IA_METADATA_URL,
@@ -41,11 +43,18 @@ from .book_backend import (
     safe_filename,
     score_match,
 )
+from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 
 SOURCE_ARCHIVE_AUDIO = "Internet Archive"
 # audiobooker's own source names, as its scrapers report them.
 SOURCE_LIBRIVOX = "Librivox"
 SOURCE_LOYALBOOKS = "LoyalBooks"
+
+# The Archive sorts its own collections; audiobooker's scrapers drive site
+# search forms that offer nothing but their own relevance ranking, so every
+# audiobooker source answers by best match whatever is asked.
+ORDER_SUPPORT = {SOURCE_ARCHIVE_AUDIO: frozenset({ORDER_RECENT,
+                                                  ORDER_POPULAR})}
 
 # Finished audiobooks land in this subfolder of the download directory.
 AUDIOBOOK_SUBFOLDER = "Audiobooks"
@@ -205,7 +214,7 @@ def _from_audiobook(book):
 # -- Internet Archive ------------------------------------------------------
 
 
-def search_archive(query, timeout=HTTP_TIMEOUT_S):
+def search_archive(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search the Internet Archive's spoken-word collections."""
     escaped = re.sub(r'["\\]', " ", query).strip()
     collections = " OR ".join(f"collection:({name})"
@@ -215,11 +224,11 @@ def search_archive(query, timeout=HTTP_TIMEOUT_S):
         params={
             "q": f"({escaped}) AND mediatype:(audio) AND ({collections})",
             "fl[]": ["identifier", "title", "creator", "year", "item_size",
-                     "downloads"],
+                     "downloads", "publicdate"],
             "rows": SEARCH_ROWS,
             "page": 1,
             "output": "json",
-            "sort[]": "downloads desc",
+            "sort[]": IA_ARCHIVE_SORTS[search_order.normalize(order)],
         },
         timeout=timeout,
     )
@@ -300,11 +309,11 @@ def search_audiobooker(source, query, timeout=HTTP_TIMEOUT_S):
 # -- search ----------------------------------------------------------------
 
 
-def _rank(items, query):
-    """Drop the noise and put the closest matches first.
+def _rank(items, query, order=ORDER_RELEVANCE):
+    """Drop the noise and put the best answers to *order* first.
 
-    Ties keep the order the source returned them in, which is its own
-    relevance or popularity ranking.
+    Under best match that is the closest title; under the other two it is
+    whatever the source replied with, since the sort was asked of the source.
     """
     for item in items:
         item["score"] = score_match(query, item.get("title", ""),
@@ -312,21 +321,30 @@ def _rank(items, query):
     kept = [item for item in items if item["score"] >= MIN_MATCH_SCORE]
     if not kept:
         kept = list(items)
-    indexed = sorted(enumerate(kept),
-                     key=lambda pair: (-pair[1]["score"], pair[0]))
+    indexed = sorted(
+        enumerate(kept),
+        key=lambda pair: search_order.rank_key(
+            order, pair[1]["score"], pair[0]))
     return [item for _index, item in indexed][:MAX_RESULTS_PER_SOURCE]
 
 
+def supports_order(source, order):
+    """Whether one audiobook source can answer *order* itself."""
+    return search_order.supported(ORDER_SUPPORT, source, order)
+
+
 def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
-           sources=None):
+           sources=None, order=ORDER_RELEVANCE):
     """Search the chosen audiobook sources at once and return after timeout_s.
 
     Same contract as musicdl_backend.search and book_backend.search: sources
     run in parallel, the call returns at the deadline, and sources that
-    answer late still report through on_site(source, items).
+    answer late still report through on_site(source, items). Only the
+    Internet Archive can be given an *order*; supports_order says so.
 
     Returns (items, answered, asked).
     """
+    order = search_order.normalize(order)
     wanted = [source for source in (sources or all_sources())
               if source == SOURCE_ARCHIVE_AUDIO or
               source in _audiobooker_classes()]
@@ -336,11 +354,12 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     def search_one(source):
         if stop is not None and stop.is_set():
             return
+        native = order if supports_order(source, order) else ORDER_RELEVANCE
         try:
             if source == SOURCE_ARCHIVE_AUDIO:
-                items = _rank(search_archive(query), query)
+                items = _rank(search_archive(query, order=order), query, native)
             else:
-                items = _rank(search_audiobooker(source, query), query)
+                items = _rank(search_audiobooker(source, query), query, native)
         except Exception:  # noqa: BLE001 - one bad site must not kill the rest
             items = []
         with found_lock:

@@ -41,8 +41,16 @@ from urllib.parse import quote, urlencode
 
 import requests
 
-from .book_backend import HEADERS, format_size, safe_filename, score_match
+from . import search_order
+from .book_backend import (
+    HEADERS,
+    IA_ARCHIVE_SORTS,
+    format_size,
+    safe_filename,
+    score_match,
+)
 from .runtime import open_file, open_magnet
+from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 
 SOURCE_PIRATEBAY = "The Pirate Bay"
 SOURCE_EZTV = "EZTV"
@@ -62,6 +70,35 @@ ALL_SOURCES = [
     SOURCE_BITSEARCH,
     SOURCE_ARCHIVE,
 ]
+
+# Which indexers can be asked for an order, and which are simply already in
+# one. Several of these publish exactly one ordering and no way to change it,
+# so they are listed for the order they already answer in rather than left
+# out: asking apibay for the most popular torrent is answering the question,
+# even though no parameter goes out.
+#
+# Knaben is the one that looks like it should and does not. Its order_by
+# field replaces the search rather than sorting it -- asking for seeders
+# returns the most-seeded torrents on the whole site, not the ones that match
+# -- so it is left on relevance under every order and _rank arranges its rows.
+# Torznab and Newznab define no sort at all, so the user's own feeds are in
+# the same position.
+ORDER_SUPPORT = {
+    SOURCE_KNABEN: frozenset(),
+    SOURCE_PIRATEBAY: frozenset({ORDER_POPULAR}),
+    SOURCE_EZTV: frozenset({ORDER_RECENT}),
+    SOURCE_NYAA: frozenset({ORDER_RECENT}),
+    SOURCE_TORRENTS_CSV: frozenset({ORDER_POPULAR}),
+    SOURCE_LIMETORRENTS: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+    SOURCE_BITSEARCH: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+    SOURCE_ARCHIVE: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+}
+
+# LimeTorrents puts its sort in the path: /search/all/<query>/<sort>/<page>/.
+_LIMETORRENTS_SORTS = {ORDER_RECENT: "date", ORDER_POPULAR: "seeds"}
+# BitSearch takes it as a query parameter, and already defaults to seeders.
+_BITSEARCH_SORTS = {ORDER_RELEVANCE: "seeders", ORDER_POPULAR: "seeders",
+                    ORDER_RECENT: "date"}
 
 PIRATEBAY_URL = "https://apibay.org/q.php"
 EZTV_URL = "https://eztvx.to/api/get-torrents"
@@ -269,12 +306,19 @@ def _item(source, infohash, title, **extra):
         "leechers": 0,
         "size_bytes": 0,
         "file_size": "",
+        # When the row was posted, as seconds since the epoch, and the same
+        # moment said the way a person says it. The number is what a newest
+        # -first sort needs; the words are what the results list reads out.
+        # 0 means the indexer did not say, which is not the same as "old".
+        "posted": 0,
         "age": "",
         "url": "",
     }
     item.update(extra)
     if item["size_bytes"] and not item["file_size"]:
         item["file_size"] = format_size(item["size_bytes"])
+    if item["posted"] and not item["age"]:
+        item["age"] = _age(item["posted"])
     if not item["magnet"] and item["infohash"] and not item["download_url"]:
         item["magnet"] = magnet_for(item)
     if not item["artist"]:
@@ -361,8 +405,13 @@ def hand_off(item, out_dir=None):
 # -- The Pirate Bay ---------------------------------------------------------
 
 
-def search_piratebay(query, timeout=HTTP_TIMEOUT_S):
-    """Query the public apibay endpoint, which answers in plain JSON."""
+def search_piratebay(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
+    """Query the public apibay endpoint, which answers in plain JSON.
+
+    apibay takes no sort and always replies best-seeded first, which is the
+    answer to "most popular" already; *order* is accepted for one uniform
+    call shape and needs nothing sent.
+    """
     response = _http().get(PIRATEBAY_URL, params={"q": query, "cat": "0"},
                            timeout=timeout)
     response.raise_for_status()
@@ -380,7 +429,7 @@ def search_piratebay(query, timeout=HTTP_TIMEOUT_S):
             seeders=_int(doc.get("seeders")),
             leechers=_int(doc.get("leechers")),
             size_bytes=_int(doc.get("size")),
-            age=_age(doc.get("added")),
+            posted=_int(doc.get("added")),
             url=f"https://thepiratebay.org/description.php?id={doc.get('id')}",
         ))
     return items
@@ -407,7 +456,7 @@ def imdb_id_for(query, timeout=HTTP_TIMEOUT_S):
     return str(imdb or "").strip()
 
 
-def search_eztv(query, timeout=HTTP_TIMEOUT_S):
+def search_eztv(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """EZTV indexes television only, and answers with a magnet per row.
 
     Its API is keyed on IMDb ids and cannot be given text at all, which is
@@ -418,6 +467,10 @@ def search_eztv(query, timeout=HTTP_TIMEOUT_S):
 
     Without an id -- a film, or a show TVmaze does not know -- the recent
     releases are scanned instead, and _rank drops what does not match.
+
+    The API has no sort: it answers newest episode first, which is the whole
+    of what it can be asked for. That is why it is listed as answering
+    "most recent" and nothing else.
     """
     imdb = imdb_id_for(query, timeout=timeout)
     params = {"limit": "100", "page": "1"}
@@ -436,7 +489,7 @@ def search_eztv(query, timeout=HTTP_TIMEOUT_S):
             seeders=_int(doc.get("seeds")),
             leechers=_int(doc.get("peers")),
             size_bytes=_int(doc.get("size_bytes")),
-            age=_age(doc.get("date_released_unix")),
+            posted=_int(doc.get("date_released_unix")),
             url=f"https://eztvx.to/ep/{doc.get('id')}/",
         ))
     return items
@@ -445,8 +498,13 @@ def search_eztv(query, timeout=HTTP_TIMEOUT_S):
 # -- Nyaa -------------------------------------------------------------------
 
 
-def search_nyaa(query, timeout=HTTP_TIMEOUT_S):
-    """Nyaa publishes its search as RSS, with the swarm counts in the feed."""
+def search_nyaa(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
+    """Nyaa publishes its search as RSS, with the swarm counts in the feed.
+
+    The feed ignores the sort parameters the website itself takes and always
+    answers newest first, so it is listed as answering "most recent" and its
+    rows are left in the order they arrive under that order.
+    """
     response = _http().get(
         NYAA_URL, params={"page": "rss", "q": query}, timeout=timeout)
     response.raise_for_status()
@@ -464,6 +522,7 @@ def search_nyaa(query, timeout=HTTP_TIMEOUT_S):
             leechers=_int(entry.findtext(f"{_NYAA_NS}leechers")),
             # Nyaa states the size itself; there is no byte count to convert.
             file_size=size.replace("GiB", "GB").replace("MiB", "MB"),
+            posted=int(_pubdate(entry.findtext("pubDate"))),
             url=(entry.findtext("guid") or "").strip(),
         ))
     return items
@@ -472,8 +531,12 @@ def search_nyaa(query, timeout=HTTP_TIMEOUT_S):
 # -- Torrents-CSV -----------------------------------------------------------
 
 
-def search_torrents_csv(query, timeout=HTTP_TIMEOUT_S):
-    """A plain JSON index with no site to scrape and no rate limiting."""
+def search_torrents_csv(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
+    """A plain JSON index with no site to scrape and no rate limiting.
+
+    It takes no sort either, and answers best-seeded first -- so like apibay
+    it is already the answer to "most popular" and nothing else.
+    """
     response = _http().get(TORRENTS_CSV_URL,
                            params={"q": query, "size": SEARCH_ROWS},
                            timeout=timeout)
@@ -485,7 +548,7 @@ def search_torrents_csv(query, timeout=HTTP_TIMEOUT_S):
             seeders=_int(doc.get("seeders")),
             leechers=_int(doc.get("leechers")),
             size_bytes=_int(doc.get("size_bytes")),
-            age=_age(doc.get("created_unix")),
+            posted=_int(doc.get("created_unix")),
         ))
     return items
 
@@ -504,10 +567,17 @@ _LIME_ROW_RE = re.compile(
 )
 
 
-def search_limetorrents(query, timeout=HTTP_TIMEOUT_S):
-    """Scrape one LimeTorrents search page."""
-    response = _http().get(f"{LIMETORRENTS_URL}/{quote(query)}/",
-                           timeout=timeout)
+def search_limetorrents(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
+    """Scrape one LimeTorrents search page.
+
+    Its sort is a path segment rather than a parameter: /search/all/<query>/
+    takes an optional /<sort>/<page>/ after it, where the sort is `seeds` or
+    `date`. Without one the site uses its own relevance ranking.
+    """
+    sort = _LIMETORRENTS_SORTS.get(search_order.normalize(order))
+    path = (f"{LIMETORRENTS_URL}/{quote(query)}/{sort}/1/" if sort
+            else f"{LIMETORRENTS_URL}/{quote(query)}/")
+    response = _http().get(path, timeout=timeout)
     response.raise_for_status()
     items = []
     for match in _LIME_ROW_RE.finditer(response.text):
@@ -538,7 +608,7 @@ def search_limetorrents(query, timeout=HTTP_TIMEOUT_S):
 # -- BitSearch / SolidTorrents ----------------------------------------------
 
 
-def search_bitsearch(query, timeout=HTTP_TIMEOUT_S):
+def search_bitsearch(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """One index, reached through its JSON API.
 
     BitSearch and SolidTorrents are the same service: the same torrent ids
@@ -552,7 +622,11 @@ def search_bitsearch(query, timeout=HTTP_TIMEOUT_S):
     """
     response = _http().get(
         BITSEARCH_URL,
-        params={"q": query, "sort": "seeders", "limit": 100},
+        params={
+            "q": query,
+            "sort": _BITSEARCH_SORTS[search_order.normalize(order)],
+            "limit": 100,
+        },
         timeout=timeout,
     )
     response.raise_for_status()
@@ -565,7 +639,7 @@ def search_bitsearch(query, timeout=HTTP_TIMEOUT_S):
             size_bytes=_int(doc.get("size")),
             # updatedAt is when the row was last re-scraped rather than when
             # the torrent was posted, which is all this API carries.
-            age=_age(_timestamp(doc.get("updatedAt"))),
+            posted=int(_timestamp(doc.get("updatedAt"))),
             url=f"https://bitsearch.eu/torrent/{doc.get('id')}",
         ))
     return items
@@ -574,12 +648,14 @@ def search_bitsearch(query, timeout=HTTP_TIMEOUT_S):
 # -- Knaben ------------------------------------------------------------------
 
 
-def search_knaben(query, timeout=HTTP_TIMEOUT_S):
+def search_knaben(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Knaben is a meta-search over many indexers, answering as one JSON API.
 
     This is how blindDL covers 1337x: Knaben runs its own scraper against it
     and serves the cached rows, so the results arrive without the headless
     browser 1337x's own Cloudflare challenge would otherwise demand.
+
+    *order* is deliberately not forwarded; see the note on order_by below.
     """
     response = _http().post(
         KNABEN_URL,
@@ -615,7 +691,7 @@ def search_knaben(query, timeout=HTTP_TIMEOUT_S):
             seeders=seeders,
             leechers=max(0, _int(doc.get("peers")) - seeders),
             size_bytes=_int(doc.get("bytes")),
-            age=_age(_timestamp(doc.get("date"))),
+            posted=int(_timestamp(doc.get("date"))),
             url=str(doc.get("details") or ""),
         ))
     return items
@@ -665,7 +741,7 @@ def _from_torznab(source, entry):
         seeders=seeders,
         leechers=_int(attrs.get("leechers")) or max(0, peers - seeders),
         size_bytes=_int(entry.findtext("size") or attrs.get("size")),
-        age=_age(_pubdate(entry.findtext("pubDate"))),
+        posted=int(_pubdate(entry.findtext("pubDate"))),
         url=(entry.findtext("comments") or entry.findtext("guid") or "").strip(),
     )
 
@@ -690,12 +766,12 @@ def _from_prowlarr(source, doc):
         seeders=_int(doc.get("seeders")),
         leechers=_int(doc.get("leechers")),
         size_bytes=_int(doc.get("size")),
-        age=_age(_timestamp(doc.get("publishDate"))),
+        posted=int(_timestamp(doc.get("publishDate"))),
         url=str(doc.get("infoUrl") or "").strip(),
     )
 
 
-def search_feed(query, feed, timeout=HTTP_TIMEOUT_S):
+def search_feed(query, feed, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search one user-added feed, whichever dialect it answers in.
 
     Torznab and Newznab are the same RSS shape and take t=search&q=. Prowlarr
@@ -703,6 +779,10 @@ def search_feed(query, feed, timeout=HTTP_TIMEOUT_S):
     covers every tracker configured in it at once. Both sets of parameters go
     out together -- each tool ignores the ones it does not know -- and the
     reply is read as JSON or as RSS depending on what came back.
+
+    Neither specification defines a sort, so *order* is accepted and not
+    sent; a feed's rows are put in the asked-for order by _rank instead,
+    which every one of them carries a seeder count and a date for.
     """
     params = {"t": "search", "q": query, "query": query, "limit": SEARCH_ROWS}
     headers = {}
@@ -730,7 +810,7 @@ def search_feed(query, feed, timeout=HTTP_TIMEOUT_S):
 # -- Internet Archive -------------------------------------------------------
 
 
-def search_archive(query, timeout=HTTP_TIMEOUT_S):
+def search_archive(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Public-domain and openly licensed media, as torrents.
 
     These have no swarm worth speaking of and do not need one: every Archive
@@ -750,11 +830,12 @@ def search_archive(query, timeout=HTTP_TIMEOUT_S):
         ARCHIVE_SEARCH_URL,
         params={
             "q": f'({escaped}) AND format:("Archive BitTorrent")',
-            "fl[]": ["identifier", "title", "creator", "item_size"],
+            "fl[]": ["identifier", "title", "creator", "item_size",
+                     "publicdate"],
             "rows": SEARCH_ROWS,
             "page": 1,
             "output": "json",
-            "sort[]": "downloads desc",
+            "sort[]": IA_ARCHIVE_SORTS[search_order.normalize(order)],
         },
         timeout=timeout,
     )
@@ -773,6 +854,7 @@ def search_archive(query, timeout=HTTP_TIMEOUT_S):
             uploader=str(creator or ""),
             seeders=1,
             size_bytes=_int(doc.get("item_size")),
+            posted=int(_timestamp(doc.get("publicdate"))),
             download_url=(f"{ARCHIVE_TORRENT_URL}/{name}/"
                           f"{name}_archive.torrent"),
             url=f"{ARCHIVE_DETAILS_URL}/{name}",
@@ -797,17 +879,23 @@ _STRICT_SOURCES = {SOURCE_EZTV}
 # -- search ------------------------------------------------------------------
 
 
-def _rank(items, query, strict=False):
-    """Drop the noise, then put the best-seeded close matches first.
+def _rank(items, query, strict=False, order=ORDER_RELEVANCE):
+    """Drop the noise, then put the rows in the order that was asked for.
 
     A torrent nobody is seeding cannot be downloaded however well its name
-    matches, so the swarm decides the order among results that answer the
-    query -- which is the ordering every torrent site offers first.
+    matches, so under best match the swarm decides the order among results
+    that answer the query -- which is the ordering every torrent site offers
+    first. Most popular is the same ordering, said out loud.
+
+    Most recent orders by when the row was posted. An indexer that says
+    nothing about when a torrent appeared sorts last rather than first: an
+    unknown date is not a new one.
 
     strict is for an indexer whose rows were never a reply to the query --
     EZTV can only hand back its latest releases -- where anything that does
     not match is simply the wrong programme, not a near miss worth showing.
     """
+    order = search_order.normalize(order)
     seen = set()
     unique = []
     for item in items:
@@ -820,14 +908,41 @@ def _rank(items, query, strict=False):
     kept = [item for item in unique if item["score"] >= MIN_MATCH_SCORE]
     if not kept and not strict:
         kept = unique
-    indexed = sorted(
-        enumerate(kept),
-        key=lambda pair: (-pair[1]["seeders"], -pair[1]["score"], pair[0]))
-    return [item for _index, item in indexed][:MAX_RESULTS_PER_SOURCE]
+
+    newest_first = order == ORDER_RECENT
+    native_order = (
+        order != ORDER_RELEVANCE
+        and bool(unique)
+        and supports_order(unique[0].get("source", ""), order)
+    )
+
+    def key(pair):
+        index, item = pair
+        if native_order:
+            # The provider already answered the requested question. This is
+            # especially important for Archive popularity, which is download
+            # count rather than the live swarm size shown by other indexers.
+            return False, 0, 0, index
+        posted = int(item.get("posted") or 0)
+        if newest_first:
+            return (posted == 0, -posted, -item["score"], index)
+        return (False, -item["seeders"], -item["score"], index)
+
+    return [item for _index, item in sorted(enumerate(kept), key=key)][
+        :MAX_RESULTS_PER_SOURCE]
+
+
+def supports_order(source, order, config=None):
+    """Whether one indexer can answer *order* itself.
+
+    A name that is not a built-in indexer is one of the user's own feeds,
+    and Torznab defines no sort, so those never can.
+    """
+    return search_order.supported(ORDER_SUPPORT, source, order)
 
 
 def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
-           sources=None, config=None):
+           sources=None, config=None, order=ORDER_RELEVANCE):
     """Search the chosen indexers at once and return after timeout_s.
 
     Same contract as archive_backend.search: indexers run in parallel, the
@@ -837,8 +952,14 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     A source name that is not one of the built-in indexers is one of the
     user's own feeds, looked up in config.
 
+    *order* goes out to the indexers that take a sort. The rest are sorted
+    here instead -- every torrent row carries a seeder count, and most carry
+    a date -- so a torrent search answers all three orders whatever the
+    indexer offers, which is not true of the other engines.
+
     Returns (items, answered, asked).
     """
+    order = search_order.normalize(order)
     by_feed = {feed["name"]: feed for feed in feeds(config)}
     wanted = [source for source in (sources or all_sources(config))
               if source in _SEARCHERS or source in by_feed]
@@ -850,10 +971,11 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
             return
         try:
             if source in by_feed:
-                rows = search_feed(query, by_feed[source])
+                rows = search_feed(query, by_feed[source], order=order)
             else:
-                rows = _SEARCHERS[source](query)
-            items = _rank(rows, query, strict=source in _STRICT_SOURCES)
+                rows = _SEARCHERS[source](query, order=order)
+            items = _rank(rows, query, strict=source in _STRICT_SOURCES,
+                          order=order)
         except Exception:  # noqa: BLE001 - one bad indexer must not kill the rest
             items = []
         with found_lock:

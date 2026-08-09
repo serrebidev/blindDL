@@ -30,7 +30,14 @@ from __future__ import annotations
 import html
 import re
 
+from .search_order import ORDER_RECENT, normalize as _normalize_order
+
 SOURCE_ANNAS = "Anna's Archive"
+
+# The site's own search sorts. It publishes newest, oldest, largest and
+# smallest -- and no popularity figure at all, so "most popular" has nothing
+# here to ask for and falls back to the site's relevance ranking.
+SEARCH_SORTS = {ORDER_RECENT: "newest"}
 
 # Anna's Archive rotates domains as they are seized. Tried in order; the
 # first that answers is remembered for the rest of the session.
@@ -158,7 +165,7 @@ def _parse_rows(body, domain):
     return rows
 
 
-def search(query, timeout=HTTP_TIMEOUT_S):
+def search(query, timeout=HTTP_TIMEOUT_S, order=None):
     """Search every Anna's Archive mirror until one answers with results."""
     global _working_domain
     domains = list(DOMAINS)
@@ -166,11 +173,15 @@ def search(query, timeout=HTTP_TIMEOUT_S):
         domains.remove(_working_domain)
         domains.insert(0, _working_domain)
 
+    params = {"q": query, "display": ""}
+    sort = SEARCH_SORTS.get(_normalize_order(order))
+    if sort:
+        params["sort"] = sort
+
     last_error = None
     for domain in domains:
         try:
-            response = _get(f"https://{domain}/search",
-                            params={"q": query, "display": ""},
+            response = _get(f"https://{domain}/search", params=params,
                             timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - try the next mirror
             last_error = exc

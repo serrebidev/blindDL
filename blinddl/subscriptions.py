@@ -16,7 +16,7 @@ import time
 import uuid
 
 from .config import app_data_dir
-from . import sideb_backend, ytdlp_backend
+from . import search_order, sideb_backend, ytdlp_backend
 
 MAX_SEEN_IDS = 5000
 
@@ -55,14 +55,27 @@ class SubscriptionStore:
 
     # -- CRUD -------------------------------------------------------------
 
-    def add(self, url, title, seen_ids):
+    def add(self, url, title, seen_ids,
+            order=search_order.ORDER_RECENT):
+        order = search_order.normalize(order)
+        remembered = list(dict.fromkeys(seen_ids))
+        if order == search_order.ORDER_RECENT:
+            # A newest-first feed arrives newest to oldest. Store it the other
+            # way round so slicing from the end retains the newest IDs.
+            remembered.reverse()
         sub = {
             "id": uuid.uuid4().hex,
             "url": url,
             "title": title or url,
             "enabled": True,
-            "seen_ids": list(seen_ids)[-MAX_SEEN_IDS:],
+            "seen_ids": remembered[-MAX_SEEN_IDS:],
             "last_checked": None,
+            # Newest first is the useful subscription default: it follows new
+            # uploads instead of a hashtag/search page's changing trend list.
+            # Older saved rows omit this and retain their old best-match
+            # behaviour in check_one.
+            "order": order,
+            "created_at": time.time(),
         }
         with self._lock:
             self.subs.append(sub)
@@ -78,6 +91,12 @@ class SubscriptionStore:
         sub = self.get(sub_id)
         if sub is not None:
             sub["enabled"] = enabled
+            self.save()
+
+    def set_order(self, sub_id, order):
+        sub = self.get(sub_id)
+        if sub is not None:
+            sub["order"] = search_order.normalize(order)
             self.save()
 
     def get(self, sub_id):
@@ -108,7 +127,9 @@ class SubscriptionStore:
             else:
                 items, title = ytdlp_backend.extract_flat(
                     sub["url"], cookies_from_browser=
-                    self.config["cookies_from_browser"])
+                    self.config["cookies_from_browser"],
+                    order=search_order.normalize(
+                        sub.get("order", search_order.ORDER_RELEVANCE)))
         except Exception as exc:  # noqa: BLE001 - shown to the user
             return 0, str(exc)
         if title:
@@ -117,6 +138,7 @@ class SubscriptionStore:
         # and a set would hand back an arbitrary order.
         seen_ids = list(sub.get("seen_ids") or [])
         seen = set(seen_ids)
+        new_ids = []
         new_count = 0
         for item in items:
             if item["id"] in seen:
@@ -127,8 +149,15 @@ class SubscriptionStore:
                 self.queue.add_ytdlp(item["url"], item["title"],
                                      audio_only=audio_only)
             seen.add(item["id"])
-            seen_ids.append(item["id"])
+            new_ids.append(item["id"])
             new_count += 1
+        if search_order.normalize(
+                sub.get("order", search_order.ORDER_RELEVANCE)
+        ) == search_order.ORDER_RECENT:
+            # Keep persisted history oldest-to-newest even though the feed is
+            # newest-first. The queue above still follows the requested order.
+            new_ids.reverse()
+        seen_ids.extend(new_ids)
         sub["seen_ids"] = seen_ids[-MAX_SEEN_IDS:]
         sub["last_checked"] = time.strftime("%Y-%m-%d %H:%M")
         self.save()

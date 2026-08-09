@@ -38,6 +38,15 @@ DEFAULTS = {
     "video_format": "mp4",
     # Maximum simultaneous downloads. No hard cap beyond this user setting.
     "max_concurrent": 4,
+    # What a search asks its sites for: "relevance" (each site's own best
+    # match), "recent" or "popular". This goes out with the query rather than
+    # rearranging the answer, so it decides which results arrive at all. Not
+    # every site can sort; the ones that cannot are named after the search.
+    "search_order": "relevance",
+    # How the Subscriptions list is arranged: "added", "title", "site",
+    # "checked", "stale", "tracked" or "enabled". Purely a view setting -- it
+    # never changes which subscriptions are checked or in what order.
+    "subs_sort": "added",
     # Seconds a music search waits for each site before giving up on it.
     # Sites are searched in parallel, so this is roughly how long a music
     # search takes. Raise it to reach slower sites.

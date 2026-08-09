@@ -16,7 +16,7 @@ import wx
 
 # musicdl creates a file logger at import time. Keep GUI tests self-contained.
 with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
-    from blinddl import adult_backend, preview, ytdlp_backend
+    from blinddl import adult_backend, preview, search_order, ytdlp_backend
     from blinddl.downloader import (
         DownloadItem,
         STATUS_DONE,
@@ -54,11 +54,22 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SORT_SHORTEST,
         SORT_SITE,
         SearchPanel,
+        _order_phrase,
+        _sort_for_order,
         _sorted_results,
     )
     from blinddl.gui.settings_dialog import SettingsDialog
     from blinddl.gui.sources_dialog import SourcesDialog
-    from blinddl.gui.subs_panel import SubsPanel
+    from blinddl.gui.subs_panel import (
+        SUBS_SORT_CHECKED,
+        SUBS_SORT_ENABLED,
+        SUBS_SORT_SITE,
+        SUBS_SORT_STALE,
+        SUBS_SORT_TITLE,
+        SUBS_SORT_TRACKED,
+        SubsPanel,
+        _sorted_subscriptions,
+    )
 
 
 class _Clipboard:
@@ -142,6 +153,9 @@ class _Subscriptions:
 
     def set_enabled(self, sub_id, enabled):
         next(row for row in self.rows if row["id"] == sub_id)["enabled"] = enabled
+
+    def set_order(self, sub_id, order):
+        next(row for row in self.rows if row["id"] == sub_id)["order"] = order
 
 
 class _Frame:
@@ -499,6 +513,37 @@ class GuiInteractionTests(unittest.TestCase):
             ["Zulu", "Bravo", "Alpha"],
         )
 
+    def test_search_order_choice_is_persistent_and_repeats_the_query(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("dragnet")
+        panel.order_choice.SetSelection(
+            search_order.ORDERS.index(search_order.ORDER_RECENT))
+
+        with mock.patch.object(panel, "on_search") as search:
+            panel.on_order_changed(None)
+
+        self.assertEqual(
+            self.frame.config["search_order"], search_order.ORDER_RECENT)
+        search.assert_called_once_with(None)
+
+    def test_search_status_names_sources_that_cannot_honour_order(self):
+        self.assertEqual(
+            _order_phrase(
+                search_order.ORDER_POPULAR, ["Bandcamp"], 2),
+            "1 site cannot sort by most popular, so it answered by best "
+            "match: Bandcamp.",
+        )
+
+    def test_query_order_is_not_confused_with_a_books_original_year(self):
+        self.assertEqual(
+            _sort_for_order(ENGINE_BOOKS, search_order.ORDER_RECENT),
+            SORT_RELEVANCE,
+        )
+        self.assertEqual(
+            _sort_for_order(ENGINE_ARCHIVE_AUDIO, search_order.ORDER_RECENT),
+            SORT_RELEVANCE,
+        )
+
     def test_search_sort_change_preserves_selected_result(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_MUSIC
@@ -744,6 +789,47 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertFalse(any(row["enabled"] for row in self.frame.subs.rows))
         panel._clear_selection(None)
         self.assertEqual(panel.list.GetSelectedItemCount(), 0)
+
+    def test_subscription_view_sorting_covers_each_persisted_mode(self):
+        rows = [
+            {"title": "Zulu", "url": "https://youtube.com/z",
+             "enabled": False, "last_checked": None, "seen_ids": ["1"]},
+            {"title": "Alpha", "url": "https://bandcamp.com/a",
+             "enabled": True, "last_checked": "2026-08-08 10:00",
+             "seen_ids": ["1", "2", "3"]},
+            {"title": "Beta", "url": "https://youtube.com/b",
+             "enabled": True, "last_checked": "2026-08-07 10:00",
+             "seen_ids": ["1", "2"]},
+        ]
+
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(
+                rows, SUBS_SORT_TITLE)], ["Alpha", "Beta", "Zulu"])
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(
+                rows, SUBS_SORT_SITE)], ["Alpha", "Beta", "Zulu"])
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(
+                rows, SUBS_SORT_CHECKED)], ["Alpha", "Beta", "Zulu"])
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(
+                rows, SUBS_SORT_STALE)], ["Zulu", "Beta", "Alpha"])
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(
+                rows, SUBS_SORT_TRACKED)], ["Alpha", "Beta", "Zulu"])
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(
+                rows, SUBS_SORT_ENABLED)], ["Alpha", "Beta", "Zulu"])
+
+    def test_subscription_feed_order_updates_selected_rows(self):
+        panel = SubsPanel(self.host, self.frame)
+        panel.list.Select(0)
+
+        panel._set_feed_order(search_order.ORDER_POPULAR)
+
+        self.assertEqual(
+            self.frame.subs.rows[0]["order"], search_order.ORDER_POPULAR)
+        self.assertIn("Most popular", self.frame.messages[-1])
 
 
 if __name__ == "__main__":

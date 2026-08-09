@@ -34,8 +34,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
+from . import search_order
 from .book_backend import (
     HEADERS,
+    IA_ARCHIVE_SORTS,
     IA_DETAILS_URL,
     IA_DOWNLOAD_URL,
     IA_METADATA_URL,
@@ -76,6 +78,12 @@ CATEGORY_QUERIES = {
 AUDIO_CATEGORIES = [CATEGORY_OTR, CATEGORY_CONCERTS, CATEGORY_MUSIC]
 VIDEO_CATEGORIES = [CATEGORY_MOVIES, CATEGORY_CLASSIC_TV, CATEGORY_TV_NEWS]
 ALL_SOURCES = AUDIO_CATEGORIES + VIDEO_CATEGORIES
+
+# Every category here is one query against the same advanced-search endpoint,
+# so all of them sort by date and by download count alike.
+_EVERY_ORDER = frozenset({search_order.ORDER_RECENT,
+                          search_order.ORDER_POPULAR})
+ORDER_SUPPORT = {source: _EVERY_ORDER for source in ALL_SOURCES}
 
 SEARCH_TIMEOUT_S = 5.0
 HTTP_TIMEOUT_S = 20
@@ -210,7 +218,8 @@ def _item(source, doc):
     }
 
 
-def search_category(source, query, timeout=HTTP_TIMEOUT_S):
+def search_category(source, query, timeout=HTTP_TIMEOUT_S,
+                    order=search_order.ORDER_RELEVANCE):
     """Run one category's Internet Archive query."""
     # Brackets break the wrapping ({escaped}) the same way a stray quote
     # breaks a phrase, and the Archive answers a malformed query with an
@@ -221,13 +230,14 @@ def search_category(source, query, timeout=HTTP_TIMEOUT_S):
         params={
             "q": f"({escaped}) AND {CATEGORY_QUERIES[source]}",
             "fl[]": ["identifier", "title", "creator", "year", "item_size",
-                     "downloads", "mediatype", "format"],
+                     "downloads", "mediatype", "format", "publicdate"],
             "rows": SEARCH_ROWS,
             "page": 1,
             "output": "json",
-            # What the Archive's own visitors actually watch and listen to;
-            # its plain relevance order surfaces a lot of duplicate uploads.
-            "sort[]": "downloads desc",
+            # By default, what the Archive's own visitors actually watch and
+            # listen to; its plain relevance order surfaces a lot of
+            # duplicate uploads.
+            "sort[]": IA_ARCHIVE_SORTS[search_order.normalize(order)],
         },
         timeout=timeout,
     )
@@ -237,28 +247,38 @@ def search_category(source, query, timeout=HTTP_TIMEOUT_S):
             if doc.get("identifier")]
 
 
-def _rank(items, query):
+def _rank(items, query, order=search_order.ORDER_RELEVANCE):
+    """Drop the noise; keep the Archive's own order when one was asked for."""
     for item in items:
         item["score"] = score_match(query, item.get("title", ""),
                                     item.get("creator", ""))
     kept = [item for item in items if item["score"] >= MIN_MATCH_SCORE]
     if not kept:
         kept = list(items)
-    indexed = sorted(enumerate(kept),
-                     key=lambda pair: (-pair[1]["score"], pair[0]))
+    indexed = sorted(
+        enumerate(kept),
+        key=lambda pair: search_order.rank_key(
+            order, pair[1]["score"], pair[0]))
     return [item for _index, item in indexed][:MAX_RESULTS_PER_SOURCE]
 
 
+def supports_order(source, order):
+    """Every category is one Archive query, and the Archive sorts them all."""
+    return search_order.supported(ORDER_SUPPORT, source, order)
+
+
 def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
-           sources=None):
+           sources=None, order=search_order.ORDER_RELEVANCE):
     """Search the chosen Archive categories at once and return after timeout_s.
 
     Same contract as musicdl_backend.search: categories run in parallel, the
     call returns at the deadline, and late categories still report through
-    on_site(source, items).
+    on_site(source, items). *order* is one of search_order's constants and is
+    sent to the Archive as its own sort.
 
     Returns (items, answered, asked).
     """
+    order = search_order.normalize(order)
     wanted = [source for source in (sources or ALL_SOURCES)
               if source in CATEGORY_QUERIES]
     found = {}
@@ -268,7 +288,8 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
         if stop is not None and stop.is_set():
             return
         try:
-            items = _rank(search_category(source, query), query)
+            items = _rank(search_category(source, query, order=order), query,
+                          order)
         except Exception:  # noqa: BLE001 - one bad category must not kill the rest
             items = []
         with found_lock:

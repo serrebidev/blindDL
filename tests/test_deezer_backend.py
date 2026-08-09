@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest import mock
 
-from blinddl import deezer_backend, sideb_backend
+from blinddl import deezer_backend, search_order, sideb_backend
 
 
 class DeezerBackendTests(unittest.TestCase):
@@ -36,6 +36,22 @@ class DeezerBackendTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertIs(first["http"], http)
         gw.assert_called_once_with(http, "deezer.getUserData", None)
+
+    def test_popular_search_uses_deezers_track_rank(self):
+        payload = {"data": [
+            {"id": 1, "title": "Less popular", "rank": 10},
+            {"id": 2, "title": "More popular", "rank": 100},
+        ]}
+        with mock.patch.object(
+                deezer_backend, "_api_get", return_value=payload):
+            items = deezer_backend.search(
+                "example", order=search_order.ORDER_POPULAR)
+
+        self.assertEqual(
+            [item["title"] for item in items],
+            ["More popular", "Less popular"])
+        self.assertFalse(deezer_backend.supports_order(
+            search_order.ORDER_RECENT))
 
     def test_download_uses_plural_tokens_and_actual_media_format(self):
         session = {

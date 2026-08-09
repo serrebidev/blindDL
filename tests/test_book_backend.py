@@ -8,7 +8,7 @@ import threading
 import unittest
 from unittest import mock
 
-from blinddl import annas_backend, book_backend
+from blinddl import annas_backend, book_backend, search_order
 
 
 class _Response:
@@ -72,6 +72,16 @@ class MatchingTests(unittest.TestCase):
 
 
 class ArchiveSourceTests(unittest.TestCase):
+    def test_recent_order_uses_archive_publication_date(self):
+        with mock.patch.object(book_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(
+                payload={"response": {"docs": []}})
+            book_backend._ia_query(
+                "moby dick", 10, 5, search_order.ORDER_RECENT)
+
+        params = http.return_value.get.call_args.kwargs["params"]
+        self.assertEqual(params["sort[]"], "publicdate desc")
+
     def test_lending_only_items_are_never_offered(self):
         docs = [
             {"identifier": "open", "title": "Open", "creator": "A",
@@ -120,6 +130,17 @@ class ArchiveSourceTests(unittest.TestCase):
 
 
 class OpenLibraryTests(unittest.TestCase):
+    def test_popular_order_uses_edition_count(self):
+        with mock.patch.object(book_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(
+                payload={"docs": []})
+            book_backend.search_openlibrary(
+                "moby dick", order=search_order.ORDER_POPULAR)
+
+        self.assertEqual(
+            http.return_value.get.call_args.kwargs["params"]["sort"],
+            "editions")
+
     def test_only_public_editions_with_a_scan_are_listed(self):
         payload = {"docs": [
             {"key": "/works/1", "title": "Public", "author_name": ["A"],

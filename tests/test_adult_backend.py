@@ -6,7 +6,7 @@ import types
 import unittest
 from unittest import mock
 
-from blinddl import adult_backend
+from blinddl import adult_backend, search_order
 
 
 class _Response:
@@ -127,6 +127,19 @@ class AdultProviderTests(unittest.TestCase):
 
         self.assertEqual(query, "massage trans")
         self.assertNotIn("category", kwargs)
+
+    def test_provider_order_uses_its_native_sort_parameter(self):
+        _query, kwargs = adult_backend._search_parameters(
+            adult_backend.PROVIDERS["pornhub"],
+            "massage",
+            adult_backend.CONTENT_STRAIGHT,
+            search_order.ORDER_RECENT,
+        )
+
+        self.assertEqual(kwargs["sort_by"], "mr")
+        self.assertTrue(kwargs["keep_original_order"])
+        self.assertTrue(adult_backend.supports_order(
+            "pornhub", search_order.ORDER_POPULAR))
 
     def test_category_term_is_not_duplicated(self):
         query, _kwargs = adult_backend._search_parameters(

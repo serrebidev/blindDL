@@ -55,8 +55,11 @@ def _item_from_result(result):
     return item
 
 
-def search(query, config=None):
-    """Search Bandcamp via the fuzzysearch API.  Returns normalised items."""
+def search(query, config=None, order=None):
+    """Search Bandcamp via the fuzzysearch API.  Returns normalised items.
+
+    The endpoint exposes no sort, so ``order`` is accepted and ignored.
+    """
     try:
         data = _api_get(
             "/fuzzysearch/1/app_autocomplete", {"q": query})

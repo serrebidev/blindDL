@@ -35,8 +35,13 @@ from urllib.parse import quote
 
 import requests
 
-from . import annas_backend
+from . import annas_backend, search_order
 from .annas_backend import SOURCE_ANNAS
+from .search_order import (
+    ORDER_POPULAR,
+    ORDER_RECENT,
+    ORDER_RELEVANCE,
+)
 
 SOURCE_ARCHIVE = "Internet Archive"
 SOURCE_OPENLIBRARY = "Open Library"
@@ -79,6 +84,42 @@ OPENLIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
 OPENLIBRARY_URL = "https://openlibrary.org"
 GUTENDEX_URL = "https://gutendex.com/books"
 STANDARD_EBOOKS_FEED = "https://standardebooks.org/feeds/opds/all"
+
+# How the Internet Archive is asked to order any of its collections. Shared
+# with archive_backend and torrent_backend, which query the same endpoint.
+# publicdate is when the item reached the Archive, which is what "newest"
+# means for a library of scans -- the item's own `date` field is the year the
+# work was made, so a 1940s radio show would sort as ancient however recently
+# it was uploaded.
+IA_ARCHIVE_SORTS = {
+    ORDER_RELEVANCE: "downloads desc",
+    ORDER_POPULAR: "downloads desc",
+    ORDER_RECENT: "publicdate desc",
+}
+
+# Open Library sorts editions rather than works: `editions` is how many
+# printings a title has, which is the closest thing it publishes to how
+# widely read something is.
+OPENLIBRARY_SORTS = {ORDER_RECENT: "new", ORDER_POPULAR: "editions"}
+# Gutendex's default is already download count; `descending` orders by
+# Gutenberg id, so the most recently transcribed books come first.
+GUTENDEX_SORTS = {ORDER_RECENT: "descending", ORDER_POPULAR: "popular"}
+
+# Which libraries can answer which order themselves. Standard Ebooks' OPDS
+# search feed takes no sort, and Anna's Archive offers newest/oldest but
+# nothing resembling a popularity figure.
+ORDER_SUPPORT = {
+    SOURCE_ARCHIVE: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+    SOURCE_OPENLIBRARY: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+    SOURCE_GUTENBERG: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+    SOURCE_STANDARD: frozenset(),
+    SOURCE_ANNAS: frozenset({ORDER_RECENT}),
+}
+
+
+def supports_order(source, order):
+    """Whether one library can answer *order* itself."""
+    return search_order.supported(ORDER_SUPPORT, source, order)
 
 # Preference order for the file offered to the user. EPUB is reflowable and
 # reads properly in every screen-reader-friendly reader; plain text always
@@ -205,8 +246,14 @@ def score_match(query, title, author=""):
     return round(score, 2)
 
 
-def _rank(items, query):
-    """Drop the noise and put the closest editions first."""
+def _rank(items, query, order=ORDER_RELEVANCE):
+    """Drop the noise and put the best answers to *order* first.
+
+    The score is a filter under every order -- a book that does not answer
+    the query is not the newest edition of it either -- but it only decides
+    the sequence under best match. Newest and most popular were asked of the
+    library itself, so its reply is kept in the order it arrived in.
+    """
     for item in items:
         item["score"] = score_match(query, item.get("title", ""),
                                     item.get("author", ""))
@@ -215,10 +262,10 @@ def _rank(items, query):
     # best guesses beats showing an empty list.
     if not kept:
         kept = list(items)
-    # Equal scores keep the order the site returned them in, which is its own
-    # relevance or popularity ranking.
-    indexed = sorted(enumerate(kept), key=lambda pair: (-pair[1]["score"],
-                                                        pair[0]))
+    indexed = sorted(
+        enumerate(kept),
+        key=lambda pair: search_order.rank_key(
+            order, pair[1]["score"], pair[0]))
     return [item for _index, item in indexed][:MAX_RESULTS_PER_SOURCE]
 
 
@@ -272,19 +319,19 @@ def _ia_formats(formats):
     return found
 
 
-def _ia_query(query, rows, timeout):
+def _ia_query(query, rows, timeout, order=ORDER_RELEVANCE):
     response = _http().get(
         IA_SEARCH_URL,
         params={
             "q": query,
             "fl[]": ["identifier", "title", "creator", "year", "format",
-                     "item_size", "access-restricted-item"],
+                     "item_size", "access-restricted-item", "publicdate"],
             "rows": rows,
             "page": 1,
             "output": "json",
-            # Popular editions first: the Archive's own relevance order buries
-            # readable scans under duplicated uploads.
-            "sort[]": "downloads desc",
+            # Popular editions first by default: the Archive's own relevance
+            # order buries readable scans under duplicated uploads.
+            "sort[]": IA_ARCHIVE_SORTS[search_order.normalize(order)],
         },
         timeout=timeout,
     )
@@ -292,17 +339,17 @@ def _ia_query(query, rows, timeout):
     return response.json().get("response", {}).get("docs", []) or []
 
 
-def search_archive(query, timeout=HTTP_TIMEOUT_S):
+def search_archive(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search archive.org's text collection for downloadable books."""
     escaped = re.sub(r'["\\]', " ", query).strip()
     docs = _ia_query(f'title:("{escaped}") AND mediatype:(texts)',
-                     SEARCH_ROWS, timeout)
+                     SEARCH_ROWS, timeout, order)
     if len(docs) < 5:
         # A title-only phrase misses "the hobbit tolkien", where half the
         # query is the author. Fall back to the plain term search.
         seen = {doc.get("identifier") for doc in docs}
         for doc in _ia_query(f"({escaped}) AND mediatype:(texts)",
-                             SEARCH_ROWS, timeout):
+                             SEARCH_ROWS, timeout, order):
             if doc.get("identifier") not in seen:
                 docs.append(doc)
 
@@ -383,21 +430,25 @@ def resolve_archive_file(identifier, timeout=HTTP_TIMEOUT_S):
 # -- Open Library ----------------------------------------------------------
 
 
-def search_openlibrary(query, timeout=HTTP_TIMEOUT_S):
+def search_openlibrary(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search Open Library for editions whose full text is public.
 
     Open Library is book-finder's "answer key" -- correct title, author, year
     and page count -- and its public-access editions point at an Internet
     Archive identifier, so the rows it contributes are downloadable too.
     """
+    params = {
+        "q": query,
+        "limit": SEARCH_ROWS,
+        "fields": ("key,title,author_name,first_publish_year,"
+                   "number_of_pages_median,ebook_access,ia"),
+    }
+    sort = OPENLIBRARY_SORTS.get(search_order.normalize(order))
+    if sort:
+        params["sort"] = sort
     response = _http().get(
         OPENLIBRARY_SEARCH_URL,
-        params={
-            "q": query,
-            "limit": SEARCH_ROWS,
-            "fields": ("key,title,author_name,first_publish_year,"
-                       "number_of_pages_median,ebook_access,ia"),
-        },
+        params=params,
         timeout=timeout,
     )
     response.raise_for_status()
@@ -443,10 +494,13 @@ def _gutenberg_download(formats):
     return "", ""
 
 
-def search_gutenberg(query, timeout=HTTP_TIMEOUT_S):
+def search_gutenberg(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search Project Gutenberg's ~75,000 public-domain books via Gutendex."""
-    response = _http().get(GUTENDEX_URL, params={"search": query},
-                           timeout=timeout)
+    params = {"search": query}
+    sort = GUTENDEX_SORTS.get(search_order.normalize(order))
+    if sort:
+        params["sort"] = sort
+    response = _http().get(GUTENDEX_URL, params=params, timeout=timeout)
     response.raise_for_status()
     items = []
     for book in response.json().get("results", []) or []:
@@ -507,11 +561,14 @@ def _standard_entry(entry):
     )
 
 
-def search_standard_ebooks(query, timeout=HTTP_TIMEOUT_S):
+def search_standard_ebooks(query, timeout=HTTP_TIMEOUT_S,
+                           order=ORDER_RELEVANCE):
     """Search Standard Ebooks' hand-typeset public-domain EPUB catalog.
 
     The unfiltered OPDS feed is patron-only (401), but the same feed with a
-    query is public, so blindDL never asks for the bulk catalog.
+    query is public, so blindDL never asks for the bulk catalog. That feed
+    takes no sort of its own, so *order* is accepted and ignored here --
+    ORDER_SUPPORT says as much, and the search reports it.
     """
     response = _http().get(STANDARD_EBOOKS_FEED,
                            params={"query": query, "per-page": SEARCH_ROWS},
@@ -532,17 +589,21 @@ def search_standard_ebooks(query, timeout=HTTP_TIMEOUT_S):
 # -- Anna's Archive --------------------------------------------------------
 
 
-def search_annas(query, timeout=HTTP_TIMEOUT_S):
+def search_annas(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search Anna's Archive's index of the shadow libraries.
 
     Rows carry the record's MD5; the file itself is resolved at download
     time through annas_backend's cascade.
     """
     items = []
-    rows = annas_backend.search(query, timeout=timeout)
-    # Records held by LibGen are the ones a non-member can actually download,
-    # so they lead; the rest stay listed, and say so if they are picked.
-    rows.sort(key=lambda row: not row.get("on_libgen"))
+    order = search_order.normalize(order)
+    rows = annas_backend.search(query, timeout=timeout, order=order)
+    if order != ORDER_RECENT:
+        # Records held by LibGen are the ones a non-member can actually
+        # download, so they lead; the rest stay listed, and say so if they
+        # are picked. Under newest-first that reshuffle would undo the sort
+        # the site was just asked for, so the site's order is left alone.
+        rows.sort(key=lambda row: not row.get("on_libgen"))
     for row in rows:
         items.append(_item(
             SOURCE_ANNAS, row["md5"], row["title"], row["author"],
@@ -567,7 +628,7 @@ _SEARCHERS = {
 
 
 def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
-           sources=None):
+           sources=None, order=ORDER_RELEVANCE):
     """Search the chosen book sources at once and return after timeout_s.
 
     Same contract as musicdl_backend.search. sources is a list of book source
@@ -576,8 +637,13 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     (source, items) fires for every source that answers, late ones included.
     Set the `stop` event to silence a superseded search.
 
+    *order* is one of search_order's constants and goes out with the query.
+    A library that cannot sort that way answers by its own best match;
+    supports_order says which will, so a caller can tell the user.
+
     Returns (items, answered, asked).
     """
+    order = search_order.normalize(order)
     wanted = [source for source in (sources or ALL_SOURCES)
               if source in _SEARCHERS]
     found = {}
@@ -587,7 +653,19 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
         if stop is not None and stop.is_set():
             return
         try:
-            items = _rank(_SEARCHERS[source](query), query)
+            searcher = _SEARCHERS[source]
+            try:
+                rows = searcher(query, order=order)
+            except TypeError as exc:
+                # Keep test doubles and third-party source extensions written
+                # for the pre-order call shape working. Do not swallow a
+                # TypeError raised inside a current searcher.
+                if "unexpected keyword argument 'order'" not in str(exc):
+                    raise
+                rows = searcher(query)
+            items = _rank(rows, query,
+                          order if supports_order(source, order)
+                          else ORDER_RELEVANCE)
         except Exception:  # noqa: BLE001 - one bad site must not kill the rest
             items = []
         with found_lock:

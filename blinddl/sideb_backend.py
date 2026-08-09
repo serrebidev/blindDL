@@ -186,8 +186,12 @@ def extract_flat(url, config):
     return [_track_to_item(t) for t in tracks], title
 
 
-def search(query, config):
-    """Search Deezer's catalog; returns normalized items (kind "sideb")."""
+def search(query, config, order=None):
+    """Search Deezer's catalog; returns normalized items (kind "sideb").
+
+    Side B's metadata search exposes only best match, so ``order`` is accepted
+    for the common search contract and intentionally does not alter the query.
+    """
     _ensure_home()
     from sideb.providers.metadata.deezer import DeezerMetadata
 

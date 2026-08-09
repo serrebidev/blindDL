@@ -20,6 +20,8 @@ import threading
 import requests
 from Crypto.Cipher import Blowfish
 
+from . import search_order
+from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 from .ytdlp_backend import DownloadCancelled
 
 _GW_URL = "https://www.deezer.com/ajax/gw-light.php"
@@ -299,17 +301,34 @@ def _track_to_item(data):
         "album": album,
         "source": _SEARCH_SOURCE,
         "duration_s": data.get("duration", 0),
+        # Deezer's own popularity figure for the track. Its search endpoint
+        # ignores the documented `order` parameter -- every value comes back
+        # in the same sequence -- so this is what "most popular" is answered
+        # with instead.
+        "rank": int(data.get("rank") or 0),
         "url": data.get("link", f"https://www.deezer.com/track/{data['id']}"),
     }
 
 
-def search(query, config=None):
-    """Search Deezer tracks via the public API.  Returns normalized items."""
+def supports_order(order):
+    """Deezer publishes a rank per track, and no release date to sort on."""
+    return search_order.normalize(order) != ORDER_RECENT
+
+
+def search(query, config=None, order=ORDER_RELEVANCE):
+    """Search Deezer tracks via the public API.  Returns normalized items.
+
+    The API takes an `order` parameter and quietly disregards it on track
+    search, so the ordering is done here on the rank each row carries.
+    """
     try:
         data = _api_get("/search/track", {"q": query, "limit": 30})
     except Exception:
         return []
-    return [_track_to_item(t) for t in data.get("data", [])]
+    items = [_track_to_item(t) for t in data.get("data", [])]
+    if search_order.normalize(order) == ORDER_POPULAR:
+        items.sort(key=lambda item: -item["rank"])
+    return items
 
 
 def extract_flat(url, config=None):

@@ -7,7 +7,7 @@
 import unittest
 from unittest import mock
 
-from blinddl import torrent_backend
+from blinddl import search_order, torrent_backend
 
 from tests.test_book_backend import _Response
 
@@ -35,6 +35,16 @@ class ArchiveTorrentTests(unittest.TestCase):
 
         self.assertIn('format:("Archive BitTorrent")', params["q"])
         self.assertIn("dragnet", params["q"])
+
+    def test_recent_order_is_sent_to_the_archive(self):
+        with mock.patch.object(torrent_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=self.DOCS)
+            torrent_backend.search_archive(
+                "dragnet", order=search_order.ORDER_RECENT)
+
+        self.assertEqual(
+            http.return_value.get.call_args.kwargs["params"]["sort[]"],
+            "publicdate desc")
 
     def test_punctuation_cannot_break_the_query(self):
         # The Archive answers a malformed query with an empty result set
@@ -81,6 +91,40 @@ class ArchiveTorrentTests(unittest.TestCase):
         self.assertGreaterEqual(rows[0]["seeders"], 1)
         ranked = torrent_backend._rank(list(rows), "dragnet")
         self.assertTrue(ranked)
+
+    def test_recent_ranking_uses_posted_time_and_leaves_unknown_last(self):
+        rows = [
+            torrent_backend._item(
+                "Test", "a", "Dragnet older", seeders=100, posted=10),
+            torrent_backend._item(
+                "Test", "b", "Dragnet newest", seeders=1, posted=20),
+            torrent_backend._item(
+                "Test", "c", "Dragnet unknown", seeders=1000, posted=0),
+        ]
+
+        ranked = torrent_backend._rank(
+            rows, "dragnet", order=search_order.ORDER_RECENT)
+
+        self.assertEqual(
+            [row["title"] for row in ranked],
+            ["Dragnet newest", "Dragnet older", "Dragnet unknown"])
+
+    def test_native_popularity_order_is_not_replaced_by_swarm_size(self):
+        rows = [
+            torrent_backend._item(
+                torrent_backend.SOURCE_ARCHIVE, "a", "Most downloaded",
+                seeders=1),
+            torrent_backend._item(
+                torrent_backend.SOURCE_ARCHIVE, "b", "Second downloaded",
+                seeders=1),
+        ]
+
+        ranked = torrent_backend._rank(
+            rows, "downloaded", order=search_order.ORDER_POPULAR)
+
+        self.assertEqual(
+            [row["title"] for row in ranked],
+            ["Most downloaded", "Second downloaded"])
 
     def test_a_creator_list_reads_as_one_name(self):
         rows, _params = self._search()

@@ -12,9 +12,10 @@ import wx
 from .. import (
     adult_backend, archive_backend,
     audiobook_backend, bandcamp_backend, book_backend, deezer_backend,
-    musicdl_backend, preview, sideb_backend, torrent_backend,
+    musicdl_backend, preview, search_order, sideb_backend, torrent_backend,
     ytdlp_backend,
 )
+from ..search_order import ORDER_RECENT, ORDER_RELEVANCE
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 
@@ -67,13 +68,24 @@ ADULT_ENGINE_CATEGORIES = {
     ENGINE_BISEXUAL: adult_backend.CONTENT_BISEXUAL,
     ENGINE_TRANS: adult_backend.CONTENT_TRANS,
 }
+# The Sort by control rearranges rows that have already arrived. The Order
+# control above it goes out with the query and decides which rows arrive at
+# all; the two are separate because a site cannot be re-asked for nothing,
+# and re-sorting a page of results is instant while re-searching is not.
 SORT_RELEVANCE = 0
 SORT_NAME = 1
 SORT_SITE = 2
 SORT_ARTIST = 3
 SORT_SHORTEST = 4
 SORT_LONGEST = 5
+# Two further slots that only some engines have anything to fill. A list
+# shorter than this simply does not offer them.
+SORT_OLDEST = 6
+SORT_NEWEST = 7
 SORT_LABELS = [
+    # Relevance is the order the sites answered in, so it is also what
+    # "most recent" and "most popular" look like once they have been asked
+    # for -- which is why choosing an Order returns this control to it.
     "Relevance",
     "Name",
     "Site",
@@ -108,6 +120,8 @@ ARCHIVE_SORT_LABELS = [
 ]
 # A torrent has no artist and no duration; what decides between two of them
 # is how many people are sharing it, so the two duration slots sort on that.
+# It does have a posting date, and unlike a book's year that date is exact,
+# so torrents are the one engine that offers both pairs.
 TORRENT_SORT_LABELS = [
     "Relevance",
     "Name",
@@ -115,6 +129,8 @@ TORRENT_SORT_LABELS = [
     "Uploader",
     "Fewest seeders",
     "Most seeders",
+    "Oldest first",
+    "Newest first",
 ]
 # File type sits second everywhere: a screen reader reads a row in column
 # order, so the answer to "what will I actually get?" arrives right after the
@@ -157,6 +173,86 @@ def _sort_labels(engine):
     if _is_archive_engine(engine):
         return ARCHIVE_SORT_LABELS
     return SORT_LABELS
+
+
+def _sort_for_order(engine, order):
+    """The Sort by slot that shows *order* the way the user just asked for it.
+
+    Choosing Most recent and then reading the list in relevance order looks
+    like nothing happened, so the display sort follows the search order.
+    Where an engine has a real date or swarm column the rows are put in that
+    order outright; where it has neither, Relevance is already the answer,
+    because that slot keeps the sequence the sites replied in.
+    """
+    order = search_order.normalize(order)
+    if order == ORDER_RELEVANCE:
+        return SORT_RELEVANCE
+    if engine == ENGINE_TORRENTS:
+        return SORT_NEWEST if order == ORDER_RECENT else SORT_LONGEST
+    # A book or Archive row's year is when the work was originally made, while
+    # providers interpret "recent" as when the edition or upload appeared.
+    # Re-sorting by year would therefore undo the order just requested.
+    return SORT_RELEVANCE
+
+
+def _order_capable_sources(engine, sources, order, config):
+    """Split *sources* into the ones that can answer *order* and the rest.
+
+    Every engine keeps its own map of what its sites can sort by, so this
+    asks each backend rather than second-guessing it here. An engine whose
+    sites cannot sort at all -- the music sites, SoundCloud, Bandcamp --
+    reports everything as unable, which is what the user is then told.
+    """
+    order = search_order.normalize(order)
+    if order == ORDER_RELEVANCE:
+        return list(sources), []
+
+    def can(source):
+        if engine == ENGINE_BOOKS:
+            return book_backend.supports_order(source, order)
+        if engine == ENGINE_AUDIOBOOKS:
+            return audiobook_backend.supports_order(source, order)
+        if engine == ENGINE_TORRENTS:
+            return torrent_backend.supports_order(source, order, config)
+        if _is_archive_engine(engine):
+            return archive_backend.supports_order(source, order)
+        if _is_adult_engine(engine):
+            return adult_backend.supports_order(source, order)
+        if engine == ENGINE_YOUTUBE:
+            return ytdlp_backend.supports_order(order)
+        if engine == ENGINE_MUSIC:
+            # musicdl drives four dozen site search forms and not one of
+            # them exposes a sort. Deezer is the exception, and only for
+            # popularity, which it publishes as a rank per track.
+            return (source == deezer_backend._SEARCH_SOURCE
+                    and deezer_backend.supports_order(order))
+        # SoundCloud, Bandcamp and Apple Music each offer one search and no
+        # way to order it.
+        return False
+
+    able = [source for source in sources if can(source)]
+    unable = [source for source in sources if not can(source)]
+    return able, unable
+
+
+def _order_phrase(order, unable, total):
+    """One sentence on how far the chosen order actually reached.
+
+    A screen reader reads this straight after the result count, so it names
+    at most a few sites and then counts the rest.
+    """
+    if search_order.normalize(order) == ORDER_RELEVANCE or not unable:
+        return ""
+    label = search_order.label(order).lower()
+    if len(unable) >= total:
+        return f"No site here can sort by {label}; showing best match."
+    names = ", ".join(unable[:3])
+    if len(unable) > 3:
+        names += f" and {len(unable) - 3} more"
+    site_word = "site" if len(unable) == 1 else "sites"
+    pronoun = "it" if len(unable) == 1 else "they"
+    return (f"{len(unable)} {site_word} cannot sort by {label}, so {pronoun} "
+            f"answered by best match: {names}.")
 
 
 def _column_headings(engine):
@@ -217,15 +313,34 @@ def _sorted_results(items, mode, engine=None):
         # Nothing here has a duration; the swarm is what ranks two torrents.
         most = mode == SORT_LONGEST
 
-        def key(pair):
+        def torrent_seed_key(pair):
             seeders = int(pair[1].get("seeders") or 0)
             return (
                 -seeders if most else seeders,
-                str(pair[1].get("title", "")).casefold(),
+                pair[1].get("_search_order", pair[0]),
                 pair[0],
             )
 
-        return [item for _index, item in sorted(indexed, key=key)]
+        return [item for _index, item in sorted(
+            indexed, key=torrent_seed_key)]
+
+    if engine == ENGINE_TORRENTS and mode in (SORT_OLDEST, SORT_NEWEST):
+        # Every indexer states a posting date except the two that scrape a
+        # page and read the age out as words. Those sort last either way: an
+        # unknown date is neither the newest nor the oldest.
+        newest = mode == SORT_NEWEST
+
+        def torrent_date_key(pair):
+            posted = int(pair[1].get("posted") or 0)
+            return (
+                posted == 0,
+                -posted if newest else posted,
+                pair[1].get("_search_order", pair[0]),
+                pair[0],
+            )
+
+        return [item for _index, item in sorted(
+            indexed, key=torrent_date_key)]
 
     if ((engine == ENGINE_BOOKS or _is_archive_engine(engine)) and
             mode in (SORT_SHORTEST, SORT_LONGEST)):
@@ -233,7 +348,7 @@ def _sorted_results(items, mode, engine=None):
         # duration slots sort by when the work was published.
         newest = mode == SORT_LONGEST
 
-        def key(pair):
+        def publication_year_key(pair):
             year = _year(pair[1])
             return (
                 year is None,
@@ -242,7 +357,8 @@ def _sorted_results(items, mode, engine=None):
                 pair[0],
             )
 
-        return [item for _index, item in sorted(indexed, key=key)]
+        return [item for _index, item in sorted(
+            indexed, key=publication_year_key)]
 
     def text(item, *names):
         for name in names:
@@ -266,37 +382,42 @@ def _sorted_results(items, mode, engine=None):
             key=lambda pair: pair[1].get("_search_order", pair[0]),
         )]
     if mode == SORT_NAME:
-        def key(pair):
+        def name_sort_key(pair):
             return text(pair[1], "title"), pair[0]
+        sort_key = name_sort_key
     elif mode == SORT_SITE:
-        def key(pair):
+        def site_sort_key(pair):
             return (
                 text(pair[1], "source") or "youtube",
                 text(pair[1], "title"), pair[0],
             )
+        sort_key = site_sort_key
     elif mode == SORT_ARTIST:
-        def key(pair):
+        def artist_sort_key(pair):
             return (
                 text(pair[1], "artist", "uploader"),
                 text(pair[1], "title"), pair[0],
             )
+        sort_key = artist_sort_key
     elif mode == SORT_SHORTEST:
-        def key(pair):
+        def shortest_sort_key(pair):
             return (
                 duration(pair[1]) is None,
                 duration(pair[1]) or 0,
                 text(pair[1], "title"), pair[0],
             )
+        sort_key = shortest_sort_key
     elif mode == SORT_LONGEST:
-        def key(pair):
+        def longest_sort_key(pair):
             return (
                 duration(pair[1]) is None,
                 -(duration(pair[1]) or 0),
                 text(pair[1], "title"), pair[0],
             )
+        sort_key = longest_sort_key
     else:
         return list(items)
-    return [item for _index, item in sorted(indexed, key=key)]
+    return [item for _index, item in sorted(indexed, key=sort_key)]
 
 
 class SearchPanel(wx.Panel):
@@ -313,6 +434,10 @@ class SearchPanel(wx.Panel):
         self.started_at = 0.0
         self.closing = False
         self.next_result_order = 0
+        self.current_order = search_order.normalize(
+            self.frame.config.get("search_order", ORDER_RELEVANCE))
+        self.order_unable = []
+        self.order_source_count = 0
         self.preview_token = None
         self.archive_token = None
         # Refreshes the status bar while slow sites are still working.
@@ -332,6 +457,17 @@ class SearchPanel(wx.Panel):
         self.engine_choice.SetName("Search source")
         self.engine_choice.SetSelection(0)
         self.engine_choice.Bind(wx.EVT_CHOICE, self.on_engine_changed)
+
+        order_label = wx.StaticText(self, label="&Order:")
+        self.order_choice = wx.Choice(
+            self, choices=search_order.ORDER_LABEL_LIST)
+        self.order_choice.SetName("Search result order")
+        self.order_choice.SetHelpText(
+            "Chooses which results each site returns. Sites that cannot "
+            "honour the order are named after the search.")
+        self.order_choice.SetSelection(
+            search_order.ORDERS.index(self.current_order))
+        self.order_choice.Bind(wx.EVT_CHOICE, self.on_order_changed)
 
         sort_label = wx.StaticText(self, label="Sort &by:")
         self.sort_choice = wx.Choice(self, choices=SORT_LABELS)
@@ -362,6 +498,8 @@ class SearchPanel(wx.Panel):
         top = wx.BoxSizer(wx.HORIZONTAL)
         top.Add(engine_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.engine_choice, 0, wx.RIGHT, 12)
+        top.Add(order_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        top.Add(self.order_choice, 0, wx.RIGHT, 12)
         top.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.sort_choice, 0, wx.RIGHT, 12)
         top.Add(self.search_btn, 0)
@@ -422,8 +560,36 @@ class SearchPanel(wx.Panel):
                 self.results_list.SetColumn(index, column)
 
     def on_engine_changed(self, event):
-        self._apply_engine_controls(self.engine_choice.GetSelection())
+        engine = self.engine_choice.GetSelection()
+        self._apply_engine_controls(engine)
+        mode = _sort_for_order(engine, self.current_order)
+        if mode < self.sort_choice.GetCount():
+            self.sort_choice.SetSelection(mode)
         event.Skip()
+
+    def on_order_changed(self, event):
+        """Save the query order and repeat an existing search with it."""
+        selection = self.order_choice.GetSelection()
+        if not 0 <= selection < len(search_order.ORDERS):
+            selection = 0
+            self.order_choice.SetSelection(selection)
+        self.current_order = search_order.ORDERS[selection]
+        self.frame.config["search_order"] = self.current_order
+        save = getattr(self.frame.config, "save", None)
+        if save is not None:
+            save()
+
+        engine = self.engine_choice.GetSelection()
+        sort_mode = _sort_for_order(engine, self.current_order)
+        if sort_mode < self.sort_choice.GetCount():
+            self.sort_choice.SetSelection(sort_mode)
+        if self.query_text.GetValue().strip():
+            self.on_search(None)
+        else:
+            self.frame.announce(
+                f"Search order set to {search_order.label(self.current_order)}.")
+        if event is not None:
+            event.Skip()
 
     def shutdown(self):
         """Stop timers and silence worker callbacks before widgets are freed."""
@@ -499,6 +665,33 @@ class SearchPanel(wx.Panel):
                 return
         else:
             sources = []
+        selection = self.order_choice.GetSelection()
+        order = (search_order.ORDERS[selection]
+                 if 0 <= selection < len(search_order.ORDERS)
+                 else ORDER_RELEVANCE)
+        self.current_order = order
+
+        if engine == ENGINE_MUSIC:
+            order_sources = list(sources) + [
+                sideb_backend.SIDEB_SOURCE, deezer_backend._SEARCH_SOURCE]
+        elif engine == ENGINE_YOUTUBE:
+            order_sources = ["YouTube"]
+        elif engine == ENGINE_SOUNDCLOUD:
+            order_sources = ["SoundCloud"]
+        elif engine == ENGINE_BANDCAMP:
+            order_sources = ["Bandcamp"]
+        elif engine == ENGINE_APPLE_MUSIC:
+            order_sources = ["Apple Music"]
+        else:
+            order_sources = list(sources)
+        _able, unable = _order_capable_sources(
+            engine, order_sources, order, self.frame.config)
+        if engine == ENGINE_MUSIC:
+            unable = [musicdl_backend.source_label(source)
+                      if source in musicdl_backend.ALL_SOURCES else source
+                      for source in unable]
+        self.order_unable = unable
+        self.order_source_count = len(order_sources)
         self.search_btn.Disable()
 
         # Everything below is tagged with this token, so results still
@@ -521,7 +714,7 @@ class SearchPanel(wx.Panel):
         if engine == ENGINE_MUSIC:
             # Side B's Deezer catalog search goes out next to the musicdl
             # sites and reports through the same per-site callback.
-            count = len(sources) + 1
+            count = len(sources) + 2
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} music {site_word} "
@@ -559,10 +752,11 @@ class SearchPanel(wx.Panel):
         else:
             self.frame.announce("Searching YouTube...")
         threading.Thread(target=self._search, args=(query, engine, self.token,
-                                                    self.stop, sources),
+                                                    self.stop, sources, order),
                          daemon=True).start()
 
-    def _search(self, query, engine, token, stop, sources):
+    def _search(self, query, engine, token, stop, sources, order=None):
+        order = search_order.normalize(order or self.current_order)
         asked = []
         try:
             if engine == ENGINE_MUSIC:
@@ -570,14 +764,14 @@ class SearchPanel(wx.Panel):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 threading.Thread(target=self._sideb_search,
-                                 args=(query, token, engine, stop),
+                                 args=(query, token, engine, stop, order),
                                  daemon=True, name="search-sideb").start()
                 threading.Thread(target=self._deezer_search,
-                                 args=(query, token, engine, stop),
+                                 args=(query, token, engine, stop, order),
                                  daemon=True, name="search-deezer").start()
                 items, _answered, asked = musicdl_backend.search(
                     query, self.frame.config["search_timeout_s"],
-                    on_site=on_site, stop=stop, sources=sources)
+                    on_site=on_site, stop=stop, sources=sources, order=order)
                 asked.append(sideb_backend.SIDEB_SOURCE)
                 asked.append(deezer_backend._SEARCH_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
@@ -588,7 +782,8 @@ class SearchPanel(wx.Panel):
 
                 items, _answered, asked = book_backend.search(
                     query, self.frame.config["search_timeout_s"],
-                    on_site=on_library, stop=stop, sources=sources)
+                    on_site=on_library, stop=stop, sources=sources,
+                    order=order)
                 # on_library already delivered these.
                 items = []
             elif engine == ENGINE_AUDIOBOOKS:
@@ -597,7 +792,8 @@ class SearchPanel(wx.Panel):
 
                 items, _answered, asked = audiobook_backend.search(
                     query, self.frame.config["search_timeout_s"],
-                    on_site=on_audiobook_site, stop=stop, sources=sources)
+                    on_site=on_audiobook_site, stop=stop, sources=sources,
+                    order=order)
                 # on_audiobook_site already delivered these.
                 items = []
             elif engine == ENGINE_TORRENTS:
@@ -607,7 +803,7 @@ class SearchPanel(wx.Panel):
                 items, _answered, asked = torrent_backend.search(
                     query, self.frame.config["search_timeout_s"],
                     on_site=on_indexer, stop=stop, sources=sources,
-                    config=self.frame.config)
+                    config=self.frame.config, order=order)
                 # on_indexer already delivered these.
                 items = []
             elif _is_archive_engine(engine):
@@ -616,15 +812,16 @@ class SearchPanel(wx.Panel):
 
                 items, _answered, asked = archive_backend.search(
                     query, self.frame.config["search_timeout_s"],
-                    on_site=on_collection, stop=stop, sources=sources)
+                    on_site=on_collection, stop=stop, sources=sources,
+                    order=order)
                 # on_collection already delivered these.
                 items = []
             elif engine == ENGINE_SOUNDCLOUD:
                 items, _title = ytdlp_backend.extract_flat(
-                    f"scsearch30:{query}")
+                    f"scsearch30:{query}", order=order)
             elif engine == ENGINE_BANDCAMP:
                 items = bandcamp_backend.search(
-                    query, self.frame.config)
+                    query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
                 items = []  # Apple Music search needs MusicKit API
             elif _is_adult_engine(engine):
@@ -634,20 +831,21 @@ class SearchPanel(wx.Panel):
                 items, _answered, asked = adult_backend.search(
                     query, self.frame.config["search_timeout_s"],
                     on_site=on_adult_site, stop=stop, sources=sources,
-                    category=ADULT_ENGINE_CATEGORIES[engine])
+                    category=ADULT_ENGINE_CATEGORIES[engine], order=order)
                 # on_adult_site already delivered these.
                 items = []
             else:
-                items = ytdlp_backend.search(query)
+                items = ytdlp_backend.search(query, order=order)
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._search_failed, token, str(exc))
             return
         if not stop.is_set():
             wx.CallAfter(self._search_done, token, items, engine, asked)
 
-    def _sideb_search(self, query, token, engine, stop):
+    def _sideb_search(self, query, token, engine, stop,
+                      order=ORDER_RELEVANCE):
         try:
-            items = sideb_backend.search(query, self.frame.config)
+            items = sideb_backend.search(query, self.frame.config, order=order)
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
         if stop.is_set():
@@ -655,9 +853,10 @@ class SearchPanel(wx.Panel):
         wx.CallAfter(self._add_site, token, engine,
                      sideb_backend.SIDEB_SOURCE, items)
 
-    def _deezer_search(self, query, token, engine, stop):
+    def _deezer_search(self, query, token, engine, stop,
+                       order=ORDER_RELEVANCE):
         try:
-            items = deezer_backend.search(query, self.frame.config)
+            items = deezer_backend.search(query, self.frame.config, order=order)
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
         if stop.is_set():
@@ -876,14 +1075,23 @@ class SearchPanel(wx.Panel):
         self.asked = list(asked)
         self.done = True
         pending = self._pending()
+        order_phrase = _order_phrase(
+            self.current_order, self.order_unable,
+            self.order_source_count)
         if pending:
             # Deezer and friends can run for minutes; never call that "found
             # nothing" when the sites are still going.
-            self.frame.announce(
+            message = (
                 f"{self._result_count()} so far. {self._pending_phrase()}")
+            if order_phrase:
+                message += f" {order_phrase}"
+            self.frame.announce(message)
             self.timer.Start(10000)
         else:
-            self.frame.announce(f"{self._result_count()} found.")
+            message = f"{self._result_count()} found."
+            if order_phrase:
+                message += f" {order_phrase}"
+            self.frame.announce(message)
         if self.results:
             self.results_list.SetFocus()
             self.results_list.Focus(0)
