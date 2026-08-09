@@ -11,16 +11,30 @@ Covers everything the app relies on:
 - Deno: the JavaScript runtime yt-dlp needs for YouTube extraction.
 - ffmpeg: needed for audio extraction and video merging.
 
-Deno and ffmpeg are upgraded through winget when available. All functions
-are synchronous and intended for worker threads; progress goes to a log
-callback. Nothing here runs at import time.
+Source checkouts can upgrade Deno and ffmpeg through winget when available.
+Frozen releases never modify system runtimes: all of their components update
+together with blindDL. All functions are synchronous and intended for worker
+threads; progress goes to a log callback. Nothing here runs at import time.
 """
 
 import os
+import hashlib
+import json
+import platform
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from . import __version__
+from .config import app_data_dir
 
 # ytmusicapi is here because Side B is vendored: it breaks whenever YouTube
 # Music changes, and there is no upstream release to pull the fix from.
@@ -65,6 +79,24 @@ WINGET_PACKAGES = {
 }
 
 CREATE_NO_WINDOW = 0x08000000
+RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
+UPDATE_USER_AGENT = f"blindDL/{__version__}"
+
+
+class UpdateError(RuntimeError):
+    """An application update could not be checked, verified, or started."""
+
+
+@dataclass(frozen=True)
+class AppUpdate:
+    """One newer GitHub release and its package for this installation."""
+
+    version: str
+    page_url: str
+    package_name: str
+    package_url: str
+    checksum_name: str
+    checksum_url: str
 
 
 def _subprocess_options():
@@ -72,6 +104,251 @@ def _subprocess_options():
     if os.name == "nt":
         return {"creationflags": CREATE_NO_WINDOW}
     return {}
+
+
+def _version_tuple(value):
+    parts = [int(part) for part in re.findall(r"\d+", str(value))[:3]]
+    return tuple((parts + [0, 0, 0])[:3])
+
+
+def _release_platform():
+    system = {"win32": "windows", "darwin": "macos"}.get(
+        sys.platform, "linux")
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    return system, arch
+
+
+def _is_debian_family():
+    return Path("/etc/debian_version").is_file() or shutil.which("dpkg") is not None
+
+
+def _windows_installed_build():
+    """True when the running executable is owned by the Inno installer."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+    try:
+        import winreg  # noqa: PLC0415 - Windows-only standard library
+    except ImportError:
+        return False
+    subkey = (
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+        r"\{656F03B0-B9A0-5C26-8F6C-68577B4F9D7D}_is1"
+    )
+    views = (0, winreg.KEY_WOW64_32KEY, winreg.KEY_WOW64_64KEY)
+    executable_dir = Path(sys.executable).resolve().parent
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in views:
+            try:
+                with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view) as key:
+                    location, _kind = winreg.QueryValueEx(key, "InstallLocation")
+            except OSError:
+                continue
+            try:
+                if Path(location).resolve() == executable_dir:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _asset_map(release):
+    return {
+        str(asset.get("name") or ""): str(asset.get("browser_download_url") or "")
+        for asset in release.get("assets", [])
+        if asset.get("name") and asset.get("browser_download_url")
+    }
+
+
+def _select_update(release):
+    version = str(release.get("tag_name") or "").lstrip("vV")
+    if not version:
+        raise UpdateError("The latest GitHub release has no version tag.")
+    if _version_tuple(version) <= _version_tuple(__version__):
+        return None
+
+    system, arch = _release_platform()
+    assets = _asset_map(release)
+    if system == "windows":
+        suffix = (f"windows-{arch}.exe" if _windows_installed_build()
+                  else f"windows-{arch}.zip")
+    elif system == "macos":
+        suffix = f"macos-{arch}.dmg"
+    else:
+        deb_arch = "arm64" if arch == "arm64" else "amd64"
+        deb_suffix = f"_{deb_arch}.deb"
+        has_deb = any(name.endswith(deb_suffix) for name in assets)
+        suffix = (deb_suffix if _is_debian_family() and has_deb
+                  else f"linux-{arch}.tar.gz")
+
+    package_name = next((name for name in assets if name.endswith(suffix)), "")
+    checksum_name = f"SHA256SUMS-{system}-{arch}.txt"
+    if not package_name or checksum_name not in assets:
+        raise UpdateError(
+            f"blindDL {version} has no complete package for {system} {arch}."
+        )
+    return AppUpdate(
+        version=version,
+        page_url=str(release.get("html_url") or ""),
+        package_name=package_name,
+        package_url=assets[package_name],
+        checksum_name=checksum_name,
+        checksum_url=assets[checksum_name],
+    )
+
+
+def _open_url(url, timeout=30):
+    request = Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": UPDATE_USER_AGENT,
+    })
+    try:
+        return urlopen(request, timeout=timeout)
+    except (HTTPError, URLError, OSError) as exc:
+        raise UpdateError(f"Could not reach the update server: {exc}") from exc
+
+
+def check_for_app_update(log=lambda _line: None):
+    """Return the newest applicable release, or None when already current."""
+    log(f"Checking for a BlindDL update (current version {__version__})...")
+    try:
+        with _open_url(RELEASE_API_URL) as response:
+            release = json.load(response)
+    except (ValueError, TypeError) as exc:
+        raise UpdateError("The update server returned invalid release data.") from exc
+    update = _select_update(release)
+    if update is None:
+        log(f"BlindDL {__version__} is up to date.")
+    else:
+        log(f"BlindDL {update.version} is available.")
+    return update
+
+
+def _download(url, destination, digest=None):
+    hasher = hashlib.sha256() if digest is not None else None
+    with _open_url(url, timeout=120) as response, open(destination, "wb") as output:
+        while True:
+            block = response.read(1024 * 1024)
+            if not block:
+                break
+            output.write(block)
+            if hasher is not None:
+                hasher.update(block)
+    return hasher.hexdigest() if hasher is not None else ""
+
+
+def download_app_update(update, log=lambda _line: None):
+    """Download *update* and verify it against the release checksum file."""
+    update_dir = Path(app_data_dir()) / "updates" / f"v{update.version}"
+    update_dir.mkdir(parents=True, exist_ok=True)
+    checksums_path = update_dir / update.checksum_name
+    package_path = update_dir / Path(update.package_name).name
+    log(f"Downloading checksum: {update.checksum_name}")
+    _download(update.checksum_url, checksums_path)
+    expected = ""
+    for line in checksums_path.read_text(encoding="utf-8").splitlines():
+        pieces = line.split(None, 1)
+        if len(pieces) == 2 and pieces[1].lstrip("*") == update.package_name:
+            expected = pieces[0].lower()
+            break
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise UpdateError("The release checksum does not list this package.")
+    log(f"Downloading {update.package_name}...")
+    partial = package_path.with_name(package_path.name + ".part")
+    actual = _download(update.package_url, partial, digest=True)
+    if actual.lower() != expected:
+        partial.unlink(missing_ok=True)
+        raise UpdateError(
+            "The downloaded update failed its SHA-256 check and was deleted."
+        )
+    partial.replace(package_path)
+    log("The update package passed its SHA-256 integrity check.")
+    return package_path
+
+
+def _safe_extract_zip(archive, destination):
+    root = destination.resolve()
+    with zipfile.ZipFile(archive) as package:
+        for member in package.infolist():
+            target = (destination / member.filename).resolve()
+            if root != target and root not in target.parents:
+                raise UpdateError("The portable update contains an unsafe path.")
+        package.extractall(destination)
+
+
+def _portable_windows_update(package_path, version):
+    update_root = package_path.parent / "portable"
+    if update_root.exists():
+        shutil.rmtree(update_root)
+    update_root.mkdir()
+    _safe_extract_zip(package_path, update_root)
+    source = update_root / "blindDL"
+    if not (source / "blindDL.exe").is_file():
+        raise UpdateError("The portable update does not contain blindDL.exe.")
+    target = Path(sys.executable).resolve().parent
+    if not (target / "blindDL.exe").is_file():
+        raise UpdateError("The current portable BlindDL folder is not valid.")
+    helper = package_path.parent / "finish-portable-update.ps1"
+    log_path = package_path.parent / "portable-update.log"
+    helper.write_text(
+        "param([int]$BlindDLPid,[string]$Source,[string]$Target,[string]$Log)\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        "Wait-Process -Id $BlindDLPid -ErrorAction SilentlyContinue\n"
+        "try {\n"
+        "  Get-ChildItem -LiteralPath $Source -Force | Copy-Item "
+        "-Destination $Target -Recurse -Force\n"
+        "} catch {\n"
+        "  $_ | Out-String | Set-Content -LiteralPath $Log -Encoding UTF8\n"
+        "}\n"
+        "$Exe = Join-Path $Target 'blindDL.exe'\n"
+        "if (Test-Path -LiteralPath $Exe) { Start-Process -FilePath $Exe }\n",
+        encoding="utf-8",
+    )
+    subprocess.Popen([
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(helper), "-BlindDLPid", str(os.getpid()),
+        "-Source", str(source), "-Target", str(target), "-Log", str(log_path),
+    ], **_subprocess_options())
+    return True
+
+
+def install_app_update(update, package_path, log=lambda _line: None):
+    """Launch or stage the platform updater. True means BlindDL should exit."""
+    suffixes = "".join(package_path.suffixes).lower()
+    if sys.platform == "win32":
+        if suffixes.endswith(".zip"):
+            log("Staging the portable update; BlindDL will restart itself.")
+            return _portable_windows_update(package_path, update.version)
+        log("Starting the BlindDL installer...")
+        subprocess.Popen([str(package_path)], **_subprocess_options())
+        return True
+    if sys.platform == "darwin":
+        log("Opening the update disk image. Replace BlindDL in Applications.")
+        subprocess.Popen(["open", str(package_path)])
+        return False
+    if suffixes.endswith(".deb"):
+        if shutil.which("pkexec"):
+            log("Starting the system package installer...")
+            subprocess.Popen(["pkexec", "apt-get", "install", "-y",
+                              str(package_path)])
+            return True
+        log("Opening the package in your system installer...")
+        subprocess.Popen(["xdg-open", str(package_path)])
+        return False
+    if suffixes.endswith(".tar.gz"):
+        stage = package_path.parent / "linux-portable"
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir()
+        with tarfile.open(package_path, "r:gz") as package:
+            package.extractall(stage, filter="data")
+        installer = next(stage.glob("*/install.sh"), None)
+        if installer is None:
+            raise UpdateError("The Linux update does not contain install.sh.")
+        log("Starting the BlindDL user installer...")
+        subprocess.Popen(["sh", str(installer)], cwd=installer.parent)
+        return True
+    raise UpdateError(f"Cannot install update package: {package_path.name}")
 
 
 def _run(cmd, log, timeout=1800):
@@ -145,6 +422,9 @@ def _installed_versions():
 
 def update_winget_packages(log):
     """Upgrade external tools through the platform package manager."""
+    if getattr(sys, "frozen", False):
+        log("Deno and FFmpeg are built into blindDL and update with the app.")
+        return
     if sys.platform == "win32":
         if shutil.which("winget") is None:
             log("winget not found; skipping Deno/ffmpeg updates.")
@@ -166,6 +446,9 @@ def ensure_deno(log):
     """Make sure Deno is installed at all (yt-dlp needs it for YouTube)."""
     if shutil.which("deno") is not None:
         return True
+    if getattr(sys, "frozen", False):
+        log("The bundled Deno runtime is missing. Reinstall or update blindDL.")
+        return False
     log("Deno is not installed; installing it now (required by yt-dlp for YouTube)...")
     if sys.platform == "win32" and shutil.which("winget"):
         return _run([

@@ -905,15 +905,33 @@ class SearchPanel(wx.Panel):
         if not urls:
             self.frame.announce("No URL for that result.")
             return
-        if not wx.TheClipboard.Open():
-            self.frame.announce("Could not open the clipboard.")
+        copied = False
+        for attempt in range(20):
+            # Clipboard managers and screen readers can hold OpenClipboard for
+            # a few milliseconds. Suppress the transient wx error and retry
+            # for up to half a second instead of making Ctrl+C randomly fail.
+            silence = wx.LogNull()
+            try:
+                opened = wx.TheClipboard.Open()
+            finally:
+                del silence
+            if opened:
+                try:
+                    set_ok = bool(wx.TheClipboard.SetData(
+                        wx.TextDataObject("\n".join(urls))))
+                    if set_ok:
+                        # Keep the URL on the clipboard after blindDL exits.
+                        copied = bool(wx.TheClipboard.Flush())
+                finally:
+                    wx.TheClipboard.Close()
+                if copied:
+                    break
+            if attempt < 19:
+                time.sleep(0.025)
+        if not copied:
+            self.frame.announce(
+                "The clipboard is busy. Wait a moment and press Control+C again.")
             return
-        try:
-            wx.TheClipboard.SetData(wx.TextDataObject("\n".join(urls)))
-            # Keep the URL on the clipboard after blindDL exits.
-            wx.TheClipboard.Flush()
-        finally:
-            wx.TheClipboard.Close()
         noun = "URL" if len(urls) == 1 else "URLs"
         message = f"Copied {len(urls)} {noun}."
         if missing:

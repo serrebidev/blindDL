@@ -9,6 +9,8 @@ column: Ctrl+Tab moves between them, and each page is short enough to read
 end to end without losing your place.
 """
 
+import sys
+
 import wx
 
 from .. import torrent_engine
@@ -337,8 +339,12 @@ class SettingsDialog(wx.Dialog):
         self.tray_minimize_check.SetHelpText(
             "Off puts the minimized window on the taskbar as usual.")
 
-        self.update_check = wx.CheckBox(
-            page, label="&Update download tools automatically")
+        update_label = (
+            "&Check for BlindDL updates automatically"
+            if getattr(sys, "frozen", False)
+            else "&Update download tools automatically"
+        )
+        self.update_check = wx.CheckBox(page, label=update_label)
         self.update_check.SetValue(bool(config["auto_update"]))
 
         cookies_label = wx.StaticText(

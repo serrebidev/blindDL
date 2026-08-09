@@ -76,6 +76,15 @@ def verify_application() -> None:
     if sys.platform == "win32":
         environment["APPDATA"] = str(self_test_data / "roaming")
         environment["LOCALAPPDATA"] = str(self_test_data / "local")
+        # Prove the application is self-contained. The executable, embedded
+        # Python, Deno, FFmpeg and VLC must all work without inheriting the
+        # developer machine's Python, Git, winget or other tool directories.
+        windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        environment["PATH"] = os.pathsep.join(
+            str(path) for path in (windows / "System32", windows) if path.is_dir()
+        )
+        environment.pop("PYTHONHOME", None)
+        environment.pop("PYTHONPATH", None)
     else:
         environment["XDG_CONFIG_HOME"] = str(self_test_data / "config")
         environment["XDG_CACHE_HOME"] = str(self_test_data / "cache")

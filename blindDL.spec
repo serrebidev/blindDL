@@ -107,12 +107,15 @@ for package in ADULT_MODULES:
     hiddenimports += package_hidden
     hiddenimports.append(package)
 
-# libtorrent powers the optional in-app torrent engine. It is one binary
-# extension module, so naming it is enough -- and it is only named when the
-# build machine actually has it, because it publishes no wheel for the newest
-# Python releases and a release build must not fail over an optional feature.
-if importlib.util.find_spec("libtorrent") is not None:
-    hiddenimports.append("libtorrent")
+# libtorrent powers the in-app torrent engine. Source checkouts may still run
+# without it, but every distributed application must contain it: a frozen app
+# cannot add a CPython extension later with pip.
+if importlib.util.find_spec("libtorrent") is None:
+    raise RuntimeError(
+        "libtorrent is required for a complete blindDL release. Build with "
+        "a Python version for which libtorrent publishes a wheel."
+    )
+hiddenimports.append("libtorrent")
 
 for distribution in (
     "wxPython",
@@ -165,8 +168,11 @@ def find_tool(tool_name):
 
 for tool_name in tool_names:
     tool_path = find_tool(tool_name)
-    if tool_path:
-        binaries.append((tool_path, "tools"))
+    if not tool_path:
+        raise RuntimeError(
+            f"{tool_name} was not found; refusing to make an incomplete release"
+        )
+    binaries.append((tool_path, "tools"))
 
 
 def collect_vlc_runtime():
@@ -205,6 +211,14 @@ def collect_vlc_runtime():
 
 
 collect_vlc_runtime()
+if sys.platform in ("win32", "darwin") and not any(
+    Path(source).name.lower() in {"libvlc.dll", "libvlc.dylib"}
+    for source, _destination in binaries
+):
+    raise RuntimeError(
+        "The VLC runtime was not found; refusing to make a release without "
+        "built-in media playback"
+    )
 
 a = Analysis(
     [str(ROOT / "main.py")],

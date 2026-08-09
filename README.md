@@ -19,6 +19,8 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.
+- Checks for new BlindDL releases, verifies the download checksum, and starts
+  the correct platform update from inside the app.
 - Uses native controls, labeled fields, status-bar announcements, context menus, and complete keyboard operation.
 
 Optional adult and account-based sites are supported and switched off by default; see [docs/optional-sites.md](docs/optional-sites.md) if you want them.
@@ -32,10 +34,21 @@ Grab the latest build from the [Releases page](https://github.com/serrebidev/bli
 1. Download `blindDL-Setup-vX.Y.Z-windows-x64.exe`.
 2. Run it to install BlindDL and add it to the Start Menu.
 
+The installer contains BlindDL's private Python runtime, libtorrent, Deno,
+FFmpeg, FFprobe, and VLC. You do not need to install Python, pip, a torrent
+client, media tools, or developer software.
+
 **Windows portable**
 
 1. Download `blindDL-vX.Y.Z-windows-x64.zip`.
 2. Extract it anywhere and run `blindDL.exe` — no installation required.
+
+The portable ZIP contains the same complete runtime as the installer.
+
+Bundled components update together through BlindDL releases, so updating the
+app also updates yt-dlp, music and site backends, libtorrent, Deno, FFmpeg, and
+the media runtime. Release builds pull the current dependency and yt-dlp
+pre-release versions before packaging them.
 
 **macOS**
 
@@ -48,14 +61,14 @@ Grab the latest build from the [Releases page](https://github.com/serrebidev/bli
 1. Download the `.deb` matching your processor: `amd64` for most PCs or `arm64` for ARM computers.
 2. Install it with `sudo apt install ./blinddl_*.deb`.
 
-The Debian packages are built on Ubuntu 24.04 for current Debian-family distributions and install FFmpeg as a system dependency.
+The Debian packages are built on Ubuntu 24.04 for current Debian-family distributions. `apt` installs their native media-library dependencies automatically; Python and pip are not required.
 
 **Other Linux distributions**
 
 1. Download the matching Linux `.tar.gz`.
 2. Extract it and run `./install.sh`.
 
-The installer sets BlindDL up for your user account and can obtain FFmpeg through apt, dnf, pacman, or zypper when needed. Packaged releases include Deno; Windows and macOS builds also include FFmpeg.
+The installer sets BlindDL up for your user account and obtains native media libraries through apt, dnf, pacman, or zypper when needed. Packaged releases contain BlindDL's Python runtime and Deno; Windows and macOS builds also contain FFmpeg, FFprobe, libtorrent, and VLC.
 
 ## Run from source
 

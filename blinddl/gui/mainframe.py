@@ -5,6 +5,7 @@
 """Main window: notebook tabs, menus, status bar, queue/subscription wiring."""
 
 import os
+import sys
 import threading
 import time
 
@@ -242,9 +243,8 @@ class MainFrame(wx.Frame):
     def _apply_torrent_setting(self):
         """Follow up on the torrent engine setting once Settings is closed.
 
-        libtorrent is not a blindDL dependency -- most people never turn the
-        engine on -- so the package is fetched the first time somebody asks
-        for it rather than at install time.
+        Releases contain libtorrent. Source checkouts can still add it on
+        demand, which keeps contributor setup flexible.
         """
         if not self.config["torrent_engine"]:
             return
@@ -253,6 +253,11 @@ class MainFrame(wx.Frame):
             # is already running; a new one picks them up when it starts.
             if torrent_engine.running():
                 torrent_engine.engine(self.config)
+            return
+        if getattr(sys, "frozen", False):
+            self.config["torrent_engine"] = False
+            self.config.save()
+            self._report_engine_failure()
             return
         answer = wx.MessageBox(
             "Downloading torrents in blindDL needs the libtorrent package, "
@@ -304,8 +309,11 @@ class MainFrame(wx.Frame):
     def on_check_updates(self, event):
         dialog = UpdateDialog(self, on_changed=lambda: self.announce(
             "Tools updated. Restart blindDL."))
-        dialog.ShowModal()
+        result = dialog.ShowModal()
         dialog.Destroy()
+        if result == wx.ID_OK:
+            self._quitting = True
+            self.Close()
 
     def on_check_subs(self, event):
         self.announce("Checking all subscriptions...")
@@ -434,6 +442,15 @@ class MainFrame(wx.Frame):
             lines.append(line)
 
         try:
+            if getattr(sys, "frozen", False):
+                update = updater.check_for_app_update(log)
+                if update is not None:
+                    wx.CallAfter(
+                        self.announce,
+                        f"BlindDL {update.version} is available. Use Tools, "
+                        "Check for updates to install it.",
+                    )
+                return
             updater.ensure_deno(log)
             changed = updater.run_full_update(log)
         except Exception:  # noqa: BLE001 - background best effort

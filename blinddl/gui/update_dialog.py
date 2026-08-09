@@ -2,8 +2,9 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Update dialog: shows live progress while dependencies are updated."""
+"""Accessible application and source-dependency update dialog."""
 
+import sys
 import threading
 
 import wx
@@ -20,14 +21,21 @@ class UpdateDialog(wx.Dialog):
         self.log_text = wx.TextCtrl(
             self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
         self.log_text.SetName("Update log")
+        self.install_btn = wx.Button(self, label="&Download and install update")
+        self.install_btn.Bind(wx.EVT_BUTTON, self._on_install)
+        self.install_btn.Hide()
         self.close_btn = wx.Button(self, wx.ID_CLOSE, "&Close")
         self.close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
         self.close_btn.Disable()
 
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        buttons.Add(self.install_btn, 0, wx.RIGHT, 8)
+        buttons.Add(self.close_btn, 0)
         sizer.Add(self.log_text, 1, wx.EXPAND | wx.ALL, 8)
-        sizer.Add(self.close_btn, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
+        sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizer(sizer)
 
+        self.update = None
         threading.Thread(target=self._run, daemon=True).start()
 
     def _log(self, line):
@@ -35,14 +43,55 @@ class UpdateDialog(wx.Dialog):
 
     def _run(self):
         try:
-            changed = updater.run_full_update(self._log)
+            if getattr(sys, "frozen", False):
+                self.update = updater.check_for_app_update(self._log)
+                changed = False
+            else:
+                changed = updater.run_full_update(self._log)
         except Exception as exc:  # noqa: BLE001 - shown to the user
             self._log(f"Update failed: {exc}")
             changed = False
         wx.CallAfter(self._finished, changed)
 
     def _finished(self, changed):
+        if self.update is not None:
+            self.install_btn.Show()
+            self.install_btn.Enable()
+            self.GetSizer().Layout()
         self.close_btn.Enable()
-        self.close_btn.SetFocus()
+        (self.install_btn if self.update is not None
+         else self.close_btn).SetFocus()
         if changed and self.on_changed is not None:
             self.on_changed()
+
+    def _on_install(self, event):
+        if self.update is None:
+            return
+        self.install_btn.Disable()
+        self.close_btn.Disable()
+        threading.Thread(
+            target=self._install, daemon=True, name="blinddl-self-update"
+        ).start()
+
+    def _install(self):
+        try:
+            package = updater.download_app_update(self.update, self._log)
+            exit_to_update = updater.install_app_update(
+                self.update, package, self._log)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self._log(f"Update failed: {exc}")
+            wx.CallAfter(self._install_failed)
+            return
+        wx.CallAfter(self._install_started, exit_to_update)
+
+    def _install_failed(self):
+        self.install_btn.Enable()
+        self.close_btn.Enable()
+        self.install_btn.SetFocus()
+
+    def _install_started(self, exit_to_update):
+        if exit_to_update:
+            self.EndModal(wx.ID_OK)
+            return
+        self.close_btn.Enable()
+        self.close_btn.SetFocus()

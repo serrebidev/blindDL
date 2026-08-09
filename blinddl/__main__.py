@@ -25,7 +25,7 @@ def _flush_standard_streams() -> None:
 
 
 def _self_test(output_path: str) -> int:
-    """Exercise imports and bundled tools without creating a GUI."""
+    """Exercise every packaged feature without creating a GUI."""
     results: dict[str, object] = {}
     failures: list[str] = []
 
@@ -35,10 +35,24 @@ def _self_test(output_path: str) -> int:
         except Exception as exc:  # noqa: BLE001 - diagnostic boundary
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
 
+    def frozen_runtime():
+        if not getattr(sys, "frozen", False):
+            raise RuntimeError("the application is using a system Python")
+        return f"embedded Python {sys.version.split()[0]}"
+
+    check("runtime", frozen_runtime)
     check("wx", lambda: __import__("wx").version())
+    check("wx_media", lambda: __import__(
+        "wx.media", fromlist=["MediaCtrl"]).__name__)
     check("yt_dlp", lambda: __import__("yt_dlp.version", fromlist=["__version__"]).__version__)
     check("sideb", lambda: __import__("sideb.app.main", fromlist=["Application"]).__name__)
     check("crypto", lambda: __import__("Crypto.Cipher.Blowfish", fromlist=["new"]).__name__)
+    check("libtorrent", lambda: __import__("libtorrent").__version__)
+    check("audiobooker", lambda: __import__("audiobooker").__name__)
+    check("curl_cffi", lambda: __import__("curl_cffi").__version__)
+    check("lxml", lambda: ".".join(map(
+        str, __import__("lxml.etree", fromlist=["LXML_VERSION"]).LXML_VERSION)))
+    check("requests", lambda: __import__("requests").__version__)
 
     def vlc_runtime():
         from .gui.media_player import vlc
@@ -78,7 +92,7 @@ def _self_test(output_path: str) -> int:
 
     check("adult_providers", adult_providers)
 
-    for tool in ("deno", "ffmpeg"):
+    for tool in ("deno", "ffmpeg", "ffprobe"):
         check(tool, lambda tool=tool: shutil.which(tool) or (_ for _ in ()).throw(
             RuntimeError(f"{tool} was not found")
         ))

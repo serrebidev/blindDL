@@ -146,6 +146,13 @@ def version():
 
 def install_hint():
     """What to tell the user when libtorrent will not import."""
+    if getattr(sys, "frozen", False):
+        return (
+            "This blindDL installation is missing its built-in libtorrent "
+            "engine. Reinstall or update blindDL; Python and pip are not "
+            "required. Until then, turn this setting off to open torrents "
+            "in your usual BitTorrent client."
+        )
     python = f"{sys.version_info.major}.{sys.version_info.minor}"
     return (
         "The libtorrent package is not installed, so blindDL cannot download "

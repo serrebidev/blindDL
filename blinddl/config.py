@@ -141,7 +141,8 @@ DEFAULTS = {
     "tray_on_minimize": True,
     # How often subscriptions are checked for new items, in hours.
     "sub_check_hours": 6,
-    # Automatically update yt-dlp, musicdl, wxPython, Deno and ffmpeg.
+    # Automatically check runtime components. Frozen builds update them only
+    # as part of a complete blindDL release.
     "auto_update": True,
     # Minimum hours between automatic update checks.
     "update_check_hours": 24,

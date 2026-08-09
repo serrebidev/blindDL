@@ -61,14 +61,24 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui.subs_panel import SubsPanel
 
 
-def _clipboard_text():
-    data = wx.TextDataObject()
-    wx.TheClipboard.Open()
-    try:
-        wx.TheClipboard.GetData(data)
-    finally:
-        wx.TheClipboard.Close()
-    return data.GetText()
+class _Clipboard:
+    """In-memory clipboard so tests never contend with the user's clipboard."""
+
+    def __init__(self):
+        self.text = ""
+
+    def Open(self):
+        return True
+
+    def SetData(self, data):
+        self.text = data.GetText()
+        return True
+
+    def Flush(self):
+        return True
+
+    def Close(self):
+        return None
 
 
 class _Queue:
@@ -293,19 +303,22 @@ class GuiInteractionTests(unittest.TestCase):
         for row, item in enumerate(panel.results):
             panel.results_list.InsertItem(row, item["title"])
 
-        panel.results_list.Select(0)
-        panel.on_copy_url(None)
-        self.assertEqual(_clipboard_text(), "https://www.eporner.com/video-one/")
-        self.assertEqual(self.frame.messages[-1], "Copied 1 URL.")
+        clipboard = _Clipboard()
+        with mock.patch.object(wx, "TheClipboard", clipboard):
+            panel.results_list.Select(0)
+            panel.on_copy_url(None)
+            self.assertEqual(
+                clipboard.text, "https://www.eporner.com/video-one/")
+            self.assertEqual(self.frame.messages[-1], "Copied 1 URL.")
 
-        panel.results_list.Select(1)
-        panel.results_list.Select(2)
-        panel.on_copy_url(None)
-        self.assertEqual(
-            _clipboard_text(),
-            "https://www.eporner.com/video-one/\n"
-            "https://www.eporner.com/video-two/",
-        )
+            panel.results_list.Select(1)
+            panel.results_list.Select(2)
+            panel.on_copy_url(None)
+            self.assertEqual(
+                clipboard.text,
+                "https://www.eporner.com/video-one/\n"
+                "https://www.eporner.com/video-two/",
+            )
         self.assertEqual(self.frame.messages[-1], "Copied 2 URLs. 1 had no URL.")
 
     def test_copy_url_reports_when_no_result_has_a_link(self):
