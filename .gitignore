@@ -19,6 +19,8 @@ release/
 # Local application and smoke-test data
 .dlhistory
 .smoke_*/
+.freebuff/
+AGENTS.md
 *.log
 *.pkl
 *.mp3
