@@ -57,6 +57,19 @@ for package in (
     binaries += package_binaries
     hiddenimports += package_hidden
 
+# aioslsk keeps its share index and transfer list in a ``shelve``, and shelve
+# resolves its storage backend by importing a name held in a plain string
+# list.  Nothing in that is visible to PyInstaller's import analysis, so the
+# only source of these modules is its stock hook-shelve -- which still lists
+# just the three backends that existed before Python 3.13 added dbm.sqlite3
+# and made it the default.  Leaving it out is what stopped Soulseek working
+# in released builds while source checkouts were fine.
+hiddenimports += [
+    backend
+    for backend in ("dbm.sqlite3", "dbm.dumb", "dbm.gnu", "dbm.ndbm")
+    if importlib.util.find_spec(backend) is not None
+]
+
 
 def collect_package_from_filesystem(package_name):
     """Collect a package without importing it in PyInstaller's helper process."""

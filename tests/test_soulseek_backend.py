@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+import dbm
 import json
+import shelve
+import sys
 import tempfile
 import threading
 import unittest
@@ -413,6 +416,94 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
         friends = await service._change_friend(snapshot, "ALICE", False)
         self.assertEqual(client.settings.users.friends, {"bob"})
         self.assertEqual([friend["username"] for friend in friends], ["bob"])
+
+
+class SoulseekCacheDirectoryTests(unittest.TestCase):
+    """The shelve caches must never be shared between Python versions.
+
+    aioslsk stores its share index with ``shelve``, whose ``dbm`` backend is
+    whatever the running interpreter happens to offer. A frozen build carries
+    its own Python, so it is regularly a different version from a source
+    checkout, and 3.13 changed the default backend to one older interpreters
+    cannot read. Sharing a directory made released builds fail to connect on
+    any machine that had run blindDL from source.
+    """
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        patcher = mock.patch.object(
+            soulseek_backend, "app_data_dir", return_value=self.root.name
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_cache_directory_is_scoped_to_the_running_python(self):
+        path = Path(soulseek_backend._cache_dir())
+        expected = f"soulseek-py{sys.version_info.major}{sys.version_info.minor}"
+
+        self.assertEqual(path.name, expected)
+        self.assertTrue(path.is_dir())
+
+    def test_a_readable_cache_is_carried_forward(self):
+        legacy = Path(self.root.name) / "soulseek"
+        legacy.mkdir()
+        with shelve.open(str(legacy / "shares_index"), "c") as database:
+            database["index"] = []
+        (legacy / "transfers").write_bytes(b"")
+
+        migrated = Path(soulseek_backend._cache_dir())
+
+        self.assertTrue(any(migrated.iterdir()))
+        self.assertTrue((migrated / "transfers").is_file())
+        # The originals stay put; an older build may still be relying on them.
+        self.assertTrue((legacy / "transfers").is_file())
+
+    def test_a_cache_this_python_cannot_read_is_left_behind(self):
+        legacy = Path(self.root.name) / "soulseek"
+        legacy.mkdir()
+        (legacy / "shares_index").write_bytes(b"SQLite format 3\x00")
+
+        with mock.patch.object(
+            soulseek_backend.dbm, "whichdb", return_value="dbm.nonexistent"
+        ):
+            migrated = Path(soulseek_backend._cache_dir())
+
+        self.assertEqual(list(migrated.iterdir()), [])
+
+    def test_an_unrecognized_cache_is_left_behind(self):
+        legacy = Path(self.root.name) / "soulseek"
+        legacy.mkdir()
+        (legacy / "shares_index").write_bytes(b"not a database")
+
+        migrated = Path(soulseek_backend._cache_dir())
+
+        self.assertEqual(list(migrated.iterdir()), [])
+
+    def test_probe_opens_the_caches_and_names_the_backend(self):
+        result = soulseek_backend.runtime_probe()
+
+        self.assertIn("aioslsk backend and persistent caches", result)
+        # A build whose dbm backends are incomplete cannot reach this point.
+        self.assertRegex(result, r"\(dbm\.\w+\)$")
+
+    def test_probe_rejects_a_build_with_no_usable_dbm_backend(self):
+        with mock.patch.object(soulseek_backend.dbm, "whichdb", return_value=""):
+            with self.assertRaises(soulseek_backend.SoulseekError) as caught:
+                soulseek_backend.runtime_probe()
+
+        self.assertIn("dbm backends are incomplete", str(caught.exception))
+
+    def test_probe_reports_a_missing_backend_instead_of_a_raw_dbm_error(self):
+        missing = dbm.error[0]("db type is dbm.sqlite3, but the module is not available")
+        with mock.patch.object(
+            soulseek_backend.SharesShelveCache, "read", side_effect=missing
+        ):
+            with self.assertRaises(soulseek_backend.SoulseekError) as caught:
+                soulseek_backend.runtime_probe()
+
+        self.assertIn("dbm.sqlite3", str(caught.exception))
+        self.assertIn("dbm backends are incomplete", str(caught.exception))
 
 
 if __name__ == "__main__":

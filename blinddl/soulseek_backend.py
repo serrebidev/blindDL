@@ -13,11 +13,14 @@ those worker threads into that loop.
 from __future__ import annotations
 
 import asyncio
+import dbm
 import json
 import logging
 import ntpath
 import os
+import shutil
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -154,8 +157,56 @@ def available() -> bool:
     return SoulSeekClient is not None
 
 
+def _cache_dir(name: str = "soulseek") -> str:
+    """Return a shelve cache directory private to this Python version.
+
+    aioslsk stores its share index and transfer list with ``shelve``, which
+    chooses a ``dbm`` backend from whatever the running interpreter offers.
+    A frozen build embeds its own Python, so it is routinely a different
+    version from the one a source checkout runs -- and 3.13 made
+    ``dbm.sqlite3`` the default, which older interpreters cannot read at all.
+    Sharing one directory therefore lets whichever ran first write a database
+    the other reports as "db type could not be determined". Giving each
+    version its own directory keeps them from ever meeting.
+    """
+    version = f"py{sys.version_info.major}{sys.version_info.minor}"
+    path = os.path.join(app_data_dir(), f"{name}-{version}")
+    if not os.path.isdir(path):
+        os.makedirs(path, exist_ok=True)
+        _migrate_cache(os.path.join(app_data_dir(), name), path)
+    return path
+
+
+def _migrate_cache(source: str, target: str) -> None:
+    """Carry a pre-versioning cache forward when this Python can read it.
+
+    Queued transfers live in that cache, so it is worth keeping. A database
+    written by an incompatible interpreter is left where it is; abandoning it
+    is exactly what fixes the failure this split exists to prevent.
+    """
+    index = os.path.join(source, SharesShelveCache.DEFAULT_FILENAME)
+    try:
+        backend = dbm.whichdb(index)
+    except OSError:
+        return
+    # None means unreadable; "" means an unrecognized format. Either way the
+    # files are not ours to reuse.
+    if not backend:
+        return
+    try:
+        __import__(backend)
+    except ImportError:
+        return
+    try:
+        for entry in os.scandir(source):
+            if entry.is_file():
+                shutil.copy2(entry.path, os.path.join(target, entry.name))
+    except OSError:
+        logger.exception("could not migrate the Soulseek cache from %s", source)
+
+
 def runtime_probe() -> str:
-    """Verify the complete backend can be constructed in a frozen build."""
+    """Verify the complete backend really works in a frozen build."""
     if not available():
         detail = f" ({_IMPORT_ERROR})" if _IMPORT_ERROR else ""
         raise SoulseekError(
@@ -164,10 +215,31 @@ def runtime_probe() -> str:
     settings = Settings(
         credentials=CredentialsSettings(username="blinddl-self-test", password="test")
     )
-    cache_dir = os.path.join(app_data_dir(), "soulseek-self-test")
-    os.makedirs(cache_dir, exist_ok=True)
+    cache_dir = _cache_dir("soulseek-self-test")
     shares_cache = SharesShelveCache(cache_dir)
     transfer_cache = TransferShelveCache(cache_dir)
+    # Constructing these only records a directory name. aioslsk opens the
+    # shelve later, inside client.start(), and shelve resolves its dbm backend
+    # by importing a name held in a plain string list -- something PyInstaller
+    # cannot see and so has historically left out of the build. Round-trip
+    # both caches here so a missing backend fails the release instead of
+    # surfacing as an empty Soulseek search for the user.
+    try:
+        shares_cache.write(shares_cache.read())
+        transfer_cache.write(transfer_cache.read())
+        backend = dbm.whichdb(
+            os.path.join(cache_dir, SharesShelveCache.DEFAULT_FILENAME)
+        )
+    except dbm.error as exc:
+        raise SoulseekError(
+            f"The Soulseek cache could not be opened ({exc}); this build's "
+            "dbm backends are incomplete."
+        ) from exc
+    if not backend:
+        raise SoulseekError(
+            "The Soulseek cache was written in a format this build cannot "
+            "identify; its dbm backends are incomplete."
+        )
     client = SoulSeekClient(
         settings,
         shares_cache=shares_cache,
@@ -175,7 +247,7 @@ def runtime_probe() -> str:
     )
     if client is None:
         raise SoulseekError("The bundled Soulseek client could not be constructed.")
-    return "aioslsk backend and persistent caches"
+    return f"aioslsk backend and persistent caches ({backend})"
 
 
 async def _verify_account_async(username: str, password: str, timeout: float):
@@ -842,8 +914,7 @@ class _Service:
 
             await self._stop_client()
             settings = _build_settings(snapshot)
-            cache_dir = os.path.join(app_data_dir(), "soulseek")
-            os.makedirs(cache_dir, exist_ok=True)
+            cache_dir = _cache_dir()
             client = SoulSeekClient(
                 settings,
                 shares_cache=SharesShelveCache(cache_dir),
