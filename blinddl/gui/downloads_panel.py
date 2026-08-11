@@ -106,7 +106,8 @@ class DownloadsPanel(wx.Panel):
         cancel.Enable(any(item.status in ACTIVE_STATUSES for item in selected))
         stop_seeding.Enable(bool(self._seeding_keys(selected)))
         clear_finished.Enable(any(
-            item.status in FINISHED_STATUSES for item in self.frame.queue.items))
+            item.status in FINISHED_STATUSES and not item.seeding
+            for item in self.frame.queue.items))
         clear_selection.Enable(bool(selected))
         select_all.Enable(
             self.list.GetSelectedItemCount() < self.list.GetItemCount())
@@ -165,15 +166,18 @@ class DownloadsPanel(wx.Panel):
         if not stopping:
             self.frame.announce("None of the selected downloads are seeding.")
             return
-        stopped = [title for key, title in stopping
-                   if torrent_engine.stop_seeding(key)]
+        stopped = []
+        for key, title in stopping:
+            if torrent_engine.stop_seeding(key):
+                self.frame.queue.mark_torrent_stopped(key, title)
+                stopped.append(title)
         if len(stopped) == 1:
             self.frame.announce(f"Stopped seeding: {stopped[0]}")
         else:
             self.frame.announce(f"Stopped seeding {len(stopped)} torrents.")
 
     def on_clear(self, event):
-        count = sum(item.status in FINISHED_STATUSES
+        count = sum(item.status in FINISHED_STATUSES and not item.seeding
                     for item in self.frame.queue.items)
         self.frame.queue.remove_finished()
         self.refresh_all()

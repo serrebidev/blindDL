@@ -13,6 +13,7 @@ those worker threads into that loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import ntpath
 import os
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import app_data_dir
+
+_IMPORT_ERROR: ImportError | None = None
 
 try:
     from aioslsk.client import SoulSeekClient
@@ -58,7 +61,8 @@ try:
     from aioslsk.shares.cache import SharesShelveCache
     from aioslsk.transfer.cache import TransferShelveCache
     from aioslsk.transfer.state import TransferState
-except ImportError:  # pragma: no cover - dependency is included in releases
+except ImportError as exc:  # pragma: no cover - dependency is included in releases
+    _IMPORT_ERROR = exc
     SoulSeekClient = None
 
 
@@ -150,11 +154,37 @@ def available() -> bool:
     return SoulSeekClient is not None
 
 
+def runtime_probe() -> str:
+    """Verify the complete backend can be constructed in a frozen build."""
+    if not available():
+        detail = f" ({_IMPORT_ERROR})" if _IMPORT_ERROR else ""
+        raise SoulseekError(
+            "The bundled Soulseek backend could not be loaded" + detail + "."
+        )
+    settings = Settings(
+        credentials=CredentialsSettings(username="blinddl-self-test", password="test")
+    )
+    cache_dir = os.path.join(app_data_dir(), "soulseek-self-test")
+    os.makedirs(cache_dir, exist_ok=True)
+    shares_cache = SharesShelveCache(cache_dir)
+    transfer_cache = TransferShelveCache(cache_dir)
+    client = SoulSeekClient(
+        settings,
+        shares_cache=shares_cache,
+        transfer_cache=transfer_cache,
+    )
+    if client is None:
+        raise SoulseekError("The bundled Soulseek client could not be constructed.")
+    return "aioslsk backend and persistent caches"
+
+
 async def _verify_account_async(username: str, password: str, timeout: float):
     if not available():
+        detail = f" ({_IMPORT_ERROR})" if _IMPORT_ERROR else ""
         raise SoulseekError(
-            "The aioslsk package is missing. Reinstall blindDL to restore "
-            "Soulseek support."
+            "The bundled Soulseek backend could not be loaded"
+            + detail
+            + ". Reinstall blindDL to restore Soulseek support."
         )
     settings = Settings(
         credentials=CredentialsSettings(username=username, password=password)
@@ -227,6 +257,15 @@ def _config_snapshot(config) -> dict[str, Any]:
             continue
         seen_rooms.add(key)
         rooms.append(room)
+    private_rooms = []
+    seen_private_rooms = set()
+    for value in config.get("soulseek_private_rooms", []) or []:
+        room = str(value or "").strip()
+        key = room.casefold()
+        if not room or key in seen_private_rooms:
+            continue
+        seen_private_rooms.add(key)
+        private_rooms.append(room)
     friends = []
     seen_friends = set()
     for value in config.get("soulseek_friends", []) or []:
@@ -262,6 +301,7 @@ def _config_snapshot(config) -> dict[str, Any]:
         "download_kib": int(config.get("soulseek_max_download_kib", 0)),
         "max_results": int(config.get("soulseek_max_results", 500)),
         "rooms": rooms,
+        "private_rooms": private_rooms,
         "friends": friends,
         "priority_users": priority_users,
     }
@@ -271,15 +311,17 @@ def _signature(snapshot: dict[str, Any]) -> tuple:
     return tuple(
         (key, tuple(value) if isinstance(value, list) else value)
         for key, value in sorted(snapshot.items())
-        if key not in {"friends", "priority_users", "rooms"}
+        if key not in {"friends", "priority_users", "rooms", "private_rooms"}
     )
 
 
 def _build_settings(snapshot: dict[str, Any]):
     if not available():
+        detail = f" ({_IMPORT_ERROR})" if _IMPORT_ERROR else ""
         raise SoulseekError(
-            "The aioslsk package is missing. Reinstall blindDL to restore "
-            "Soulseek support."
+            "The bundled Soulseek backend could not be loaded"
+            + detail
+            + ". Reinstall blindDL to restore Soulseek support."
         )
     if not snapshot["username"] or not snapshot["password"]:
         raise SoulseekError(
@@ -411,7 +453,7 @@ def _result_item(result, file_data) -> dict[str, Any]:
 
 
 class _Service:
-    def __init__(self):
+    def __init__(self, history_path=None):
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
@@ -431,6 +473,80 @@ class _Service:
         self._friends: dict[str, dict[str, str]] = {}
         self._configured_friends: set[str] = set()
         self._uploads: list[dict[str, Any]] = []
+        self._history_path = os.fspath(history_path) if history_path else None
+        self._load_history()
+
+    @staticmethod
+    def _clean_history_rows(rows, kind):
+        if not isinstance(rows, list):
+            return []
+        required = ("timestamp", "message")
+        cleaned = []
+        for row in rows[-2000:]:
+            if not isinstance(row, dict) or any(key not in row for key in required):
+                continue
+            if kind == "room" and not all(key in row for key in ("room", "user")):
+                continue
+            if kind == "private" and "user" not in row:
+                continue
+            try:
+                timestamp = int(row["timestamp"])
+            except (TypeError, ValueError):
+                continue
+            cleaned_row = {
+                "timestamp": timestamp,
+                "user": str(row.get("user") or ""),
+                "message": str(row.get("message") or ""),
+                "outgoing": bool(row.get("outgoing", False)),
+            }
+            if kind == "room":
+                cleaned_row["room"] = str(row.get("room") or "")
+            cleaned.append(cleaned_row)
+        return cleaned
+
+    def _load_history(self):
+        if not self._history_path:
+            return
+        try:
+            with open(self._history_path, encoding="utf-8") as handle:
+                document = json.load(handle)
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if not isinstance(document, dict):
+            return
+        self._room_messages = self._clean_history_rows(
+            document.get("room_messages"), "room"
+        )
+        self._private_messages = self._clean_history_rows(
+            document.get("private_messages"), "private"
+        )
+
+    def _save_history(self):
+        if not self._history_path:
+            return
+        with self._state_lock:
+            document = {
+                "version": 1,
+                "room_messages": list(self._room_messages),
+                "private_messages": list(self._private_messages),
+            }
+        temporary = self._history_path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self._history_path)), exist_ok=True)
+            with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(document, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary, self._history_path)
+        except OSError:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
     def add_listener(self, listener: Callable[[dict[str, Any]], None]):
         with self._listeners_lock:
@@ -590,12 +706,14 @@ class _Service:
         with self._state_lock:
             self._room_messages.append(data)
             del self._room_messages[:-2000]
+        self._save_history()
         self._emit({"type": "room_message", "message": dict(data)})
 
     def _append_private_message(self, data):
         with self._state_lock:
             self._private_messages.append(data)
             del self._private_messages[:-2000]
+        self._save_history()
         self._emit({"type": "private_message", "message": dict(data)})
 
     def _on_room_list(self, event):
@@ -1219,7 +1337,7 @@ class _Service:
             self._thread = None
 
 
-_SERVICE = _Service()
+_SERVICE = _Service(os.path.join(app_data_dir(), "soulseek-history.json"))
 
 
 def configure(config, timeout: float = 30.0):

@@ -39,7 +39,19 @@ datas = [
 binaries = []
 hiddenimports = []
 
-for package in ("mutagen", "audiobooker", "mediavocab", "aioslsk"):
+# Keep optional-at-runtime backends and their complete dependency trees in the
+# standalone application.  PyInstaller can otherwise miss modules imported by
+# pydantic settings or UPnP adapters only after Soulseek is enabled.
+for package in (
+    "mutagen",
+    "audiobooker",
+    "mediavocab",
+    "aioslsk",
+    "aiofiles",
+    "async_timeout",
+    "async_upnp_client",
+    "multidict",
+):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries

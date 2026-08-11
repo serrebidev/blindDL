@@ -132,7 +132,13 @@ class UploadsPanel(wx.Panel):
         stopped = 0
         for row in rows:
             if row.get("service") == "BitTorrent":
-                stopped += bool(torrent_engine.stop_seeding(row.get("key", "")))
+                key = row.get("key", "")
+                did_stop = torrent_engine.stop_seeding(key)
+                if did_stop:
+                    self.frame.queue.mark_torrent_stopped(
+                        key, row.get("title", "")
+                    )
+                stopped += bool(did_stop)
             elif row.get("service") == soulseek_backend.SOURCE:
                 threading.Thread(
                     target=self._stop_soulseek,
@@ -149,4 +155,3 @@ class UploadsPanel(wx.Panel):
             soulseek_backend.stop_upload(key)
         except Exception as exc:  # noqa: BLE001 - shown on status bar
             wx.CallAfter(self.frame.announce, f"Could not stop Soulseek upload: {exc}")
-

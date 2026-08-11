@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+import json
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -50,6 +52,7 @@ class SoulseekBackendTests(unittest.TestCase):
             config["soulseek_max_upload_kib"] = 64
             config["soulseek_max_download_kib"] = 128
             config["soulseek_rooms"] = ["Ambient", "ambient", "Jazz"]
+            config["soulseek_private_rooms"] = ["Secret", "secret"]
             config["soulseek_friends"] = ["alice", "ALICE", "bob"]
 
             settings = soulseek_backend._build_settings(
@@ -71,6 +74,9 @@ class SoulseekBackendTests(unittest.TestCase):
         self.assertEqual(settings.network.limits.download_speed_kbps, 128)
         self.assertTrue(settings.network.server.reconnect.auto)
         self.assertEqual(settings.rooms.favorites, {"Ambient", "Jazz"})
+        self.assertEqual(
+            soulseek_backend._config_snapshot(config)["private_rooms"], ["Secret"]
+        )
         self.assertEqual(settings.users.friends, {"alice", "bob"})
 
     def test_free_slot_priority_is_separate_but_reaches_aioslsk_uploader(self):
@@ -350,6 +356,39 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
             [event["type"] for event in emitted],
             ["private_message", "room_message", "private_message"],
         )
+
+    async def test_chat_history_survives_service_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            history = Path(folder) / "history.json"
+            service = soulseek_backend._Service(history)
+            service._username = "listener"
+            service._on_room_message(
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        timestamp=123,
+                        room=SimpleNamespace(name="Ambient"),
+                        user=SimpleNamespace(name="friend"),
+                        message="hello room",
+                    )
+                )
+            )
+            service._append_private_message({
+                "timestamp": 124,
+                "user": "friend",
+                "message": "hello privately",
+                "outgoing": False,
+            })
+            restored = soulseek_backend._Service(history)
+
+            self.assertEqual(
+                restored.room_messages_snapshot()[0]["message"], "hello room"
+            )
+            self.assertEqual(
+                restored.private_messages_snapshot()[0]["message"],
+                "hello privately",
+            )
+            document = json.loads(history.read_text(encoding="utf-8"))
+            self.assertEqual(document["version"], 1)
 
     async def test_friend_changes_update_aioslsk_settings_and_snapshot(self):
         class Users:

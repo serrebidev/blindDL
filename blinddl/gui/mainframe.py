@@ -56,13 +56,19 @@ class MainFrame(wx.Frame):
         self._quitting = False
         self.tray = None
         self.config = Config()
-        self.queue = DownloadQueue(self.config, self._queue_notify)
+        # Restored rows must exist before the panels are built, but workers
+        # wait until those panels can safely receive their first update.
+        self.queue = DownloadQueue(
+            self.config, self._queue_notify, start_workers=False
+        )
         self.subs = SubscriptionStore(self.config, self.queue, notify=self._subs_notify)
         self._last_counts = None
         self.chat_panel = None
         self.messages_panel = None
 
         self._build_ui()
+        self.downloads_panel.refresh_all()
+        self.queue.start()
         self._build_menus()
         self._bind_shortcuts()
         soulseek_backend.add_listener(self._queue_soulseek_event)
@@ -652,6 +658,9 @@ class MainFrame(wx.Frame):
         self.library_panel.shutdown()
         self.uploads_panel.shutdown()
         self.subs.stop()
+        # Active rows become resumable Queued rows on the next start, and
+        # completed seeds are recorded before libtorrent is shut down.
+        self.queue.shutdown()
         # Seeding stops here, so this is the last chance to write down how
         # far each torrent got.
         torrent_engine.shutdown()

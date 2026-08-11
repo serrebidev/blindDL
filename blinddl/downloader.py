@@ -10,6 +10,10 @@ changes state. The GUI passes a notify that marshals to the main thread
 only by the user's max_concurrent setting.
 """
 
+import base64
+import enum
+import json
+import os
 import threading
 import time
 import uuid
@@ -28,6 +32,7 @@ from . import (
     torrent_engine,
     ytdlp_backend,
 )
+from .config import app_data_dir
 
 STATUS_QUEUED = "Queued"
 STATUS_DOWNLOADING = "Downloading"
@@ -67,6 +72,10 @@ class DownloadItem:
         self.speed = ""
         self.eta = ""
         self.error = ""
+        # Finished in-app torrents continue uploading after their download
+        # row says Done.  Persisting this flag lets the engine reattach them
+        # from libtorrent's resume data after a restart.
+        self.seeding = False
         self.cancel_event = threading.Event()
         self._last_notify = 0.0
 
@@ -82,7 +91,9 @@ class DownloadItem:
 
 
 class DownloadQueue:
-    def __init__(self, config, notify):
+    STATE_VERSION = 1
+
+    def __init__(self, config, notify, state_path=None, start_workers=True):
         self.config = config
         self.notify = notify
         self.items = []
@@ -91,7 +102,21 @@ class DownloadQueue:
         self._torrent_workers = []
         self._wanted_workers = 0
         self._wanted_torrent_workers = 0
-        self._ensure_workers()
+        self._shutting_down = False
+        self._save_lock = threading.Lock()
+        self._state_path = (
+            os.path.join(app_data_dir(), "downloads.json")
+            if state_path is None
+            else os.fspath(state_path) if state_path else None
+        )
+        self._load_state()
+        if start_workers:
+            self.start()
+
+    def start(self):
+        with self._cond:
+            self._ensure_workers()
+            self._cond.notify_all()
 
     # -- worker management ------------------------------------------------
 
@@ -147,6 +172,7 @@ class DownloadQueue:
             # Two pools wait on this condition and only one of them can take
             # a given item, so every waiter has to look.
             self._cond.notify_all()
+        self._save_state()
         self._notify(item)
 
     def add_ytdlp(self, url, title, audio_only=None):
@@ -216,11 +242,58 @@ class DownloadQueue:
         item.cancel_event.set()
         if item.status == STATUS_QUEUED:
             item.status = STATUS_CANCELLED
+            self._save_state()
             self._notify(item)
 
     def remove_finished(self):
         with self._cond:
-            self.items = [i for i in self.items if i.status not in FINISHED_STATUSES]
+            # A completed torrent can still be an active upload. Keep its row
+            # (and therefore its restart manifest) until seeding is stopped.
+            self.items = [
+                item for item in self.items
+                if item.status not in FINISHED_STATUSES or item.seeding
+            ]
+        self._save_state()
+
+    def mark_torrent_stopped(self, key, title=""):
+        """Remember that a completed torrent must not seed after restart."""
+        key = str(key or "").casefold()
+        title = str(title or "").casefold()
+        changed = False
+        with self._cond:
+            for item in self.items:
+                if item.kind != "torrent" or not item.seeding:
+                    continue
+                payload = item.payload if isinstance(item.payload, dict) else {}
+                infohash = str(payload.get("infohash") or "").casefold()
+                if infohash == key or (
+                    not infohash and title and item.title.casefold() == title
+                ):
+                    item.seeding = False
+                    changed = True
+        if changed:
+            self._save_state()
+        return changed
+
+    def shutdown(self):
+        """Atomically save queue state before transfer engines are stopped."""
+        active = {
+            str(key).casefold(): str(title).casefold()
+            for key, title, _ratio, _rate in torrent_engine.seeding()
+        }
+        with self._cond:
+            for item in self.items:
+                if item.kind != "torrent" or item.status != STATUS_DONE:
+                    continue
+                payload = item.payload if isinstance(item.payload, dict) else {}
+                infohash = str(payload.get("infohash") or "").casefold()
+                item.seeding = (
+                    infohash in active
+                    if infohash
+                    else item.title.casefold() in active.values()
+                )
+            self._save_state(force=True)
+            self._shutting_down = True
 
     def counts(self):
         with self._cond:
@@ -237,6 +310,168 @@ class DownloadQueue:
                 if item.id == item_id:
                     return item
         return None
+
+    # -- durable state ----------------------------------------------------
+
+    @staticmethod
+    def _json_safe(value):
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, bytes):
+            return {"__blinddl_bytes__": base64.b64encode(value).decode("ascii")}
+        if isinstance(value, bytearray):
+            return {
+                "__blinddl_bytes__": base64.b64encode(bytes(value)).decode("ascii")
+            }
+        if isinstance(value, enum.Enum):
+            return DownloadQueue._json_safe(value.value)
+        if isinstance(value, os.PathLike):
+            return os.fspath(value)
+        if isinstance(value, dict):
+            return {str(key): DownloadQueue._json_safe(item)
+                    for key, item in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [DownloadQueue._json_safe(item) for item in value]
+        raise TypeError(f"unsupported queue value: {type(value).__name__}")
+
+    @staticmethod
+    def _json_restore(value):
+        if isinstance(value, list):
+            return [DownloadQueue._json_restore(item) for item in value]
+        if isinstance(value, dict):
+            if set(value) == {"__blinddl_bytes__"}:
+                return base64.b64decode(value["__blinddl_bytes__"], validate=True)
+            return {key: DownloadQueue._json_restore(item)
+                    for key, item in value.items()}
+        return value
+
+    @classmethod
+    def _payload_record(cls, item):
+        payload = item.payload
+        payload_type = "json"
+        if item.kind == "musicdl" and hasattr(payload, "todict"):
+            payload_type = "musicdl-song"
+            payload = payload.todict()
+        return payload_type, cls._json_safe(payload)
+
+    @classmethod
+    def _item_record(cls, item):
+        record = {
+            "id": item.id,
+            "title": item.title,
+            "kind": item.kind,
+            "audio_only": item.audio_only,
+            "audio_format": item.audio_format,
+            "video_format": item.video_format,
+            "status": item.status,
+            "percent": item.percent,
+            "error": item.error,
+            "seeding": item.seeding,
+        }
+        try:
+            payload_type, payload = cls._payload_record(item)
+            record.update({"payload_type": payload_type, "payload": payload})
+        except (TypeError, ValueError) as exc:
+            record.update({
+                "payload_type": "unavailable",
+                "payload": None,
+                "payload_error": str(exc),
+            })
+        return record
+
+    @classmethod
+    def _item_from_record(cls, record, resume_seeds):
+        if not isinstance(record, dict):
+            raise ValueError("queue item is not an object")
+        payload_type = record.get("payload_type", "json")
+        payload = cls._json_restore(record.get("payload"))
+        if payload_type == "musicdl-song":
+            from musicdl.modules.utils.data import SongInfo
+
+            payload = SongInfo.fromdict(payload)
+        item = DownloadItem(
+            str(record.get("title") or "Recovered download"),
+            str(record.get("kind") or "unknown"),
+            payload,
+            audio_only=bool(record.get("audio_only", True)),
+            audio_format=str(record.get("audio_format") or "mp3"),
+            video_format=str(record.get("video_format") or "mp4"),
+        )
+        item.id = str(record.get("id") or uuid.uuid4().hex)
+        item.percent = max(0.0, min(100.0, float(record.get("percent") or 0)))
+        item.error = str(record.get("error") or "")
+        item.seeding = bool(record.get("seeding", False))
+        status = str(record.get("status") or STATUS_QUEUED)
+        if payload_type == "unavailable":
+            item.status = STATUS_ERROR
+            item.error = "Could not restore this download: " + str(
+                record.get("payload_error") or "unsupported saved data"
+            )
+            item.seeding = False
+        elif status in ACTIVE_STATUSES:
+            item.status = STATUS_QUEUED
+        elif status == STATUS_DONE and item.kind == "torrent" and item.seeding \
+                and resume_seeds:
+            item.status = STATUS_QUEUED
+            item.percent = 100.0
+        elif status in FINISHED_STATUSES:
+            item.status = status
+        else:
+            item.status = STATUS_ERROR
+            item.error = f"Could not restore unknown download status: {status}"
+            item.seeding = False
+        return item
+
+    def _load_state(self):
+        if not self._state_path:
+            return
+        try:
+            with open(self._state_path, encoding="utf-8") as handle:
+                document = json.load(handle)
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return
+        records = document.get("items", []) if isinstance(document, dict) else []
+        resume_seeds = bool(
+            self.config.get("torrent_engine") and torrent_engine.available()
+        )
+        for record in records:
+            try:
+                self.items.append(self._item_from_record(record, resume_seeds))
+            except (ImportError, OSError, TypeError, ValueError) as exc:
+                item = DownloadItem("Recovered download", "unknown", None)
+                item.status = STATUS_ERROR
+                item.error = f"Could not restore saved download: {exc}"
+                self.items.append(item)
+
+    def _save_state(self, force=False):
+        if not self._state_path or (self._shutting_down and not force):
+            return
+        with self._cond:
+            document = {
+                "version": self.STATE_VERSION,
+                "items": [self._item_record(item) for item in self.items],
+            }
+        parent = os.path.dirname(os.path.abspath(self._state_path))
+        temporary = self._state_path + ".tmp"
+        with self._save_lock:
+            try:
+                os.makedirs(parent, exist_ok=True)
+                with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(document, handle, indent=2, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    os.chmod(temporary, 0o600)
+                except OSError:
+                    pass
+                os.replace(temporary, self._state_path)
+            except OSError:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     # -- internals --------------------------------------------------------
 
@@ -271,6 +506,7 @@ class DownloadQueue:
                     if item is None:
                         self._cond.wait()
                 item.status = STATUS_DOWNLOADING
+            self._save_state()
             self._notify(item)
             try:
                 if item.kind == "ytdlp":
@@ -314,6 +550,7 @@ class DownloadQueue:
                     item.error = str(exc)
             item.speed = ""
             item.eta = ""
+            self._save_state()
             self._notify(item)
 
     def _run_ytdlp(self, item):
@@ -509,6 +746,7 @@ class DownloadQueue:
         torrent_engine.download(
             item.payload, self.config["download_dir"], self.config,
             progress_cb=progress, cancel_event=item.cancel_event)
+        item.seeding = True
 
     def _run_deezer(self, item):
         started = time.monotonic()

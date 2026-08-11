@@ -60,6 +60,13 @@ def _self_test(output_path: str) -> int:
         str, __import__("lxml.etree", fromlist=["LXML_VERSION"]).LXML_VERSION)))
     check("requests", lambda: __import__("requests").__version__)
 
+    def soulseek_runtime():
+        from .soulseek_backend import runtime_probe
+
+        return runtime_probe()
+
+    check("soulseek", soulseek_runtime)
+
     def vlc_runtime():
         from .gui.media_player import vlc
 

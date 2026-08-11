@@ -1,0 +1,196 @@
+# Copyright (c) serrebidev and contributors
+# This file is part of blindDL.
+# SPDX-License-Identifier: MIT
+
+import copy
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from blinddl import torrent_engine
+from blinddl.config import DEFAULTS
+from blinddl.downloader import (
+    DownloadItem,
+    DownloadQueue,
+    STATUS_CANCELLED,
+    STATUS_DONE,
+    STATUS_DOWNLOADING,
+    STATUS_ERROR,
+    STATUS_QUEUED,
+)
+from musicdl.modules.utils.data import SongInfo
+
+
+class DownloadPersistenceTests(unittest.TestCase):
+    def config(self):
+        config = copy.deepcopy(DEFAULTS)
+        config["torrent_engine"] = False
+        return config
+
+    def test_active_and_finished_rows_survive_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            active = DownloadItem("Active", "soulseek", {
+                "username": "friend",
+                "remote_path": "Music\\Track.flac",
+                "picture": b"small",
+            })
+            active.status = STATUS_DOWNLOADING
+            done = DownloadItem("Done", "ytdlp", "https://example.invalid/media")
+            done.status = STATUS_DONE
+            cancelled = DownloadItem("Cancelled", "book", {"url": "example"})
+            cancelled.status = STATUS_CANCELLED
+            queue.items = [active, done, cancelled]
+            queue._save_state()
+
+            restored = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+
+        self.assertEqual(
+            [item.status for item in restored.items],
+            [STATUS_QUEUED, STATUS_DONE, STATUS_CANCELLED],
+        )
+        self.assertEqual(restored.items[0].payload["picture"], b"small")
+        self.assertEqual(restored.items[0].id, active.id)
+
+    def test_musicdl_song_info_round_trips_without_pickle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            item = DownloadItem(
+                "Song", "musicdl", SongInfo(song_name="Song", source="test")
+            )
+            queue.items = [item]
+            queue._save_state()
+            restored = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            saved_text = state.read_text(encoding="utf-8")
+
+        self.assertIsInstance(restored.items[0].payload, SongInfo)
+        self.assertEqual(restored.items[0].payload.song_name, "Song")
+        self.assertNotIn("pickle", saved_text.casefold())
+
+    def test_unsupported_payload_becomes_visible_error_instead_of_disappearing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            queue.items = [DownloadItem("Opaque", "unknown", object())]
+            queue._save_state()
+            restored = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+
+        self.assertEqual(restored.items[0].status, STATUS_ERROR)
+        self.assertIn("Could not restore", restored.items[0].error)
+
+    def test_completed_seed_is_reattached_only_when_engine_is_enabled(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            config = self.config()
+            config["torrent_engine"] = True
+            queue = DownloadQueue(config, None, state_path=state, start_workers=False)
+            item = DownloadItem("Seed", "torrent", {"infohash": "abc"})
+            item.status = STATUS_DONE
+            item.seeding = True
+            queue.items = [item]
+            queue._save_state()
+            with mock.patch.object(torrent_engine, "available", return_value=True):
+                restored = DownloadQueue(
+                    config, None, state_path=state, start_workers=False
+                )
+
+        self.assertEqual(restored.items[0].status, STATUS_QUEUED)
+        self.assertTrue(restored.items[0].seeding)
+
+    def test_shutdown_records_only_torrents_still_seeding(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            active = DownloadItem("Active seed", "torrent", {"infohash": "ABC"})
+            stopped = DownloadItem("Stopped seed", "torrent", {"infohash": "DEF"})
+            for item in (active, stopped):
+                item.status = STATUS_DONE
+                item.seeding = True
+            queue.items = [active, stopped]
+            with mock.patch.object(
+                torrent_engine, "seeding", return_value=[("abc", "Active seed", 1, 0)]
+            ):
+                queue.shutdown()
+            document = json.loads(state.read_text(encoding="utf-8"))
+
+        self.assertTrue(document["items"][0]["seeding"])
+        self.assertFalse(document["items"][1]["seeding"])
+
+    def test_clear_finished_keeps_active_seed_manifest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(),
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            seed = DownloadItem("Seed", "torrent", {"infohash": "abc"})
+            seed.status = STATUS_DONE
+            seed.seeding = True
+            ordinary = DownloadItem("Ordinary", "ytdlp", "url")
+            ordinary.status = STATUS_DONE
+            queue.items = [seed, ordinary]
+
+            queue.remove_finished()
+
+        self.assertEqual(queue.items, [seed])
+
+    def test_stopping_torrent_file_seed_without_infohash_updates_manifest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(),
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            seed = DownloadItem(
+                "Private tracker seed",
+                "torrent",
+                {"download_url": "https://example.invalid/private.torrent"},
+            )
+            seed.status = STATUS_DONE
+            seed.seeding = True
+            queue.items = [seed]
+
+            changed = queue.mark_torrent_stopped(
+                "computed-hash", "Private tracker seed"
+            )
+
+        self.assertTrue(changed)
+        self.assertFalse(seed.seeding)
+
+    def test_corrupt_state_is_ignored_and_can_be_replaced(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            state.write_text("not json", encoding="utf-8")
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            self.assertEqual(queue.items, [])
+            queue.items = [DownloadItem("New", "ytdlp", "url")]
+            queue._save_state()
+            document = json.loads(state.read_text(encoding="utf-8"))
+
+        self.assertEqual(document["version"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

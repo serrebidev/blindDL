@@ -151,6 +151,9 @@ DEFAULTS = {
     "soulseek_max_results": 500,
     # Rooms joined from the Chat tab are restored by aioslsk after reconnects.
     "soulseek_rooms": [],
+    # Names in this subset were joined/created as private rooms. Keeping the
+    # flag separately preserves compatibility with existing room-name lists.
+    "soulseek_private_rooms": [],
     # Soulseek friends are tracked for presence and shown in Messages.
     "soulseek_friends": [],
     # Users granted a free-slot preference are ranked with friends by
@@ -235,11 +238,22 @@ class Config:
         self.save()
 
     def save(self):
+        temporary = self.path + ".tmp"
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
+            with open(temporary, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(self.data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary, self.path)
         except OSError:
-            pass
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
     def __getitem__(self, key):
         return self.data[key]

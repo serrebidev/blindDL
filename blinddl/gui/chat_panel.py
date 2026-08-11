@@ -24,6 +24,8 @@ class ChatPanel(wx.Panel):
         super().__init__(parent)
         self.frame = frame
         self._alive = True
+        self._rooms = []
+        self._joining_private = False
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         room_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -36,8 +38,12 @@ class ChatPanel(wx.Panel):
         self.refresh_button = wx.Button(self, label="&Refresh rooms")
         self.join_button = wx.Button(self, label="&Join")
         self.leave_button = wx.Button(self, label="&Leave")
-        self.private_check = wx.CheckBox(self, label="Create &private room")
-        self.private_check.SetName("Create private Soulseek room")
+        self.private_check = wx.CheckBox(self, label="&Private room")
+        self.private_check.SetName("Private Soulseek room")
+        self.private_check.SetHelpText(
+            "Creates your own private room, or joins someone else's private "
+            "room when they have invited you."
+        )
         for control in (
             room_label,
             self.room_combo,
@@ -47,6 +53,20 @@ class ChatPanel(wx.Panel):
             self.private_check,
         ):
             room_row.Add(control, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+
+        self.rooms_list = wx.ListCtrl(self, style=wx.LC_REPORT)
+        self.rooms_list.SetName("Soulseek chat rooms")
+        self.rooms_list.SetHelpText(
+            "Public rooms and your remembered public or private rooms. "
+            "Select a room to put its name in the Room box; activate it to join."
+        )
+        for index, heading in enumerate(("Room", "Type", "Status", "Users")):
+            self.rooms_list.InsertColumn(index, heading)
+        self.rooms_list.SetColumnWidth(0, 300)
+        self.rooms_list.SetColumnWidth(1, 90)
+        self.rooms_list.SetColumnWidth(2, 110)
+        self.rooms_list.SetColumnWidth(3, 80)
+        self.rooms_list.SetMinSize((-1, 160))
 
         self.list = wx.ListCtrl(self, style=wx.LC_REPORT)
         self.list.SetName("Soulseek room chat transcript")
@@ -69,6 +89,7 @@ class ChatPanel(wx.Panel):
         message_row.Add(self.send_button, 0)
 
         sizer.Add(room_row, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(self.rooms_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(message_row, 0, wx.EXPAND | wx.ALL, 8)
         self.SetSizer(sizer)
@@ -78,6 +99,8 @@ class ChatPanel(wx.Panel):
         self.leave_button.Bind(wx.EVT_BUTTON, self.on_leave)
         self.send_button.Bind(wx.EVT_BUTTON, self.on_send)
         self.message_text.Bind(wx.EVT_TEXT_ENTER, self.on_send)
+        self.rooms_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_room_selected)
+        self.rooms_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_join)
 
         self._show_rooms(soulseek_backend.rooms_snapshot())
         for message in soulseek_backend.room_messages_snapshot():
@@ -99,12 +122,68 @@ class ChatPanel(wx.Panel):
             self._append_message(event["message"])
 
     def _show_rooms(self, rooms):
+        self._rooms = [dict(room) for room in rooms]
         value = self.room_combo.GetValue()
-        names = [room["name"] for room in rooms]
+        remembered = list(self.frame.config.get("soulseek_rooms", []) or [])
+        names = []
+        seen = set()
+        for name in [*remembered, *(room["name"] for room in rooms)]:
+            key = str(name).casefold()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(str(name))
         self.room_combo.Clear()
         if names:
             self.room_combo.AppendItems(names)
         self.room_combo.SetValue(value)
+        self._show_room_list()
+
+    def _show_room_list(self):
+        remembered = list(self.frame.config.get("soulseek_rooms", []) or [])
+        private = {
+            str(name).casefold()
+            for name in self.frame.config.get("soulseek_private_rooms", []) or []
+        }
+        remembered_keys = {str(name).casefold() for name in remembered}
+        by_name = {str(room["name"]).casefold(): dict(room) for room in self._rooms}
+        for name in remembered:
+            key = str(name).casefold()
+            by_name.setdefault(key, {
+                "name": str(name),
+                "private": key in private,
+                "joined": False,
+                "user_count": 0,
+            })
+        rows = sorted(
+            by_name.values(),
+            key=lambda room: (
+                str(room["name"]).casefold() not in remembered_keys,
+                not bool(room.get("joined")),
+                -int(room.get("user_count") or 0),
+                str(room["name"]).casefold(),
+            ),
+        )
+        self.rooms_list.DeleteAllItems()
+        for room in rows:
+            key = str(room["name"]).casefold()
+            is_private = bool(room.get("private")) or key in private
+            row = self.rooms_list.InsertItem(
+                self.rooms_list.GetItemCount(), str(room["name"])
+            )
+            self.rooms_list.SetItem(row, 1, "Private" if is_private else "Public")
+            self.rooms_list.SetItem(
+                row, 2, "Joined" if room.get("joined") else "Remembered"
+                if key in remembered_keys
+                else "Available"
+            )
+            self.rooms_list.SetItem(row, 3, str(int(room.get("user_count") or 0)))
+
+    def on_room_selected(self, event):
+        row = event.GetIndex()
+        room = self.rooms_list.GetItemText(row, 0)
+        room_type = self.rooms_list.GetItemText(row, 1)
+        self.room_combo.SetValue(room)
+        self.private_check.SetValue(room_type == "Private")
 
     def _append_message(self, message):
         row = self.list.InsertItem(
@@ -148,6 +227,7 @@ class ChatPanel(wx.Panel):
             self.frame.announce("Enter a Soulseek room name.")
             return
         self.frame.announce(f"Joining {room}...")
+        self._joining_private = self.private_check.GetValue()
         threading.Thread(
             target=self._worker,
             args=(
@@ -155,7 +235,7 @@ class ChatPanel(wx.Panel):
                 self._joined,
                 room,
                 self.frame.config,
-                self.private_check.GetValue(),
+                self._joining_private,
             ),
             daemon=True,
             name="blinddl-soulseek-join-room",
@@ -168,8 +248,19 @@ class ChatPanel(wx.Panel):
         if room.casefold() not in {value.casefold() for value in saved}:
             saved.append(room)
             self.frame.config["soulseek_rooms"] = saved
-            self.frame.config.save()
+        private_rooms = list(
+            self.frame.config.get("soulseek_private_rooms", []) or []
+        )
+        private_rooms = [
+            value for value in private_rooms
+            if value.casefold() != room.casefold()
+        ]
+        if self._joining_private:
+            private_rooms.append(room)
+        self.frame.config["soulseek_private_rooms"] = private_rooms
+        self.frame.config.save()
         self.room_combo.SetValue(room)
+        self._show_rooms(soulseek_backend.rooms_snapshot())
         self.frame.announce(f"Joined Soulseek room {room}.")
         self.message_text.SetFocus()
 
@@ -193,7 +284,13 @@ class ChatPanel(wx.Panel):
             for value in self.frame.config.get("soulseek_rooms", []) or []
             if value.casefold() != room.casefold()
         ]
+        self.frame.config["soulseek_private_rooms"] = [
+            value
+            for value in self.frame.config.get("soulseek_private_rooms", []) or []
+            if value.casefold() != room.casefold()
+        ]
         self.frame.config.save()
+        self._show_rooms(soulseek_backend.rooms_snapshot())
         self.frame.announce(f"Left Soulseek room {room}.")
 
     def on_send(self, event=None):
