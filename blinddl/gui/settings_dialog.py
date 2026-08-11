@@ -680,8 +680,10 @@ class SettingsDialog(wx.Dialog):
         self.tray_check.SetValue(bool(config["minimize_to_tray"]))
         self.tray_check.SetHelpText(
             "Downloads, seeding torrents and subscription checks keep "
-            "running. Windows plus B reaches the tray icon. File, Exit "
-            "always exits."
+            "running. Click the blue B tray icon, press Windows plus B, or "
+            "launch blindDL again to restore the existing window. File, Exit "
+            "always exits. blindDL stays visible if Windows cannot install "
+            "its tray icon."
         )
 
         self.tray_minimize_check = wx.CheckBox(

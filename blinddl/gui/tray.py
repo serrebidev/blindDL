@@ -15,20 +15,27 @@ import wx.adv
 from .. import APP_NAME
 
 
-def _tray_bitmap():
-    """An icon for the tray without shipping an icon file.
-
-    The stock "find" art is what the platform already draws for a search
-    tool, and it exists on every wx backend, so no asset can go missing from
-    a frozen build.
-    """
-    size = wx.Size(16, 16)
-    bitmap = wx.ArtProvider.GetBitmap(wx.ART_FIND, wx.ART_OTHER, size)
-    if not bitmap.IsOk():
-        bitmap = wx.ArtProvider.GetBitmap(wx.ART_INFORMATION, wx.ART_OTHER,
-                                          size)
-    # wxWidgets 3.3 takes a bundle here; older builds want a wx.Icon.
-    return wx.BitmapBundle(bitmap)
+def app_icon(size=32):
+    """Return a high-contrast native icon that never depends on an asset."""
+    size = max(16, int(size))
+    bitmap = wx.Bitmap(size, size, 32)
+    dc = wx.MemoryDC(bitmap)
+    dc.SetBackground(wx.Brush(wx.Colour(0, 82, 204)))
+    dc.Clear()
+    dc.SetTextForeground(wx.Colour(255, 255, 255))
+    dc.SetFont(
+        wx.Font(
+            wx.FontInfo(max(12, int(size * 0.68)))
+            .Bold()
+            .Family(wx.FONTFAMILY_SWISS)
+        )
+    )
+    width, height = dc.GetTextExtent("B")
+    dc.DrawText("B", (size - width) // 2, (size - height) // 2)
+    dc.SelectObject(wx.NullBitmap)
+    icon = wx.Icon()
+    icon.CopyFromBitmap(bitmap)
+    return icon
 
 
 class TrayIcon(wx.adv.TaskBarIcon):
@@ -46,7 +53,11 @@ class TrayIcon(wx.adv.TaskBarIcon):
         self.frame = frame
         self._on_restore = on_restore
         self._on_exit = on_exit
-        self.SetIcon(_tray_bitmap(), APP_NAME)
+        self.installed = bool(
+            self.SetIcon(app_icon(), f"{APP_NAME} — click to restore")
+            and self.IsIconInstalled()
+        )
+        self.Bind(wx.adv.EVT_TASKBAR_LEFT_UP, self._restore)
         self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self._restore)
         self.Bind(wx.EVT_MENU, self._restore, id=self.ID_RESTORE)
         self.Bind(wx.EVT_MENU, self._exit, id=self.ID_EXIT)
@@ -64,7 +75,23 @@ class TrayIcon(wx.adv.TaskBarIcon):
     def _exit(self, _event=None):
         self._on_exit()
 
+    def is_available(self):
+        return self.installed and self.IsIconInstalled()
+
+    def notify_hidden(self):
+        """Tell the user where the app went; Windows announces this balloon."""
+        try:
+            self.ShowBalloon(
+                f"{APP_NAME} is still running",
+                "Click the blue B icon, press Windows+B, or launch blindDL "
+                "again to restore this window.",
+                8000,
+            )
+        except (AttributeError, RuntimeError):
+            pass
+
     def dispose(self):
         """Take the icon out of the tray and drop the native object."""
         self.RemoveIcon()
+        self.installed = False
         self.Destroy()

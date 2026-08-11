@@ -32,7 +32,7 @@ from .settings_dialog import SettingsDialog
 from .soulseek_user_dialog import UserBrowserDialog, UserProfileDialog
 from .sources_dialog import SourcesDialog
 from .subs_panel import SubsPanel
-from .tray import TrayIcon
+from .tray import TrayIcon, app_icon
 from .update_dialog import UpdateDialog
 from .url_panel import UrlPanel
 from .uploads_panel import UploadsPanel
@@ -48,6 +48,7 @@ TAB_SUBS = 5
 class MainFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title=APP_NAME, size=(950, 650))
+        self.SetIcon(app_icon(32))
 
         self._closing = False
         # Set when the user asks to leave outright -- File > Exit or the
@@ -569,6 +570,13 @@ class MainFrame(wx.Frame):
             self.tray = TrayIcon(
                 self, on_restore=self.restore_from_tray, on_exit=self.on_exit
             )
+            if not self.tray.is_available():
+                self.tray.dispose()
+                self.tray = None
+                self.announce(
+                    "Windows could not install the blindDL tray icon, so the "
+                    "window will remain visible when minimized or closed."
+                )
         elif not wanted and self.tray is not None:
             # Nothing can bring the window back once the icon is gone, so it
             # only leaves while the window is on screen.
@@ -589,11 +597,22 @@ class MainFrame(wx.Frame):
             self.show_tab(page)
 
     def _hide_to_tray(self):
+        if self.tray is None or not self.tray.is_available():
+            self.Show()
+            if self.IsIconized():
+                self.Iconize(False)
+            self.Raise()
+            self.announce(
+                "The system tray icon is unavailable, so blindDL was left open."
+            )
+            return False
         self.Hide()
+        self.tray.notify_hidden()
         self.announce(
-            f"{APP_NAME} is in the system tray. Windows plus B reaches it; "
-            "downloads keep running."
+            f"{APP_NAME} is still running in the system tray. Click the blue "
+            "B icon, press Windows plus B, or launch blindDL again to restore it."
         )
+        return True
 
     def on_iconize(self, event):
         """Minimizing hides the window in the tray when that is switched on."""

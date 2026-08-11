@@ -92,6 +92,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         _sorted_subscriptions,
     )
     from blinddl.gui.uploads_panel import UploadsPanel
+    from blinddl.gui.tray import TrayIcon, app_icon
 
 
 class _Clipboard:
@@ -250,6 +251,34 @@ class GuiInteractionTests(unittest.TestCase):
         self.app.Yield()
         self.assertEqual(dialog.selected_items(), [items[1]])
         dialog.Destroy()
+
+    def test_high_contrast_tray_icon_installs_and_can_be_removed(self):
+        icon = app_icon(32)
+        self.assertTrue(icon.IsOk())
+        tray = TrayIcon(self.host, lambda: None, lambda: None)
+        try:
+            self.assertTrue(tray.is_available())
+        finally:
+            tray.dispose()
+
+    def test_window_is_never_hidden_without_an_installed_tray_icon(self):
+        tray = SimpleNamespace(is_available=lambda: False)
+        holder = SimpleNamespace(
+            tray=tray,
+            Show=mock.Mock(),
+            Hide=mock.Mock(),
+            Raise=mock.Mock(),
+            IsIconized=mock.Mock(return_value=False),
+            Iconize=mock.Mock(),
+            announce=mock.Mock(),
+        )
+
+        hidden = MainFrame._hide_to_tray(holder)
+
+        self.assertFalse(hidden)
+        holder.Show.assert_called_once()
+        holder.Hide.assert_not_called()
+        holder.Raise.assert_called_once()
 
     def test_search_queues_every_selected_result(self):
         panel = SearchPanel(self.host, self.frame)

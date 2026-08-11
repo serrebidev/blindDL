@@ -5,12 +5,18 @@
 """Run blindDL with ``python -m blinddl``."""
 
 import os
+import getpass
 import json
 import shutil
 import sys
 from pathlib import Path
 
 from .runtime import prepare_runtime_path
+
+
+def _instance_name():
+    """A per-user mutex name shared by source and packaged launches."""
+    return f"blindDL-{getpass.getuser()}"
 
 
 def _flush_standard_streams() -> None:
@@ -111,13 +117,46 @@ def main() -> int | None:
 
     import wx
 
+    from .config import app_data_dir
     from .gui.mainframe import MainFrame
+    from .single_instance import RestoreServer, notify_existing
 
     app = wx.App()
+    checker = wx.SingleInstanceChecker(_instance_name(), app_data_dir())
+    if checker.IsAnotherRunning():
+        restored = notify_existing()
+        if not restored:
+            wx.MessageBox(
+                "blindDL is already running. Look for the blue B icon in the "
+                "system tray overflow, or press Windows+B to reach it.",
+                "blindDL is already running",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+        return 0
     frame = MainFrame()
+    try:
+        restore_server = RestoreServer(
+            lambda: wx.CallAfter(frame.restore_from_tray)
+        ).start()
+    except OSError as exc:
+        restore_server = None
+        wx.MessageBox(
+            "blindDL could not initialize its relaunch-to-restore service. "
+            "Only one instance is still allowed; use the blue B tray icon "
+            f"to restore the window.\n\n{exc}",
+            "blindDL restore service",
+            wx.OK | wx.ICON_WARNING,
+        )
     frame.Show()
     frame.Raise()
-    code = app.MainLoop()
+    try:
+        code = app.MainLoop()
+    finally:
+        if restore_server is not None:
+            restore_server.stop()
+        # Keep the checker alive until shutdown, then release its mutex before
+        # the source process or frozen executable exits.
+        del checker
     _flush_standard_streams()
     os._exit(code if isinstance(code, int) else 0)
 
