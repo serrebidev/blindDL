@@ -4,15 +4,25 @@
 
 """Search tab: music, books, audiobooks, Archive media, adult sites, yt-dlp."""
 
+import ntpath
 import threading
 import time
 
 import wx
 
 from .. import (
-    adult_backend, archive_backend,
-    audiobook_backend, bandcamp_backend, book_backend, deezer_backend,
-    musicdl_backend, preview, search_order, sideb_backend, torrent_backend,
+    adult_backend,
+    archive_backend,
+    audiobook_backend,
+    bandcamp_backend,
+    book_backend,
+    deezer_backend,
+    musicdl_backend,
+    preview,
+    search_order,
+    sideb_backend,
+    soulseek_backend,
+    torrent_backend,
     ytdlp_backend,
 )
 from ..search_order import ORDER_RECENT, ORDER_RELEVANCE
@@ -34,29 +44,38 @@ ENGINE_GAY = 11
 ENGINE_LESBIAN = 12
 ENGINE_BISEXUAL = 13
 ENGINE_TRANS = 14
+ENGINE_SOULSEEK_AUDIO = 15
+ENGINE_SOULSEEK_VIDEO = 16
+ENGINE_SOULSEEK_BOOKS = 17
+ENGINE_SOULSEEK_TORRENTS = 18
 # Kept as an import-compatible name for callers that treated adult search as
 # the first adult choice before content categories were separated.
 ENGINE_ADULT = ENGINE_STRAIGHT
 ENGINE_LABELS = [
     "Music sites",
-    "YouTube/web",
+    "YouTube",
     "SoundCloud",
     "Bandcamp",
     "Apple Music",
     "Books",
     "Audiobooks",
-    "Old-time radio and music",
-    "Movies and TV",
+    "Internet Archive audio and old-time radio",
+    "Internet Archive movies and TV",
     "Torrents",
     "Straight porn",
     "Gay porn",
     "Lesbian porn",
     "Bisexual porn",
     "Trans porn",
+    "Soulseek music and audio",
+    "Soulseek movies and video",
+    "Soulseek books and documents",
+    "Soulseek torrent files",
 ]
 # The engines shown before the adult categories, which stay hidden until the
 # user switches them on in Settings.
 GENERAL_ENGINE_COUNT = 10
+GENERAL_ENGINES = tuple(range(GENERAL_ENGINE_COUNT))
 ARCHIVE_ENGINE_CATEGORIES = {
     ENGINE_ARCHIVE_AUDIO: archive_backend.AUDIO_CATEGORIES,
     ENGINE_ARCHIVE_VIDEO: archive_backend.VIDEO_CATEGORIES,
@@ -67,6 +86,12 @@ ADULT_ENGINE_CATEGORIES = {
     ENGINE_LESBIAN: adult_backend.CONTENT_LESBIAN,
     ENGINE_BISEXUAL: adult_backend.CONTENT_BISEXUAL,
     ENGINE_TRANS: adult_backend.CONTENT_TRANS,
+}
+SOULSEEK_ENGINE_KINDS = {
+    ENGINE_SOULSEEK_AUDIO: "audio",
+    ENGINE_SOULSEEK_VIDEO: "video",
+    ENGINE_SOULSEEK_BOOKS: "book",
+    ENGINE_SOULSEEK_TORRENTS: "torrent",
 }
 # The Sort by control rearranges rows that have already arrived. The Order
 # control above it goes out with the query and decides which rows arrive at
@@ -132,22 +157,46 @@ TORRENT_SORT_LABELS = [
     "Oldest first",
     "Newest first",
 ]
+SOULSEEK_SORT_LABELS = [
+    "Relevance",
+    "Name",
+    "Availability",
+    "Peer",
+    "Smallest file",
+    "Largest file",
+]
 # File type sits second everywhere: a screen reader reads a row in column
 # order, so the answer to "what will I actually get?" arrives right after the
 # title instead of at the end of the row.
-COLUMN_HEADINGS = ("Title", "Type", "Artist / channel", "Source", "Duration",
-                   "Size")
+COLUMN_HEADINGS = ("Title", "Type", "Artist / channel", "Source", "Duration", "Size")
 BOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Library", "Year", "Size")
-AUDIOBOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Site", "Duration",
-                             "Chapters")
-ARCHIVE_COLUMN_HEADINGS = ("Title", "Type", "Creator", "Collection", "Year",
-                           "Size")
-TORRENT_COLUMN_HEADINGS = ("Title", "Type", "Seeders", "Indexer", "Age",
-                           "Size")
+AUDIOBOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Site", "Duration", "Chapters")
+ARCHIVE_COLUMN_HEADINGS = ("Title", "Type", "Creator", "Collection", "Year", "Size")
+TORRENT_COLUMN_HEADINGS = ("Title", "Type", "Seeders", "Indexer", "Age", "Size")
+SOULSEEK_COLUMN_HEADINGS = (
+    "Title",
+    "Type",
+    "Peer",
+    "Folder",
+    "Availability",
+    "Size",
+)
 
 
 def _is_adult_engine(engine):
     return engine in ADULT_ENGINE_CATEGORIES
+
+
+def _is_soulseek_engine(engine):
+    return engine in SOULSEEK_ENGINE_KINDS
+
+
+def _is_book_engine(engine):
+    return engine in (ENGINE_BOOKS, ENGINE_SOULSEEK_BOOKS)
+
+
+def _is_torrent_engine(engine):
+    return engine in (ENGINE_TORRENTS, ENGINE_SOULSEEK_TORRENTS)
 
 
 def _plays(engine):
@@ -156,19 +205,30 @@ def _plays(engine):
     A book is a file for a reader, and a torrent is a link for a BitTorrent
     client -- neither has a stream to preview.
     """
-    return engine not in (ENGINE_BOOKS, ENGINE_TORRENTS)
+    return not (
+        _is_book_engine(engine)
+        or _is_torrent_engine(engine)
+        or _is_soulseek_engine(engine)
+    )
 
 
 def _is_archive_engine(engine):
     return engine in ARCHIVE_ENGINE_CATEGORIES
 
 
+def _soulseek_media_kind(engine):
+    """Return the extension group for an explicit Soulseek-only source."""
+    return SOULSEEK_ENGINE_KINDS.get(engine)
+
+
 def _sort_labels(engine):
-    if engine == ENGINE_BOOKS:
+    if _is_soulseek_engine(engine):
+        return SOULSEEK_SORT_LABELS
+    if _is_book_engine(engine):
         return BOOK_SORT_LABELS
     if engine == ENGINE_AUDIOBOOKS:
         return AUDIOBOOK_SORT_LABELS
-    if engine == ENGINE_TORRENTS:
+    if _is_torrent_engine(engine):
         return TORRENT_SORT_LABELS
     if _is_archive_engine(engine):
         return ARCHIVE_SORT_LABELS
@@ -224,8 +284,10 @@ def _order_capable_sources(engine, sources, order, config):
             # musicdl drives four dozen site search forms and not one of
             # them exposes a sort. Deezer is the exception, and only for
             # popularity, which it publishes as a rank per track.
-            return (source == deezer_backend._SEARCH_SOURCE
-                    and deezer_backend.supports_order(order))
+            return (
+                source == deezer_backend._SEARCH_SOURCE
+                and deezer_backend.supports_order(order)
+            )
         # SoundCloud, Bandcamp and Apple Music each offer one search and no
         # way to order it.
         return False
@@ -251,16 +313,20 @@ def _order_phrase(order, unable, total):
         names += f" and {len(unable) - 3} more"
     site_word = "site" if len(unable) == 1 else "sites"
     pronoun = "it" if len(unable) == 1 else "they"
-    return (f"{len(unable)} {site_word} cannot sort by {label}, so {pronoun} "
-            f"answered by best match: {names}.")
+    return (
+        f"{len(unable)} {site_word} cannot sort by {label}, so {pronoun} "
+        f"answered by best match: {names}."
+    )
 
 
 def _column_headings(engine):
-    if engine == ENGINE_BOOKS:
+    if _is_soulseek_engine(engine):
+        return SOULSEEK_COLUMN_HEADINGS
+    if _is_book_engine(engine):
         return BOOK_COLUMN_HEADINGS
     if engine == ENGINE_AUDIOBOOKS:
         return AUDIOBOOK_COLUMN_HEADINGS
-    if engine == ENGINE_TORRENTS:
+    if _is_torrent_engine(engine):
         return TORRENT_COLUMN_HEADINGS
     if _is_archive_engine(engine):
         return ARCHIVE_COLUMN_HEADINGS
@@ -270,9 +336,31 @@ def _column_headings(engine):
 # Extensions worth reading out of a media URL. Anything else in a path is
 # far more likely to be a tracking segment than the file that arrives.
 _URL_EXTENSIONS = (
-    ".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav", ".aac",
-    ".mp4", ".m4v", ".mkv", ".webm", ".avi", ".mov", ".mpeg", ".mpg", ".ts",
-    ".epub", ".pdf", ".txt", ".mobi", ".azw3", ".djvu", ".fb2", ".cbz",
+    ".mp3",
+    ".m4a",
+    ".m4b",
+    ".ogg",
+    ".opus",
+    ".flac",
+    ".wav",
+    ".aac",
+    ".mp4",
+    ".m4v",
+    ".mkv",
+    ".webm",
+    ".avi",
+    ".mov",
+    ".mpeg",
+    ".mpg",
+    ".ts",
+    ".epub",
+    ".pdf",
+    ".txt",
+    ".mobi",
+    ".azw3",
+    ".djvu",
+    ".fb2",
+    ".cbz",
 )
 
 
@@ -309,7 +397,21 @@ def _sorted_results(items, mode, engine=None):
     """Return results in a stable, deterministic display order."""
     indexed = list(enumerate(items))
 
-    if engine == ENGINE_TORRENTS and mode in (SORT_SHORTEST, SORT_LONGEST):
+    if _is_soulseek_engine(engine) and mode in (SORT_SHORTEST, SORT_LONGEST):
+        largest = mode == SORT_LONGEST
+
+        def soulseek_size_key(pair):
+            size = int(pair[1].get("size_bytes") or 0)
+            return (
+                size == 0,
+                -size if largest else size,
+                str(pair[1].get("title") or "").casefold(),
+                pair[0],
+            )
+
+        return [item for _index, item in sorted(indexed, key=soulseek_size_key)]
+
+    if _is_torrent_engine(engine) and mode in (SORT_SHORTEST, SORT_LONGEST):
         # Nothing here has a duration; the swarm is what ranks two torrents.
         most = mode == SORT_LONGEST
 
@@ -321,10 +423,9 @@ def _sorted_results(items, mode, engine=None):
                 pair[0],
             )
 
-        return [item for _index, item in sorted(
-            indexed, key=torrent_seed_key)]
+        return [item for _index, item in sorted(indexed, key=torrent_seed_key)]
 
-    if engine == ENGINE_TORRENTS and mode in (SORT_OLDEST, SORT_NEWEST):
+    if _is_torrent_engine(engine) and mode in (SORT_OLDEST, SORT_NEWEST):
         # Every indexer states a posting date except the two that scrape a
         # page and read the age out as words. Those sort last either way: an
         # unknown date is neither the newest nor the oldest.
@@ -339,11 +440,12 @@ def _sorted_results(items, mode, engine=None):
                 pair[0],
             )
 
-        return [item for _index, item in sorted(
-            indexed, key=torrent_date_key)]
+        return [item for _index, item in sorted(indexed, key=torrent_date_key)]
 
-    if ((engine == ENGINE_BOOKS or _is_archive_engine(engine)) and
-            mode in (SORT_SHORTEST, SORT_LONGEST)):
+    if (_is_book_engine(engine) or _is_archive_engine(engine)) and mode in (
+        SORT_SHORTEST,
+        SORT_LONGEST,
+    ):
         # These results carry a year rather than a duration, so the two
         # duration slots sort by when the work was published.
         newest = mode == SORT_LONGEST
@@ -357,8 +459,7 @@ def _sorted_results(items, mode, engine=None):
                 pair[0],
             )
 
-        return [item for _index, item in sorted(
-            indexed, key=publication_year_key)]
+        return [item for _index, item in sorted(indexed, key=publication_year_key)]
 
     def text(item, *names):
         for name in names:
@@ -377,43 +478,60 @@ def _sorted_results(items, mode, engine=None):
             return None
 
     if mode == SORT_RELEVANCE:
-        return [item for index, item in sorted(
-            indexed,
-            key=lambda pair: pair[1].get("_search_order", pair[0]),
-        )]
+        return [
+            item
+            for index, item in sorted(
+                indexed,
+                key=lambda pair: pair[1].get("_search_order", pair[0]),
+            )
+        ]
     if mode == SORT_NAME:
+
         def name_sort_key(pair):
             return text(pair[1], "title"), pair[0]
+
         sort_key = name_sort_key
     elif mode == SORT_SITE:
+
         def site_sort_key(pair):
             return (
                 text(pair[1], "source") or "youtube",
-                text(pair[1], "title"), pair[0],
+                text(pair[1], "title"),
+                pair[0],
             )
+
         sort_key = site_sort_key
     elif mode == SORT_ARTIST:
+
         def artist_sort_key(pair):
             return (
                 text(pair[1], "artist", "uploader"),
-                text(pair[1], "title"), pair[0],
+                text(pair[1], "title"),
+                pair[0],
             )
+
         sort_key = artist_sort_key
     elif mode == SORT_SHORTEST:
+
         def shortest_sort_key(pair):
             return (
                 duration(pair[1]) is None,
                 duration(pair[1]) or 0,
-                text(pair[1], "title"), pair[0],
+                text(pair[1], "title"),
+                pair[0],
             )
+
         sort_key = shortest_sort_key
     elif mode == SORT_LONGEST:
+
         def longest_sort_key(pair):
             return (
                 duration(pair[1]) is None,
                 -(duration(pair[1]) or 0),
-                text(pair[1], "title"), pair[0],
+                text(pair[1], "title"),
+                pair[0],
             )
+
         sort_key = longest_sort_key
     else:
         return list(items)
@@ -435,7 +553,8 @@ class SearchPanel(wx.Panel):
         self.closing = False
         self.next_result_order = 0
         self.current_order = search_order.normalize(
-            self.frame.config.get("search_order", ORDER_RELEVANCE))
+            self.frame.config.get("search_order", ORDER_RELEVANCE)
+        )
         self.order_unable = []
         self.order_source_count = 0
         self.preview_token = None
@@ -452,21 +571,23 @@ class SearchPanel(wx.Panel):
         self.query_text.Bind(wx.EVT_TEXT_ENTER, self.on_search)
 
         engine_label = wx.StaticText(self, label="S&ource:")
-        self.engine_choice = wx.Choice(
-            self, choices=self._visible_engine_labels())
+        self.engine_choice = wx.Choice(self, choices=self._visible_engine_labels())
         self.engine_choice.SetName("Search source")
+        self.engine_choice.SetHelpText(
+            "Each choice searches only the named service or provider group. "
+            "Soulseek file types have their own choices when enabled."
+        )
         self.engine_choice.SetSelection(0)
         self.engine_choice.Bind(wx.EVT_CHOICE, self.on_engine_changed)
 
         order_label = wx.StaticText(self, label="&Order:")
-        self.order_choice = wx.Choice(
-            self, choices=search_order.ORDER_LABEL_LIST)
+        self.order_choice = wx.Choice(self, choices=search_order.ORDER_LABEL_LIST)
         self.order_choice.SetName("Search result order")
         self.order_choice.SetHelpText(
             "Chooses which results each site returns. Sites that cannot "
-            "honour the order are named after the search.")
-        self.order_choice.SetSelection(
-            search_order.ORDERS.index(self.current_order))
+            "honour the order are named after the search."
+        )
+        self.order_choice.SetSelection(search_order.ORDERS.index(self.current_order))
         self.order_choice.Bind(wx.EVT_CHOICE, self.on_order_changed)
 
         sort_label = wx.StaticText(self, label="Sort &by:")
@@ -482,7 +603,8 @@ class SearchPanel(wx.Panel):
         self.results_list.SetName("Search results")
         self.results_list.SetHelpText(
             "Select results. Enter downloads; Control C copies the URL; "
-            "Context Menu opens actions.")
+            "Context Menu opens actions."
+        )
         for i, heading in enumerate(COLUMN_HEADINGS):
             self.results_list.InsertColumn(i, heading)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_download_selected)
@@ -491,7 +613,8 @@ class SearchPanel(wx.Panel):
 
         self.preview_btn = wx.Button(self, label="&Preview selected")
         self.preview_btn.SetHelpText(
-            "Plays music as audio and video results with picture and sound.")
+            "Plays music as audio and video results with picture and sound."
+        )
         self.preview_btn.Bind(wx.EVT_BUTTON, self.on_preview_selected)
         self.player = MediaPlayerPanel(self, frame, video_height=150)
 
@@ -507,8 +630,7 @@ class SearchPanel(wx.Panel):
         sizer.Add(query_label, 0, wx.ALL, 8)
         sizer.Add(self.query_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(top, 0, wx.ALL, 8)
-        sizer.Add(self.results_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT |
-                  wx.BOTTOM, 8)
+        sizer.Add(self.results_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         sizer.Add(self.preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         sizer.Add(self.player, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.SetSizer(sizer)
@@ -519,20 +641,30 @@ class SearchPanel(wx.Panel):
         self.query_text.SetFocus()
 
     def _visible_engine_labels(self):
+        engines = list(GENERAL_ENGINES)
+        if self.frame.config.get("soulseek_enabled"):
+            engines.extend(SOULSEEK_ENGINE_KINDS)
         if self.frame.config["adult_sites_enabled"]:
-            return ENGINE_LABELS
-        return ENGINE_LABELS[:GENERAL_ENGINE_COUNT]
+            engines.extend(ADULT_ENGINE_CATEGORIES)
+        self.visible_engines = engines
+        return [ENGINE_LABELS[engine] for engine in engines]
+
+    def _selected_engine(self):
+        selection = self.engine_choice.GetSelection()
+        if 0 <= selection < len(self.visible_engines):
+            return self.visible_engines[selection]
+        return ENGINE_MUSIC
 
     def refresh_engine_choices(self):
         """Show or hide adult categories after Settings changes."""
-        selection = self.engine_choice.GetSelection()
+        engine = self._selected_engine()
         labels = self._visible_engine_labels()
         self.engine_choice.Clear()
         self.engine_choice.AppendItems(labels)
-        if selection < 0 or selection >= len(labels):
-            selection = ENGINE_MUSIC
-        self.engine_choice.SetSelection(selection)
-        self._apply_engine_controls(selection)
+        if engine not in self.visible_engines:
+            engine = ENGINE_MUSIC
+        self.engine_choice.SetSelection(self.visible_engines.index(engine))
+        self._apply_engine_controls(engine)
 
     def _apply_engine_controls(self, engine):
         """Name the sort choices and the preview button for one engine.
@@ -543,13 +675,16 @@ class SearchPanel(wx.Panel):
         nothing for a book.
         """
         labels = _sort_labels(engine)
-        if [self.sort_choice.GetString(index)
-                for index in range(self.sort_choice.GetCount())] != labels:
+        if [
+            self.sort_choice.GetString(index)
+            for index in range(self.sort_choice.GetCount())
+        ] != labels:
             selection = self.sort_choice.GetSelection()
             self.sort_choice.Clear()
             self.sort_choice.AppendItems(labels)
             self.sort_choice.SetSelection(
-                selection if 0 <= selection < len(labels) else SORT_RELEVANCE)
+                selection if 0 <= selection < len(labels) else SORT_RELEVANCE
+            )
         self.preview_btn.Enable(_plays(engine))
 
     def _apply_engine_columns(self, engine):
@@ -560,7 +695,7 @@ class SearchPanel(wx.Panel):
                 self.results_list.SetColumn(index, column)
 
     def on_engine_changed(self, event):
-        engine = self.engine_choice.GetSelection()
+        engine = self._selected_engine()
         self._apply_engine_controls(engine)
         mode = _sort_for_order(engine, self.current_order)
         if mode < self.sort_choice.GetCount():
@@ -579,7 +714,7 @@ class SearchPanel(wx.Panel):
         if save is not None:
             save()
 
-        engine = self.engine_choice.GetSelection()
+        engine = self._selected_engine()
         sort_mode = _sort_for_order(engine, self.current_order)
         if sort_mode < self.sort_choice.GetCount():
             self.sort_choice.SetSelection(sort_mode)
@@ -587,7 +722,8 @@ class SearchPanel(wx.Panel):
             self.on_search(None)
         else:
             self.frame.announce(
-                f"Search order set to {search_order.label(self.current_order)}.")
+                f"Search order set to {search_order.label(self.current_order)}."
+            )
         if event is not None:
             event.Skip()
 
@@ -610,70 +746,90 @@ class SearchPanel(wx.Panel):
         if not query:
             self.frame.announce("Type a search first.")
             return
-        engine = self.engine_choice.GetSelection()
+        engine = self._selected_engine()
         if engine == ENGINE_MUSIC:
             sources = musicdl_backend.enabled_sources(
-                self.frame.config["disabled_music_sources"])
+                self.frame.config["disabled_music_sources"]
+            )
             if not sources:
-                self.frame.announce(
-                    "No music sites selected. Use Tools, Search sites.")
+                self.frame.announce("No music sites selected. Use Tools, Search sites.")
                 return
         elif engine == ENGINE_BOOKS:
             sources = book_backend.enabled_sources(
-                self.frame.config["disabled_book_sources"])
+                self.frame.config["disabled_book_sources"]
+            )
             if not sources:
                 self.frame.announce(
-                    "No book libraries selected. Use Tools, Search sites.")
+                    "No book libraries selected. Use Tools, Search sites."
+                )
                 return
         elif engine == ENGINE_AUDIOBOOKS:
             sources = audiobook_backend.enabled_sources(
-                self.frame.config["disabled_audiobook_sources"])
+                self.frame.config["disabled_audiobook_sources"]
+            )
             if not sources:
                 self.frame.announce(
-                    "No audiobook sites selected. Use Tools, Search sites.")
+                    "No audiobook sites selected. Use Tools, Search sites."
+                )
                 return
         elif engine == ENGINE_TORRENTS:
             sources = torrent_backend.enabled_sources(
-                self.frame.config["disabled_torrent_sources"],
-                self.frame.config)
+                self.frame.config["disabled_torrent_sources"], self.frame.config
+            )
             if not sources:
                 self.frame.announce(
-                    "No torrent indexers selected. Use Tools, Search sites.")
+                    "No torrent indexers selected. Use Tools, Search sites."
+                )
                 return
         elif _is_archive_engine(engine):
             sources = archive_backend.enabled_sources(
                 self.frame.config["disabled_archive_sources"],
-                ARCHIVE_ENGINE_CATEGORIES[engine])
+                ARCHIVE_ENGINE_CATEGORIES[engine],
+            )
             if not sources:
                 self.frame.announce(
-                    "No Internet Archive collections selected. Use Tools, "
-                    "Search sites.")
+                    "No Internet Archive collections selected. Use Tools, Search sites."
+                )
                 return
         elif _is_adult_engine(engine):
             if not self.frame.config["adult_sites_enabled"]:
                 self.frame.announce(
-                    "Adult sites are disabled. Enable them in Settings.")
+                    "Adult sites are disabled. Enable them in Settings."
+                )
                 return
             sources = adult_backend.enabled_sources(
-                self.frame.config["disabled_adult_sources"])
+                self.frame.config["disabled_adult_sources"]
+            )
             unavailable = adult_backend.unavailable_sources()
             sources = [source for source in sources if source not in unavailable]
             if not sources:
                 self.frame.announce(
                     "Adult API packages are unavailable. Reinstall blindDL "
-                    "to restore them.")
+                    "to restore them."
+                )
                 return
+        elif _is_soulseek_engine(engine):
+            if not self.frame.config.get("soulseek_enabled"):
+                self.frame.announce(
+                    "Soulseek is disabled. Enable it in Settings, Soulseek."
+                )
+                return
+            sources = []
         else:
             sources = []
         selection = self.order_choice.GetSelection()
-        order = (search_order.ORDERS[selection]
-                 if 0 <= selection < len(search_order.ORDERS)
-                 else ORDER_RELEVANCE)
+        order = (
+            search_order.ORDERS[selection]
+            if 0 <= selection < len(search_order.ORDERS)
+            else ORDER_RELEVANCE
+        )
         self.current_order = order
 
         if engine == ENGINE_MUSIC:
             order_sources = list(sources) + [
-                sideb_backend.SIDEB_SOURCE, deezer_backend._SEARCH_SOURCE]
+                sideb_backend.SIDEB_SOURCE,
+                deezer_backend._SEARCH_SOURCE,
+            ]
         elif engine == ENGINE_YOUTUBE:
             order_sources = ["YouTube"]
         elif engine == ENGINE_SOUNDCLOUD:
@@ -682,14 +838,20 @@ class SearchPanel(wx.Panel):
             order_sources = ["Bandcamp"]
         elif engine == ENGINE_APPLE_MUSIC:
             order_sources = ["Apple Music"]
+        elif _is_soulseek_engine(engine):
+            order_sources = [soulseek_backend.SOURCE]
         else:
             order_sources = list(sources)
         _able, unable = _order_capable_sources(
-            engine, order_sources, order, self.frame.config)
+            engine, order_sources, order, self.frame.config
+        )
         if engine == ENGINE_MUSIC:
-            unable = [musicdl_backend.source_label(source)
-                      if source in musicdl_backend.ALL_SOURCES else source
-                      for source in unable]
+            unable = [
+                musicdl_backend.source_label(source)
+                if source in musicdl_backend.ALL_SOURCES
+                else source
+                for source in unable
+            ]
         self.order_unable = unable
         self.order_source_count = len(order_sources)
         self.search_btn.Disable()
@@ -711,171 +873,240 @@ class SearchPanel(wx.Panel):
         self.results_list.DeleteAllItems()
         self._apply_engine_columns(engine)
 
-        if engine == ENGINE_MUSIC:
+        if _is_soulseek_engine(engine):
+            self.frame.announce(
+                f"Searching {ENGINE_LABELS[engine]} "
+                f"({self.frame.config['search_timeout_s']:g} seconds)..."
+            )
+        elif engine == ENGINE_MUSIC:
             # Side B's Deezer catalog search goes out next to the musicdl
             # sites and reports through the same per-site callback.
             count = len(sources) + 2
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} music {site_word} "
-                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
         elif engine == ENGINE_BOOKS:
             count = len(sources)
             library_word = "library" if count == 1 else "libraries"
             self.frame.announce(
                 f"Searching {count} book {library_word} "
-                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
         elif engine == ENGINE_AUDIOBOOKS:
             count = len(sources)
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} audiobook {site_word} "
-                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
         elif engine == ENGINE_TORRENTS:
             count = len(sources)
             word = "indexer" if count == 1 else "indexers"
             self.frame.announce(
                 f"Searching {count} torrent {word} "
-                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
         elif _is_archive_engine(engine):
             count = len(sources)
             word = "collection" if count == 1 else "collections"
             self.frame.announce(
                 f"Searching {count} Internet Archive {word} "
-                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
         elif _is_adult_engine(engine):
             count = len(sources)
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} {ENGINE_LABELS[engine]} {site_word} "
-                f"({self.frame.config['search_timeout_s']:g} seconds each)...")
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
         else:
-            self.frame.announce("Searching YouTube...")
-        threading.Thread(target=self._search, args=(query, engine, self.token,
-                                                    self.stop, sources, order),
-                         daemon=True).start()
+            self.frame.announce(f"Searching {ENGINE_LABELS[engine]}...")
+        threading.Thread(
+            target=self._search,
+            args=(query, engine, self.token, self.stop, sources, order),
+            daemon=True,
+        ).start()
 
     def _search(self, query, engine, token, stop, sources, order=None):
         order = search_order.normalize(order or self.current_order)
         asked = []
         try:
-            if engine == ENGINE_MUSIC:
+            if _is_soulseek_engine(engine):
+                items = soulseek_backend.search(
+                    query,
+                    self.frame.config,
+                    _soulseek_media_kind(engine),
+                    self.frame.config["search_timeout_s"],
+                    stop_event=stop,
+                )
+                asked = [soulseek_backend.SOURCE]
+            elif engine == ENGINE_MUSIC:
+
                 def on_site(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
-                threading.Thread(target=self._sideb_search,
-                                 args=(query, token, engine, stop, order),
-                                 daemon=True, name="search-sideb").start()
-                threading.Thread(target=self._deezer_search,
-                                 args=(query, token, engine, stop, order),
-                                 daemon=True, name="search-deezer").start()
+                threading.Thread(
+                    target=self._sideb_search,
+                    args=(query, token, engine, stop, order),
+                    daemon=True,
+                    name="search-sideb",
+                ).start()
+                threading.Thread(
+                    target=self._deezer_search,
+                    args=(query, token, engine, stop, order),
+                    daemon=True,
+                    name="search-deezer",
+                ).start()
                 items, _answered, asked = musicdl_backend.search(
-                    query, self.frame.config["search_timeout_s"],
-                    on_site=on_site, stop=stop, sources=sources, order=order)
+                    query,
+                    self.frame.config["search_timeout_s"],
+                    on_site=on_site,
+                    stop=stop,
+                    sources=sources,
+                    order=order,
+                )
                 asked.append(sideb_backend.SIDEB_SOURCE)
                 asked.append(deezer_backend._SEARCH_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
                 items = []
             elif engine == ENGINE_BOOKS:
+
                 def on_library(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 items, _answered, asked = book_backend.search(
-                    query, self.frame.config["search_timeout_s"],
-                    on_site=on_library, stop=stop, sources=sources,
-                    order=order)
+                    query,
+                    self.frame.config["search_timeout_s"],
+                    on_site=on_library,
+                    stop=stop,
+                    sources=sources,
+                    order=order,
+                )
                 # on_library already delivered these.
                 items = []
             elif engine == ENGINE_AUDIOBOOKS:
+
                 def on_audiobook_site(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 items, _answered, asked = audiobook_backend.search(
-                    query, self.frame.config["search_timeout_s"],
-                    on_site=on_audiobook_site, stop=stop, sources=sources,
-                    order=order)
+                    query,
+                    self.frame.config["search_timeout_s"],
+                    on_site=on_audiobook_site,
+                    stop=stop,
+                    sources=sources,
+                    order=order,
+                )
                 # on_audiobook_site already delivered these.
                 items = []
             elif engine == ENGINE_TORRENTS:
+
                 def on_indexer(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 items, _answered, asked = torrent_backend.search(
-                    query, self.frame.config["search_timeout_s"],
-                    on_site=on_indexer, stop=stop, sources=sources,
-                    config=self.frame.config, order=order)
+                    query,
+                    self.frame.config["search_timeout_s"],
+                    on_site=on_indexer,
+                    stop=stop,
+                    sources=sources,
+                    config=self.frame.config,
+                    order=order,
+                )
                 # on_indexer already delivered these.
                 items = []
             elif _is_archive_engine(engine):
+
                 def on_collection(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 items, _answered, asked = archive_backend.search(
-                    query, self.frame.config["search_timeout_s"],
-                    on_site=on_collection, stop=stop, sources=sources,
-                    order=order)
+                    query,
+                    self.frame.config["search_timeout_s"],
+                    on_site=on_collection,
+                    stop=stop,
+                    sources=sources,
+                    order=order,
+                )
                 # on_collection already delivered these.
                 items = []
             elif engine == ENGINE_SOUNDCLOUD:
                 items, _title = ytdlp_backend.extract_flat(
-                    f"scsearch30:{query}", order=order)
+                    f"scsearch30:{query}", order=order
+                )
             elif engine == ENGINE_BANDCAMP:
-                items = bandcamp_backend.search(
-                    query, self.frame.config, order=order)
+                items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
                 items = []  # Apple Music search needs MusicKit API
             elif _is_adult_engine(engine):
+
                 def on_adult_site(source, items):
                     wx.CallAfter(self._add_site, token, engine, source, items)
 
                 items, _answered, asked = adult_backend.search(
-                    query, self.frame.config["search_timeout_s"],
-                    on_site=on_adult_site, stop=stop, sources=sources,
-                    category=ADULT_ENGINE_CATEGORIES[engine], order=order)
+                    query,
+                    self.frame.config["search_timeout_s"],
+                    on_site=on_adult_site,
+                    stop=stop,
+                    sources=sources,
+                    category=ADULT_ENGINE_CATEGORIES[engine],
+                    order=order,
+                )
                 # on_adult_site already delivered these.
                 items = []
             else:
                 items = ytdlp_backend.search(query, order=order)
         except Exception as exc:  # noqa: BLE001 - shown to the user
-            wx.CallAfter(self._search_failed, token, str(exc))
+            if _is_soulseek_engine(engine):
+                wx.CallAfter(self._soulseek_failed, token, str(exc))
+            else:
+                wx.CallAfter(self._search_failed, token, str(exc))
             return
         if not stop.is_set():
             wx.CallAfter(self._search_done, token, items, engine, asked)
 
-    def _sideb_search(self, query, token, engine, stop,
-                      order=ORDER_RELEVANCE):
+    def _sideb_search(self, query, token, engine, stop, order=ORDER_RELEVANCE):
         try:
             items = sideb_backend.search(query, self.frame.config, order=order)
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
         if stop.is_set():
             return
-        wx.CallAfter(self._add_site, token, engine,
-                     sideb_backend.SIDEB_SOURCE, items)
+        wx.CallAfter(self._add_site, token, engine, sideb_backend.SIDEB_SOURCE, items)
 
-    def _deezer_search(self, query, token, engine, stop,
-                       order=ORDER_RELEVANCE):
+    def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE):
         try:
             items = deezer_backend.search(query, self.frame.config, order=order)
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
         if stop.is_set():
             return
-        wx.CallAfter(self._add_site, token, engine,
-                     deezer_backend._SEARCH_SOURCE, items)
+        wx.CallAfter(
+            self._add_site, token, engine, deezer_backend._SEARCH_SOURCE, items
+        )
+
+    def _soulseek_failed(self, token, error):
+        if self.closing or token is not self.token:
+            return
+        self.search_btn.Enable()
+        self.done = True
+        self.frame.announce(f"Soulseek unavailable: {error}")
 
     def _search_failed(self, token, error):
         if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
         self.frame.announce("Search failed.")
-        wx.MessageBox(f"Search failed:\n{error}", "blindDL",
-                      wx.OK | wx.ICON_ERROR, self)
+        wx.MessageBox(
+            f"Search failed:\n{error}", "blindDL", wx.OK | wx.ICON_ERROR, self
+        )
 
     def _add_site(self, token, engine, source, items):
         """Append one site's results. Runs on the GUI thread."""
-        if (self.closing or token is not self.token or
-                source in self.shown_sources):
+        if self.closing or token is not self.token or source in self.shown_sources:
             return
         self.shown_sources.add(source)
         if not items:
@@ -885,16 +1116,25 @@ class SearchPanel(wx.Panel):
         for item in items:
             self._insert_deduped(item)
         self.results = _sorted_results(
-            self.results, self.sort_choice.GetSelection(), engine)
+            self.results, self.sort_choice.GetSelection(), engine
+        )
         self._render_results(engine, selected=selected, focused=focused)
 
     @staticmethod
     def _dedup_key(item):
         """Normalised artist + title for deduplication."""
+        if item.get("kind") == "soulseek":
+            # Peer availability is essential on Soulseek: two copies of the
+            # same song are distinct choices with different queues and speeds.
+            return "soulseek\x00{}\x00{}".format(
+                str(item.get("username") or "").casefold(),
+                str(item.get("remote_path") or "").casefold(),
+            )
         title = str(item.get("title") or "").strip().lower()
         artist = str(item.get("artist") or "").strip().lower()
         # Remove punctuation and extra whitespace for fuzzy matching.
         import re
+
         title = re.sub(r"[^\w\s]", "", title)
         artist = re.sub(r"[^\w\s]", "", artist)
         title = " ".join(title.split())
@@ -948,14 +1188,20 @@ class SearchPanel(wx.Panel):
             source = str(item.get("source", "") or "")
             self.frame.announce(
                 f"{self._result_count()}, latest from {source}. "
-                f"{self._pending_phrase()}")
+                f"{self._pending_phrase()}"
+            )
             if not self._pending():
                 self.timer.Stop()
 
     def _insert_result_row(self, row, item, engine):
         self.results_list.InsertItem(row, item["title"])
         self.results_list.SetItem(row, 1, _result_type(item))
-        if engine == ENGINE_BOOKS:
+        if _is_soulseek_engine(engine):
+            self.results_list.SetItem(row, 2, item.get("username", ""))
+            self.results_list.SetItem(row, 3, item.get("folder", ""))
+            self.results_list.SetItem(row, 4, item.get("availability", ""))
+            self.results_list.SetItem(row, 5, item.get("file_size", ""))
+        elif _is_book_engine(engine):
             self.results_list.SetItem(row, 2, item.get("author", ""))
             self.results_list.SetItem(row, 3, item.get("source", ""))
             self.results_list.SetItem(row, 4, str(item.get("year") or ""))
@@ -964,22 +1210,22 @@ class SearchPanel(wx.Panel):
             author = item.get("author", "")
             narrator = item.get("narrator", "")
             if narrator and narrator != author:
-                author = f"{author}, read by {narrator}" if author else \
-                    f"read by {narrator}"
+                author = (
+                    f"{author}, read by {narrator}" if author else f"read by {narrator}"
+                )
             self.results_list.SetItem(row, 2, author)
             self.results_list.SetItem(row, 3, item.get("source", ""))
             self.results_list.SetItem(
-                row, 4, ytdlp_backend.format_duration(item.get("duration_s")))
+                row, 4, ytdlp_backend.format_duration(item.get("duration_s"))
+            )
             chapters = item.get("chapters") or 0
-            self.results_list.SetItem(
-                row, 5, str(chapters) if chapters else "")
-        elif engine == ENGINE_TORRENTS:
+            self.results_list.SetItem(row, 5, str(chapters) if chapters else "")
+        elif _is_torrent_engine(engine):
             seeders = item.get("seeders") or 0
             leechers = item.get("leechers") or 0
             # Both halves of the swarm in one column: seeders alone say how
             # fast it will go, leechers say whether anyone still wants it.
-            self.results_list.SetItem(
-                row, 2, f"{seeders} seeding, {leechers} leeching")
+            self.results_list.SetItem(row, 2, f"{seeders} seeding, {leechers} leeching")
             self.results_list.SetItem(row, 3, item.get("source", ""))
             self.results_list.SetItem(row, 4, item.get("age", ""))
             self.results_list.SetItem(row, 5, item.get("file_size", ""))
@@ -992,17 +1238,20 @@ class SearchPanel(wx.Panel):
             self.results_list.SetItem(row, 2, item.get("artist", ""))
             self.results_list.SetItem(row, 3, item.get("source", ""))
             self.results_list.SetItem(
-                row, 4, ytdlp_backend.format_duration(item.get("duration_s")))
+                row, 4, ytdlp_backend.format_duration(item.get("duration_s"))
+            )
             self.results_list.SetItem(row, 5, item.get("file_size", ""))
         else:
             self.results_list.SetItem(row, 2, item.get("uploader", ""))
             self.results_list.SetItem(row, 3, "YouTube")
             self.results_list.SetItem(
-                row, 4, ytdlp_backend.format_duration(item.get("duration")))
+                row, 4, ytdlp_backend.format_duration(item.get("duration"))
+            )
 
     def _selected_result_objects(self):
         return [
-            self.results[index] for index in self._selected_indices()
+            self.results[index]
+            for index in self._selected_indices()
             if index < len(self.results)
         ]
 
@@ -1026,8 +1275,7 @@ class SearchPanel(wx.Panel):
         focused = self._focused_result_object()
         mode = self.sort_choice.GetSelection()
         self.results = _sorted_results(self.results, mode, self.result_engine)
-        self._render_results(
-            self.result_engine, selected=selected, focused=focused)
+        self._render_results(self.result_engine, selected=selected, focused=focused)
         labels = _sort_labels(self.result_engine)
         label = labels[mode] if 0 <= mode < len(labels) else "selected order"
         if self.results:
@@ -1048,8 +1296,7 @@ class SearchPanel(wx.Panel):
         if len(pending) > 3:
             names += f" and {len(pending) - 3} more"
         site_word = "site" if len(pending) == 1 else "sites"
-        return (f"Still searching {len(pending)} {site_word} after {waited}s: "
-                f"{names}.")
+        return f"Still searching {len(pending)} {site_word} after {waited}s: {names}."
 
     def _result_count(self):
         count = len(self.results)
@@ -1064,25 +1311,26 @@ class SearchPanel(wx.Panel):
             return
         if self.done:
             self.frame.announce(
-                f"{self._result_count()} so far. {self._pending_phrase()}")
+                f"{self._result_count()} so far. {self._pending_phrase()}"
+            )
 
     def _search_done(self, token, items, engine, asked=()):
         if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
         # yt-dlp hands back everything at once; music results arrived per site.
-        self._add_site(token, engine, "", items)
+        source = soulseek_backend.SOURCE if _is_soulseek_engine(engine) else ""
+        self._add_site(token, engine, source, items)
         self.asked = list(asked)
         self.done = True
         pending = self._pending()
         order_phrase = _order_phrase(
-            self.current_order, self.order_unable,
-            self.order_source_count)
+            self.current_order, self.order_unable, self.order_source_count
+        )
         if pending:
             # Deezer and friends can run for minutes; never call that "found
             # nothing" when the sites are still going.
-            message = (
-                f"{self._result_count()} so far. {self._pending_phrase()}")
+            message = f"{self._result_count()} so far. {self._pending_phrase()}"
             if order_phrase:
                 message += f" {order_phrase}"
             self.frame.announce(message)
@@ -1135,7 +1383,8 @@ class SearchPanel(wx.Panel):
     def _resolve_archive_files(self, token, item):
         try:
             files = archive_backend.item_files(
-                item["identifier"], video=bool(item.get("video")))
+                item["identifier"], video=bool(item.get("video"))
+            )
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._archive_files_failed, token, str(exc))
             return
@@ -1145,8 +1394,12 @@ class SearchPanel(wx.Panel):
         if self.closing or token is not self.archive_token:
             return
         self.frame.announce("Could not read that item's file list.")
-        wx.MessageBox(f"Could not read that item:\n{error}", "blindDL",
-                      wx.OK | wx.ICON_ERROR, self)
+        wx.MessageBox(
+            f"Could not read that item:\n{error}",
+            "blindDL",
+            wx.OK | wx.ICON_ERROR,
+            self,
+        )
 
     def _archive_files_ready(self, token, item, files):
         if self.closing or token is not self.archive_token:
@@ -1185,8 +1438,9 @@ class SearchPanel(wx.Panel):
         event.Skip()
 
     def on_copy_url(self, event):
-        indices = [index for index in self._selected_indices()
-                   if index < len(self.results)]
+        indices = [
+            index for index in self._selected_indices() if index < len(self.results)
+        ]
         if not indices:
             self.frame.announce("Select a result first.")
             return
@@ -1213,8 +1467,9 @@ class SearchPanel(wx.Panel):
                 del silence
             if opened:
                 try:
-                    set_ok = bool(wx.TheClipboard.SetData(
-                        wx.TextDataObject("\n".join(urls))))
+                    set_ok = bool(
+                        wx.TheClipboard.SetData(wx.TextDataObject("\n".join(urls)))
+                    )
                     if set_ok:
                         # Keep the URL on the clipboard after blindDL exits.
                         copied = bool(wx.TheClipboard.Flush())
@@ -1226,7 +1481,8 @@ class SearchPanel(wx.Panel):
                 time.sleep(0.025)
         if not copied:
             self.frame.announce(
-                "The clipboard is busy. Wait a moment and press Control+C again.")
+                "The clipboard is busy. Wait a moment and press Control+C again."
+            )
             return
         noun = "URL" if len(urls) == 1 else "URLs"
         message = f"Copied {len(urls)} {noun}."
@@ -1244,7 +1500,8 @@ class SearchPanel(wx.Panel):
                     self.results_list.Select(focused)
             return
         index, _flags = self.results_list.HitTest(
-            self.results_list.ScreenToClient(position))
+            self.results_list.ScreenToClient(position)
+        )
         if index < 0 or self.results_list.IsSelected(index):
             return
         for selected in self._selected_indices():
@@ -1257,6 +1514,25 @@ class SearchPanel(wx.Panel):
         menu = wx.Menu()
         preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
         download = menu.Append(wx.ID_ANY, "&Download selected")
+        focused = self._focused_result_object()
+        soulseek_item = (
+            focused if focused and focused.get("kind") == "soulseek" else None
+        )
+        download_folder = menu.Append(wx.ID_ANY, "Download containing &folder")
+        browse_user = menu.Append(wx.ID_ANY, "&Browse user's files")
+        send_message = menu.Append(wx.ID_ANY, "Send user a &message")
+        add_friend = menu.Append(wx.ID_ANY, "Add user to &friends")
+        free_slot = menu.Append(wx.ID_ANY, "Give user a free &slot")
+        view_profile = menu.Append(wx.ID_ANY, "View user &profile")
+        for action in (
+            download_folder,
+            browse_user,
+            send_message,
+            add_friend,
+            free_slot,
+            view_profile,
+        ):
+            action.Enable(soulseek_item is not None)
         copy_url = menu.Append(wx.ID_ANY, "Copy &URL\tCtrl+C")
         open_browser = menu.Append(wx.ID_ANY, "&Open in browser\tCtrl+O")
         menu.AppendSeparator()
@@ -1265,17 +1541,58 @@ class SearchPanel(wx.Panel):
         has_selection = bool(self._selected_indices())
         preview_item.Enable(has_selection and _plays(self.result_engine))
         download.Enable(has_selection)
-        copy_url.Enable(has_selection)
-        open_browser.Enable(has_selection and
-                            self.result_engine in (
-                                ENGINE_MUSIC, ENGINE_YOUTUBE,
-                                ENGINE_SOUNDCLOUD, ENGINE_TORRENTS))
+        copy_url.Enable(has_selection and soulseek_item is None)
+        open_browser.Enable(
+            has_selection
+            and self.result_engine
+            in (ENGINE_MUSIC, ENGINE_YOUTUBE, ENGINE_SOUNDCLOUD, ENGINE_TORRENTS)
+        )
         clear.Enable(has_selection)
         select_all.Enable(
-            self.results_list.GetSelectedItemCount() <
-            self.results_list.GetItemCount())
+            self.results_list.GetSelectedItemCount() < self.results_list.GetItemCount()
+        )
         menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
+        menu.Bind(
+            wx.EVT_MENU,
+            lambda selected: self._download_soulseek_folder(soulseek_item),
+            download_folder,
+        )
+        menu.Bind(
+            wx.EVT_MENU,
+            lambda selected: self.frame.open_soulseek_user(
+                soulseek_item.get("username", "") if soulseek_item else ""
+            ),
+            browse_user,
+        )
+        menu.Bind(
+            wx.EVT_MENU,
+            lambda selected: self.frame.message_soulseek_user(
+                soulseek_item.get("username", "") if soulseek_item else ""
+            ),
+            send_message,
+        )
+        menu.Bind(
+            wx.EVT_MENU,
+            lambda selected: self.frame.add_soulseek_friend(
+                soulseek_item.get("username", "") if soulseek_item else ""
+            ),
+            add_friend,
+        )
+        menu.Bind(
+            wx.EVT_MENU,
+            lambda selected: self.frame.give_soulseek_free_slot(
+                soulseek_item.get("username", "") if soulseek_item else ""
+            ),
+            free_slot,
+        )
+        menu.Bind(
+            wx.EVT_MENU,
+            lambda selected: self.frame.view_soulseek_profile(
+                soulseek_item.get("username", "") if soulseek_item else ""
+            ),
+            view_profile,
+        )
         menu.Bind(wx.EVT_MENU, self.on_copy_url, copy_url)
         menu.Bind(wx.EVT_MENU, self.on_open_browser, open_browser)
         menu.Bind(wx.EVT_MENU, self._select_all, select_all)
@@ -1283,8 +1600,60 @@ class SearchPanel(wx.Panel):
         self.results_list.PopupMenu(menu)
         menu.Destroy()
 
+    def _download_soulseek_folder(self, item):
+        if not item:
+            return
+        username = item.get("username", "")
+        folder = item.get("folder", "")
+        if not username or not folder:
+            self.frame.announce("That Soulseek result has no containing folder.")
+            return
+        self.frame.announce(f"Loading folder {folder} from {username}...")
+
+        def worker():
+            try:
+                directories = soulseek_backend.browse_user(
+                    username, self.frame.config
+                )
+                prefix = folder.rstrip("\\") + "\\"
+                files = [
+                    file_item
+                    for directory in directories
+                    if directory["name"].casefold() == folder.casefold()
+                    or directory["name"].casefold().startswith(prefix.casefold())
+                    for file_item in directory["files"]
+                    if not file_item.get("locked")
+                ]
+            except Exception as exc:  # noqa: BLE001 - shown in the GUI
+                wx.CallAfter(
+                    self.frame.announce,
+                    f"Could not load Soulseek folder: {exc}",
+                )
+                return
+            wx.CallAfter(self._queue_soulseek_folder, folder, files)
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="blinddl-soulseek-folder-download",
+        ).start()
+
+    def _queue_soulseek_folder(self, folder, files):
+        for original in files:
+            item = dict(original)
+            relative = ntpath.relpath(item["remote_path"], folder)
+            item["target_relative_path"] = ntpath.join(
+                ntpath.basename(folder.rstrip("\\")), relative
+            )
+            self.frame.queue.add_soulseek(item, item["title"])
+        if files:
+            self.frame.announce(f"Queued {len(files)} files from {folder}.")
+        else:
+            self.frame.announce("That Soulseek folder contains no downloadable files.")
+
     def on_open_browser(self, event):
         import webbrowser
+
         for index in self._selected_indices():
             if index >= len(self.results):
                 continue
@@ -1296,18 +1665,21 @@ class SearchPanel(wx.Panel):
         self.frame.announce(f"Opened {count} {noun} in browser.")
 
     def on_preview_selected(self, event):
-        if self.result_engine == ENGINE_BOOKS:
+        if _is_book_engine(self.result_engine):
             self.frame.announce(
                 "Books cannot be previewed. Press Enter to download, then "
-                "open it from the Library tab.")
+                "open it from the Library tab."
+            )
             return
-        if self.result_engine == ENGINE_TORRENTS:
+        if _is_torrent_engine(self.result_engine):
             self.frame.announce(
                 "Torrents cannot be previewed. Press Enter to open the "
-                "magnet link in your torrent client.")
+                "magnet link in your torrent client."
+            )
             return
-        indices = [index for index in self._selected_indices()
-                   if index < len(self.results)]
+        indices = [
+            index for index in self._selected_indices() if index < len(self.results)
+        ]
         if not indices:
             self.frame.announce("Select a result to preview first.")
             return
@@ -1315,7 +1687,18 @@ class SearchPanel(wx.Panel):
         if index not in indices:
             index = indices[0]
         item = self.results[index]
-        audio_only = self.result_engine in (ENGINE_MUSIC, ENGINE_SOUNDCLOUD, ENGINE_BANDCAMP, ENGINE_AUDIOBOOKS)
+        if item.get("kind") == "soulseek":
+            self.frame.announce(
+                "Soulseek files cannot be previewed before downloading. "
+                "Press Enter to download this file."
+            )
+            return
+        audio_only = self.result_engine in (
+            ENGINE_MUSIC,
+            ENGINE_SOUNDCLOUD,
+            ENGINE_BANDCAMP,
+            ENGINE_AUDIOBOOKS,
+        )
         token = self.preview_token = object()
         self.preview_btn.Disable()
         self.frame.announce(f"Preparing preview: {item['title']}")
@@ -1329,7 +1712,8 @@ class SearchPanel(wx.Panel):
     def _resolve_preview(self, token, item, audio_only):
         try:
             location, title = preview.resolve_search_result(
-                item, audio_only, self.frame.config)
+                item, audio_only, self.frame.config
+            )
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._preview_failed, token, str(exc))
             return
@@ -1347,30 +1731,36 @@ class SearchPanel(wx.Panel):
         self.preview_btn.Enable()
         self.frame.announce("Could not play that preview.")
         wx.MessageBox(
-            f"Could not play that preview:\n{error}", "blindDL",
-            wx.OK | wx.ICON_ERROR, self,
+            f"Could not play that preview:\n{error}",
+            "blindDL",
+            wx.OK | wx.ICON_ERROR,
+            self,
         )
 
     def on_download_selected(self, event):
-        indices = [i for i in self._selected_indices()
-                   if i < len(self.results)]
+        indices = [i for i in self._selected_indices() if i < len(self.results)]
         if not indices:
             self.frame.announce("Select a result first.")
             return
         engine = self.result_engine
-        if _is_archive_engine(engine) and len(indices) == 1:
+        if (
+            _is_archive_engine(engine)
+            and len(indices) == 1
+            and self.results[indices[0]].get("kind") != "soulseek"
+        ):
             # One Archive item can be a whole radio series. Ask which
             # episodes to take before filling the queue with hundreds.
             self._queue_archive_item(self.results[indices[0]])
             return
         for index in indices:
             item = self.results[index]
-            if engine == ENGINE_MUSIC:
+            if item.get("kind") == "soulseek":
+                self.frame.queue.add_soulseek(item, item["title"])
+            elif engine == ENGINE_MUSIC:
                 if item.get("kind") in ("sideb", "deezer"):
                     self.frame.queue.add_sideb(item["url"], item["title"])
                 else:
-                    self.frame.queue.add_musicdl(
-                        item["song_info"], item["title"])
+                    self.frame.queue.add_musicdl(item["song_info"], item["title"])
             elif engine == ENGINE_BOOKS:
                 self.frame.queue.add_book(item, item["title"])
             elif engine == ENGINE_AUDIOBOOKS:
@@ -1378,11 +1768,9 @@ class SearchPanel(wx.Panel):
             elif engine == ENGINE_TORRENTS:
                 self.frame.queue.add_torrent(item, item["title"])
             elif engine == ENGINE_SOUNDCLOUD:
-                self.frame.queue.add_ytdlp(item["url"], item["title"],
-                                           audio_only=True)
+                self.frame.queue.add_ytdlp(item["url"], item["title"], audio_only=True)
             elif engine == ENGINE_BANDCAMP:
-                self.frame.queue.add_ytdlp(item["url"], item["title"],
-                                           audio_only=True)
+                self.frame.queue.add_ytdlp(item["url"], item["title"], audio_only=True)
             elif _is_archive_engine(engine):
                 self.frame.queue.add_archive(item, item["title"])
             elif _is_adult_engine(engine):

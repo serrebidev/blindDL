@@ -325,7 +325,9 @@ class _ThisVidSearchParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.items = []
         self.seen = set()
-        self._pending = None
+        # Python 3.14.7 added HTMLParser._pending for its input buffer. Keep
+        # card state under a distinct name instead of clobbering that buffer.
+        self._pending_item = None
         self._pending_private = False
 
     @staticmethod
@@ -337,18 +339,18 @@ class _ThisVidSearchParser(HTMLParser):
         )
 
     def _finish_pending(self):
-        if self._pending is None:
+        if self._pending_item is None:
             return
-        url, title = self._pending
+        url, title = self._pending_item
         if not self._pending_private and url not in self.seen:
             self.seen.add(url)
             self.items.append((url, title))
-        self._pending = None
+        self._pending_item = None
         self._pending_private = False
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
-        if self._pending is not None:
+        if self._pending_item is not None:
             self._pending_private = (
                 self._pending_private or self._marks_private(values))
         if tag.casefold() != "a":
@@ -368,7 +370,7 @@ class _ThisVidSearchParser(HTMLParser):
         title = html.unescape(values.get("title") or "").strip()
         if not title:
             title = slug.replace("-", " ").strip().title()
-        self._pending = (url, title)
+        self._pending_item = (url, title)
         self._pending_private = self._marks_private(values)
 
     def handle_endtag(self, tag):
@@ -391,17 +393,17 @@ class _ThisVidPlaylistParser(HTMLParser):
         self.heading = ""
         self._in_h1 = False
         self._heading_parts = []
-        self._pending = None
+        self._pending_item = None
         self._pending_private = False
 
     def _finish_pending(self):
-        if self._pending is not None:
-            direct_url, title = self._pending
+        if self._pending_item is not None:
+            direct_url, title = self._pending_item
             if direct_url not in self.seen:
                 self.seen.add(direct_url)
                 self.items.append(
                     (direct_url, title, self._pending_private))
-        self._pending = None
+        self._pending_item = None
         self._pending_private = False
 
     def handle_starttag(self, tag, attrs):
@@ -410,7 +412,7 @@ class _ThisVidPlaylistParser(HTMLParser):
         if folded == "h1":
             self._in_h1 = True
             return
-        if self._pending is not None:
+        if self._pending_item is not None:
             classes = set((values.get("class") or "").casefold().split())
             if "private" in classes or values.get("alt", "").casefold() == "private":
                 self._pending_private = True
@@ -427,7 +429,7 @@ class _ThisVidPlaylistParser(HTMLParser):
         if not title:
             return
         direct_url = f"https://thisvid.com/videos/{match.group(2)}/"
-        self._pending = (direct_url, title)
+        self._pending_item = (direct_url, title)
 
     def handle_data(self, data):
         if self._in_h1:

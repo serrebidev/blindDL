@@ -89,13 +89,23 @@ Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder,
 
 Ctrl+Shift+S chooses which sites each source searches, and newly supported sites are enabled automatically. Anna's Archive results resolve through the public LibGen mirrors; if you have a membership, put its key in Settings to use the fast partner servers instead.
 
+## Soulseek
+
+Soulseek is an optional peer-to-peer backend. Enable it and enter an account on the **Soulseek** Settings page, or use **Sign in or sign up** there: Soulseek registers an unused username during its first successful login. Once connected, Search gains four Soulseek-only choices for music and audio, movies and video, books and documents, and `.torrent` files. The ordinary Music, Internet Archive, book, torrent, YouTube, and adult choices continue to search only their named sites, avoiding duplicate and unrelated peer results. Each Soulseek result identifies the peer, shows its remote folder, and reports its free-slot, queue, and average-speed information. Its context menu can download the file or its whole containing folder, browse the peer, send a message, add the peer as a friend, grant upload priority, or view the peer's profile. Downloads use Soulseek's remote queue and report progress, speed, ETA, errors, and cancellation in BlindDL's Downloads tab.
+
+Soulseek downloads use the ordinary BlindDL download folder. That Library folder is shared publicly by default, including files completed while BlindDL is running. The Settings page can turn Library sharing off or add any number of other shared folders. It also controls the public and obfuscated listening ports, UPnP forwarding, connection obfuscation, simultaneous upload slots, upload and download limits, the result cap, and the public profile description. Sharing and uploads continue while BlindDL is hidden in the system tray and stop on File, Exit.
+
+Enabling Soulseek also adds **Chat** and **Messages** tabs. Chat lists rooms, joins and leaves public or private rooms, and sends and receives room messages. Messages keeps a direct-message transcript and exposes your Soulseek friend list with presence status; select a friend to address a message, or type a username directly. Friends can be added and removed from that tab and are restored on the next run. Browse opens an accessible folder tree and file list with a local filter; folders can be navigated in either view, and both views offer file and recursive-folder downloads. Profile, message, friend, and free-slot-priority actions are available there too.
+
+The **Uploads** tab immediately after Downloads combines live Soulseek uploads from shared folders with torrents that are still seeding. It shows the service, peer, progress, speed, and torrent ratio, and its context menu can stop selected uploads or seeds.
+
 ## Torrents
 
 The Torrents source searches Knaben, The Pirate Bay, EZTV, Nyaa, Torrents-CSV, LimeTorrents, BitSearch and the Internet Archive at once. Archive torrents are the dependable ones: every item is seeded by the Archive itself, so they download at full speed even with no other peers, and one torrent brings a whole item rather than a single file. Tools, My torrent indexers adds your own Prowlarr or Jackett instance, which is how private trackers are reached — that tool already holds the login and the passkey, so BlindDL never stores a tracker password.
 
 A chosen torrent opens in whatever BitTorrent client you already use. Tick **Download torrents in BlindDL** in Settings, Torrents and BlindDL downloads it itself instead: progress, speed and the swarm's seed and peer counts appear in the Downloads tab, and finished files land in the Library with everything else. It offers to install libtorrent the first time you switch it on.
 
-That page also holds a separate folder for torrents, download and upload speed limits, how many run at once, the peer connection limit, seeding limits by ratio and by time, the incoming port and whether the router is asked to forward it, encryption, sequential download for playing a file before it finishes, and a SOCKS5 or HTTP proxy for swarm traffic. Seeding carries on after a download finishes, under those limits; Stop seeding on the Downloads tab ends it early.
+That page also holds a separate folder for torrents, download and upload speed limits, how many run at once, the peer connection limit, seeding limits by ratio and by time, the incoming port and whether the router is asked to forward it, encryption, sequential download for playing a file before it finishes, and a SOCKS5 or HTTP proxy for swarm traffic. Seeding carries on after a download finishes, under those limits; Stop seeding on the Downloads or Uploads tab ends it early.
 
 BlindDL joins swarms as the current qBittorrent release, which is what trackers that check the client expect to see. The version is looked up from qBittorrent's own releases once a day, and Settings can pin a particular one.
 
@@ -117,7 +127,8 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 
 ## Keyboard shortcuts
 
-- Ctrl+1 / 2 / 3 / 4 / 5 — URL / Search / Downloads / Library / Subscriptions tabs
+- Ctrl+1 / 2 / 3 / 4 / 5 / 6 — URL / Search / Downloads / Uploads / Library / Subscriptions tabs
+- Ctrl+7 / 8 — Soulseek Chat / Messages tabs when Soulseek is enabled
 - Ctrl+L — jump to the URL field
 - Ctrl+F — jump to search
 - Ctrl+O — open the download folder

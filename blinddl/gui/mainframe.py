@@ -11,27 +11,38 @@ import time
 
 import wx
 
-from .. import APP_NAME, musicdl_backend, torrent_engine, updater
+from .. import (
+    APP_NAME,
+    musicdl_backend,
+    soulseek_backend,
+    torrent_engine,
+    updater,
+)
 from ..config import Config
 from ..downloader import DownloadQueue, STATUS_DONE, STATUS_ERROR
 from ..runtime import open_folder
 from ..subscriptions import SubscriptionStore
+from .chat_panel import ChatPanel
 from .downloads_panel import DownloadsPanel
 from .feeds_dialog import FeedsDialog
 from .library_panel import LibraryPanel
+from .messages_panel import MessagesPanel
 from .search_panel import SearchPanel
 from .settings_dialog import SettingsDialog
+from .soulseek_user_dialog import UserBrowserDialog, UserProfileDialog
 from .sources_dialog import SourcesDialog
 from .subs_panel import SubsPanel
 from .tray import TrayIcon
 from .update_dialog import UpdateDialog
 from .url_panel import UrlPanel
+from .uploads_panel import UploadsPanel
 
 TAB_URL = 0
 TAB_SEARCH = 1
 TAB_DOWNLOADS = 2
-TAB_LIBRARY = 3
-TAB_SUBS = 4
+TAB_UPLOADS = 3
+TAB_LIBRARY = 4
+TAB_SUBS = 5
 
 
 class MainFrame(wx.Frame):
@@ -45,13 +56,15 @@ class MainFrame(wx.Frame):
         self.tray = None
         self.config = Config()
         self.queue = DownloadQueue(self.config, self._queue_notify)
-        self.subs = SubscriptionStore(self.config, self.queue,
-                                      notify=self._subs_notify)
+        self.subs = SubscriptionStore(self.config, self.queue, notify=self._subs_notify)
         self._last_counts = None
+        self.chat_panel = None
+        self.messages_panel = None
 
         self._build_ui()
         self._build_menus()
         self._bind_shortcuts()
+        soulseek_backend.add_listener(self._queue_soulseek_event)
 
         self.subs.start()
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -61,6 +74,8 @@ class MainFrame(wx.Frame):
         # Build the music-site clients now so the first search does not pay
         # for it, and clear last session's search scratch files.
         threading.Thread(target=musicdl_backend.warm_up, daemon=True).start()
+        if self.config["soulseek_enabled"]:
+            self._apply_soulseek_setting()
 
     # -- UI construction -----------------------------------------------------
 
@@ -69,17 +84,20 @@ class MainFrame(wx.Frame):
         self.url_panel = UrlPanel(self.notebook, self)
         self.search_panel = SearchPanel(self.notebook, self)
         self.downloads_panel = DownloadsPanel(self.notebook, self)
+        self.uploads_panel = UploadsPanel(self.notebook, self)
         self.library_panel = LibraryPanel(self.notebook, self)
         self.subs_panel = SubsPanel(self.notebook, self)
         self.notebook.AddPage(self.url_panel, "URL")
         self.notebook.AddPage(self.search_panel, "Search")
         self.notebook.AddPage(self.downloads_panel, "Downloads")
+        self.notebook.AddPage(self.uploads_panel, "Uploads")
         self.notebook.AddPage(self.library_panel, "Library")
         self.notebook.AddPage(self.subs_panel, "Subscriptions")
-        self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
-
         self.CreateStatusBar(2)
         self.SetStatusWidths([-3, -1])
+        self._sync_soulseek_tabs()
+        self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
+
         self.announce("Ready.")
 
     def _build_menus(self):
@@ -98,8 +116,7 @@ class MainFrame(wx.Frame):
         self.ID_ADD_SUB = wx.NewIdRef()
         tools_menu.Append(self.ID_ADD_SUB, "&Add subscription...")
         self.ID_CHECK_SUBS = wx.NewIdRef()
-        tools_menu.Append(self.ID_CHECK_SUBS,
-                          "Check &subscriptions\tCtrl+Shift+C")
+        tools_menu.Append(self.ID_CHECK_SUBS, "Check &subscriptions\tCtrl+Shift+C")
         tools_menu.AppendSeparator()
         self.ID_UPDATE = wx.NewIdRef()
         tools_menu.Append(self.ID_UPDATE, "Check for &updates...\tCtrl+U")
@@ -124,22 +141,36 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
 
     def _bind_shortcuts(self):
-        ids = [wx.NewIdRef() for _ in range(7)]
+        ids = [wx.NewIdRef() for _ in range(10)]
         entries = [
             (wx.ACCEL_CTRL, ord("1"), ids[0]),
             (wx.ACCEL_CTRL, ord("2"), ids[1]),
             (wx.ACCEL_CTRL, ord("3"), ids[2]),
             (wx.ACCEL_CTRL, ord("4"), ids[3]),
             (wx.ACCEL_CTRL, ord("5"), ids[4]),
-            (wx.ACCEL_CTRL, ord("F"), ids[5]),
-            (wx.ACCEL_CTRL, ord("L"), ids[6]),
+            (wx.ACCEL_CTRL, ord("6"), ids[5]),
+            (wx.ACCEL_CTRL, ord("7"), ids[6]),
+            (wx.ACCEL_CTRL, ord("8"), ids[7]),
+            (wx.ACCEL_CTRL, ord("F"), ids[8]),
+            (wx.ACCEL_CTRL, ord("L"), ids[9]),
         ]
-        self.SetAcceleratorTable(wx.AcceleratorTable(
-            [wx.AcceleratorEntry(*e) for e in entries]))
-        for tab, bind_id in enumerate(ids[:5]):
+        self.SetAcceleratorTable(
+            wx.AcceleratorTable([wx.AcceleratorEntry(*e) for e in entries])
+        )
+        for tab, bind_id in enumerate(ids[:6]):
             self.Bind(wx.EVT_MENU, lambda e, t=tab: self.show_tab(t), id=bind_id)
-        self.Bind(wx.EVT_MENU, lambda e: self._focus_search(), id=ids[5])
-        self.Bind(wx.EVT_MENU, lambda e: self._focus_url(), id=ids[6])
+        self.Bind(
+            wx.EVT_MENU,
+            lambda event: self._show_optional_tab(self.chat_panel, "Chat"),
+            id=ids[6],
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda event: self._show_optional_tab(self.messages_panel, "Messages"),
+            id=ids[7],
+        )
+        self.Bind(wx.EVT_MENU, lambda e: self._focus_search(), id=ids[8])
+        self.Bind(wx.EVT_MENU, lambda e: self._focus_url(), id=ids[9])
 
     # -- helpers used by panels ----------------------------------------------
 
@@ -160,12 +191,123 @@ class MainFrame(wx.Frame):
     def show_downloads_tab(self):
         self.show_tab(TAB_DOWNLOADS)
 
+    def _show_optional_tab(self, panel, name):
+        if panel is None:
+            self.announce(f"{name} is available when Soulseek is enabled in Settings.")
+            return
+        for index in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPage(index) is panel:
+                self.show_tab(index)
+                return
+
+    def open_soulseek_user(self, username=""):
+        dialog = UserBrowserDialog(self, self, username)
+        dialog.ShowModal()
+        if dialog:
+            dialog.Destroy()
+
+    def message_soulseek_user(self, username):
+        username = str(username or "").strip()
+        if not username or self.messages_panel is None:
+            self.announce("Enter a Soulseek username, and enable Soulseek if needed.")
+            return
+        self._show_optional_tab(self.messages_panel, "Messages")
+        self.messages_panel.recipient_text.SetValue(username)
+        self.messages_panel.message_text.SetFocus()
+        self.announce(f"Message recipient: {username}.")
+
+    def _user_action(self, action, username, finished, thread_name):
+        username = str(username or "").strip()
+        if not username:
+            self.announce("Enter a Soulseek username.")
+            return
+
+        def worker():
+            try:
+                result = action(username, self.config)
+            except Exception as exc:  # noqa: BLE001 - presented to the user
+                wx.CallAfter(self.announce, f"Soulseek user action failed: {exc}")
+                return
+            wx.CallAfter(finished, username, result)
+
+        threading.Thread(target=worker, daemon=True, name=thread_name).start()
+
+    def add_soulseek_friend(self, username):
+        self._user_action(
+            soulseek_backend.add_friend,
+            username,
+            self._friend_added,
+            "blinddl-soulseek-add-friend",
+        )
+
+    def _friend_added(self, username, friends):
+        saved = list(self.config.get("soulseek_friends", []) or [])
+        if username.casefold() not in {value.casefold() for value in saved}:
+            saved.append(username)
+            self.config["soulseek_friends"] = saved
+            self.config.save()
+        if self.messages_panel is not None:
+            self.messages_panel._show_friends(friends)
+        self.announce(f"Added Soulseek friend {username}.")
+
+    def give_soulseek_free_slot(self, username):
+        self._user_action(
+            soulseek_backend.give_free_slot,
+            username,
+            self._free_slot_added,
+            "blinddl-soulseek-free-slot",
+        )
+
+    def _free_slot_added(self, username, priority_users):
+        self.config["soulseek_priority_users"] = list(priority_users)
+        self.config.save()
+        self.announce(f"Gave {username} Soulseek upload priority for a free slot.")
+
+    def view_soulseek_profile(self, username):
+        self.announce(f"Loading Soulseek profile for {username}...")
+        self._user_action(
+            soulseek_backend.user_profile,
+            username,
+            self._profile_loaded,
+            "blinddl-soulseek-user-profile",
+        )
+
+    def _profile_loaded(self, username, profile):
+        if self._closing:
+            return
+        dialog = UserProfileDialog(self, profile)
+        dialog.ShowModal()
+        dialog.Destroy()
+
+    def _sync_soulseek_tabs(self):
+        enabled = bool(self.config["soulseek_enabled"])
+        if enabled and self.chat_panel is None:
+            self.chat_panel = ChatPanel(self.notebook, self)
+            self.messages_panel = MessagesPanel(self.notebook, self)
+            self.notebook.AddPage(self.chat_panel, "Chat")
+            self.notebook.AddPage(self.messages_panel, "Messages")
+            return
+        if enabled:
+            return
+        for attribute in ("messages_panel", "chat_panel"):
+            panel = getattr(self, attribute)
+            if panel is None:
+                continue
+            panel.shutdown()
+            for index in range(self.notebook.GetPageCount()):
+                if self.notebook.GetPage(index) is panel:
+                    self.notebook.RemovePage(index)
+                    break
+            panel.Destroy()
+            setattr(self, attribute, None)
+
     def play_media(self, player, location, title):
         """Start one player and stop any other tab's active playback."""
         for other in (
-                self.url_panel.player,
-                self.search_panel.player,
-                self.library_panel.player):
+            self.url_panel.player,
+            self.search_panel.player,
+            self.library_panel.player,
+        ):
             if other is not player:
                 other.stop(silent=True)
         player.load(location, title)
@@ -200,7 +342,9 @@ class MainFrame(wx.Frame):
             active, queued, done, failed = counts
             self.SetStatusText(
                 f"{active} active, {queued} queued, {done} done, "
-                f"{failed} failed/cancelled", 1)
+                f"{failed} failed/cancelled",
+                1,
+            )
         if item.status == STATUS_DONE:
             if self.notebook.GetSelection() == TAB_LIBRARY:
                 self.library_panel.refresh(announce=False)
@@ -213,6 +357,27 @@ class MainFrame(wx.Frame):
             return
         wx.CallAfter(self.announce, message)
         wx.CallAfter(self._refresh_subscriptions)
+
+    def _queue_soulseek_event(self, event):
+        if not self._closing:
+            wx.CallAfter(self._on_soulseek_event, event)
+
+    def _on_soulseek_event(self, event):
+        if self._closing:
+            return
+        if self.chat_panel is not None:
+            self.chat_panel.handle_soulseek_event(event)
+        if self.messages_panel is not None:
+            self.messages_panel.handle_soulseek_event(event)
+        self.uploads_panel.handle_soulseek_event(event)
+        message = event.get("message", {})
+        if event.get("type") == "private_message" and not message.get("outgoing"):
+            self.announce(f"Private Soulseek message from {message.get('user', '')}.")
+        elif event.get("type") == "room_message" and not message.get("outgoing"):
+            self.announce(
+                f"Soulseek room message from {message.get('user', '')} "
+                f"in {message.get('room', '')}."
+            )
 
     def _refresh_subscriptions(self):
         """Refresh only while the native subscription controls still exist."""
@@ -231,12 +396,14 @@ class MainFrame(wx.Frame):
         dialog = SettingsDialog(self, self.config)
         if dialog.ShowModal() == wx.ID_OK:
             dialog.apply()
+            self._sync_soulseek_tabs()
             self.search_panel.refresh_engine_choices()
             self.library_panel.refresh(announce=False)
             self.queue.set_concurrency(self.config["max_concurrent"])
             self.subs.wake()
             self._apply_tray_setting()
             self._apply_torrent_setting()
+            self._apply_soulseek_setting()
             self.announce("Settings saved.")
         dialog.Destroy()
 
@@ -263,23 +430,27 @@ class MainFrame(wx.Frame):
             "Downloading torrents in blindDL needs the libtorrent package, "
             "which is not installed yet.\n\nInstall it now? It is a few "
             "megabytes and takes about a minute.",
-            "Install libtorrent", wx.YES_NO | wx.ICON_QUESTION, self)
+            "Install libtorrent",
+            wx.YES_NO | wx.ICON_QUESTION,
+            self,
+        )
         if answer != wx.YES:
             self.config["torrent_engine"] = False
             self.config.save()
-            self.announce(
-                "Left off. Torrents will keep opening in your own client.")
+            self.announce("Left off. Torrents will keep opening in your own client.")
             return
         self.announce("Installing libtorrent; this takes about a minute...")
-        threading.Thread(target=self._install_torrent_engine, daemon=True,
-                         name="blinddl-libtorrent").start()
+        threading.Thread(
+            target=self._install_torrent_engine, daemon=True, name="blinddl-libtorrent"
+        ).start()
 
     def _install_torrent_engine(self):
         ok = torrent_engine.install()
         if ok:
-            wx.CallAfter(self.announce,
-                         "libtorrent installed. blindDL now downloads "
-                         "torrents itself.")
+            wx.CallAfter(
+                self.announce,
+                "libtorrent installed. blindDL now downloads torrents itself.",
+            )
             return
         self.config["torrent_engine"] = False
         self.config.save()
@@ -289,8 +460,33 @@ class MainFrame(wx.Frame):
         if self._closing:
             return
         self.announce("libtorrent could not be installed.")
-        wx.MessageBox(torrent_engine.install_hint(), "Install libtorrent",
-                      wx.OK | wx.ICON_INFORMATION, self)
+        wx.MessageBox(
+            torrent_engine.install_hint(),
+            "Install libtorrent",
+            wx.OK | wx.ICON_INFORMATION,
+            self,
+        )
+
+    def _apply_soulseek_setting(self):
+        """Connect, reconnect, or stop the optional persistent peer client."""
+        threading.Thread(
+            target=self._configure_soulseek,
+            daemon=True,
+            name="blinddl-soulseek-configure",
+        ).start()
+
+    def _configure_soulseek(self):
+        try:
+            soulseek_backend.configure(self.config)
+        except Exception as exc:  # noqa: BLE001 - shown on the status bar
+            if not self._closing:
+                wx.CallAfter(self.announce, f"Soulseek unavailable: {exc}")
+            return
+        if self.config["soulseek_enabled"] and not self._closing:
+            wx.CallAfter(
+                self.announce,
+                "Soulseek connected; shared folders are being indexed.",
+            )
 
     def on_choose_sources(self, event=None):
         dialog = SourcesDialog(self, self.config)
@@ -307,8 +503,9 @@ class MainFrame(wx.Frame):
         dialog.Destroy()
 
     def on_check_updates(self, event):
-        dialog = UpdateDialog(self, on_changed=lambda: self.announce(
-            "Tools updated. Restart blindDL."))
+        dialog = UpdateDialog(
+            self, on_changed=lambda: self.announce("Tools updated. Restart blindDL.")
+        )
         result = dialog.ShowModal()
         dialog.Destroy()
         if result == wx.ID_OK:
@@ -330,12 +527,14 @@ class MainFrame(wx.Frame):
 
     def on_about(self, event):
         from .. import __version__
+
         wx.MessageBox(
             f"blindDL {__version__}\n\n"
             "Accessible media downloader.\n"
             "MIT licensed. Copyright (c) 2024-2026 "
             "serrebidev and contributors.\n\n"
-            "Tabs: Ctrl+1-5. URL: Ctrl+L. Search: Ctrl+F.\n"
+            "Tabs: Ctrl+1-6, or Ctrl+7-8 for Soulseek Chat and Messages "
+            "when enabled. URL: Ctrl+L. Search: Ctrl+F.\n"
             "Play from URL or Search without downloading, or use Library "
             "to play completed downloads.\n"
             "Search also finds free books, audiobooks, old-time radio, "
@@ -345,7 +544,10 @@ class MainFrame(wx.Frame):
             "here when Settings, Torrents says so. Add your Prowlarr or "
             "Jackett in Tools, My torrent indexers to search private "
             "trackers too.",
-            f"About {APP_NAME}", wx.OK | wx.ICON_INFORMATION, self)
+            f"About {APP_NAME}",
+            wx.OK | wx.ICON_INFORMATION,
+            self,
+        )
 
     # -- closing and the system tray --------------------------------------------
 
@@ -360,11 +562,13 @@ class MainFrame(wx.Frame):
         One icon serves both ways of getting there, so it exists while either
         closing or minimizing is set to hide the window.
         """
-        wanted = bool(self.config["minimize_to_tray"] or
-                      self.config["tray_on_minimize"])
+        wanted = bool(
+            self.config["minimize_to_tray"] or self.config["tray_on_minimize"]
+        )
         if wanted and self.tray is None:
-            self.tray = TrayIcon(self, on_restore=self.restore_from_tray,
-                                 on_exit=self.on_exit)
+            self.tray = TrayIcon(
+                self, on_restore=self.restore_from_tray, on_exit=self.on_exit
+            )
         elif not wanted and self.tray is not None:
             # Nothing can bring the window back once the icon is gone, so it
             # only leaves while the window is on screen.
@@ -388,13 +592,18 @@ class MainFrame(wx.Frame):
         self.Hide()
         self.announce(
             f"{APP_NAME} is in the system tray. Windows plus B reaches it; "
-            "downloads keep running.")
+            "downloads keep running."
+        )
 
     def on_iconize(self, event):
         """Minimizing hides the window in the tray when that is switched on."""
         event.Skip()
-        if (self._closing or not event.IsIconized() or
-                self.tray is None or not self.config["tray_on_minimize"]):
+        if (
+            self._closing
+            or not event.IsIconized()
+            or self.tray is None
+            or not self.config["tray_on_minimize"]
+        ):
             return
         # Undo the iconize first: a window that is hidden while minimized
         # comes back minimized, and the taskbar keeps a button for it.
@@ -404,19 +613,32 @@ class MainFrame(wx.Frame):
     def on_close(self, event):
         if self._closing:
             return
-        if (not self._quitting and self.tray is not None and
-                self.config["minimize_to_tray"] and event.CanVeto()):
+        if (
+            not self._quitting
+            and self.tray is not None
+            and self.config["minimize_to_tray"]
+            and event.CanVeto()
+        ):
             event.Veto()
             self._hide_to_tray()
             return
         self._closing = True
+        soulseek_backend.remove_listener(self._queue_soulseek_event)
+        if self.chat_panel is not None:
+            self.chat_panel.shutdown()
+        if self.messages_panel is not None:
+            self.messages_panel.shutdown()
         self.search_panel.shutdown()
         self.url_panel.shutdown()
         self.library_panel.shutdown()
+        self.uploads_panel.shutdown()
         self.subs.stop()
         # Seeding stops here, so this is the last chance to write down how
         # far each torrent got.
         torrent_engine.shutdown()
+        # This writes Soulseek share and transfer caches and closes listening
+        # ports before the native window disappears.
+        soulseek_backend.shutdown()
         if self.tray is not None:
             self.tray.dispose()
             self.tray = None
@@ -432,8 +654,9 @@ class MainFrame(wx.Frame):
             return
         self.config["last_update_check"] = time.time()
         self.config.save()
-        threading.Thread(target=self._auto_update_worker, daemon=True,
-                         name="blinddl-updater").start()
+        threading.Thread(
+            target=self._auto_update_worker, daemon=True, name="blinddl-updater"
+        ).start()
 
     def _auto_update_worker(self):
         lines = []
@@ -456,5 +679,4 @@ class MainFrame(wx.Frame):
         except Exception:  # noqa: BLE001 - background best effort
             return
         if changed:
-            wx.CallAfter(self.announce,
-                         "Tools updated. Restart blindDL.")
+            wx.CallAfter(self.announce, "Tools updated. Restart blindDL.")

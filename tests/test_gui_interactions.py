@@ -16,7 +16,15 @@ import wx
 
 # musicdl creates a file logger at import time. Keep GUI tests self-contained.
 with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
-    from blinddl import adult_backend, preview, search_order, ytdlp_backend
+    from blinddl import (
+        adult_backend,
+        archive_backend,
+        musicdl_backend,
+        preview,
+        search_order,
+        soulseek_backend,
+        ytdlp_backend,
+    )
     from blinddl.downloader import (
         DownloadItem,
         STATUS_DONE,
@@ -28,6 +36,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
     from blinddl.gui.library_panel import discover_media
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
+    from blinddl.gui.messages_panel import MessagesPanel
     from blinddl.gui import media_player
     from blinddl.gui.search_panel import (
         ADULT_ENGINE_CATEGORIES,
@@ -44,7 +53,15 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         ENGINE_BOOKS,
         ENGINE_LABELS,
         ENGINE_MUSIC,
+        ENGINE_SOULSEEK_AUDIO,
+        ENGINE_SOULSEEK_BOOKS,
+        ENGINE_SOULSEEK_TORRENTS,
+        ENGINE_SOULSEEK_VIDEO,
+        ENGINE_SOUNDCLOUD,
+        ENGINE_STRAIGHT,
+        ENGINE_TORRENTS,
         ENGINE_TRANS,
+        ENGINE_YOUTUBE,
         GENERAL_ENGINE_COUNT,
         SORT_ARTIST,
         SORT_LABELS,
@@ -53,12 +70,16 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SORT_RELEVANCE,
         SORT_SHORTEST,
         SORT_SITE,
+        SOULSEEK_COLUMN_HEADINGS,
+        SOULSEEK_SORT_LABELS,
         SearchPanel,
         _order_phrase,
         _sort_for_order,
+        _soulseek_media_kind,
         _sorted_results,
     )
     from blinddl.gui.settings_dialog import SettingsDialog
+    from blinddl.gui.soulseek_user_dialog import UserBrowserDialog
     from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import (
         SUBS_SORT_CHECKED,
@@ -70,6 +91,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SubsPanel,
         _sorted_subscriptions,
     )
+    from blinddl.gui.uploads_panel import UploadsPanel
 
 
 class _Clipboard:
@@ -118,6 +140,9 @@ class _Queue:
     def add_archive(self, payload, title):
         self.calls.append(("archive", payload, title))
 
+    def add_soulseek(self, payload, title):
+        self.calls.append(("soulseek", payload, title))
+
     def _find(self, item_id):
         return next((item for item in self.items if item.id == item_id), None)
 
@@ -142,10 +167,20 @@ class _SettingsConfig(dict):
 class _Subscriptions:
     def __init__(self):
         self.rows = [
-            {"id": "one", "title": "One", "url": "one", "enabled": True,
-             "seen_ids": []},
-            {"id": "two", "title": "Two", "url": "two", "enabled": True,
-             "seen_ids": []},
+            {
+                "id": "one",
+                "title": "One",
+                "url": "one",
+                "enabled": True,
+                "seen_ids": [],
+            },
+            {
+                "id": "two",
+                "title": "Two",
+                "url": "two",
+                "enabled": True,
+                "seen_ids": [],
+            },
         ]
 
     def snapshot(self):
@@ -246,11 +281,13 @@ class GuiInteractionTests(unittest.TestCase):
         item = {
             "title": "One",
             "song_info": SimpleNamespace(
-                download_url=[{"url": "https://media.example/one.mp3"}]),
+                download_url=[{"url": "https://media.example/one.mp3"}]
+            ),
         }
 
         location, title = preview.resolve_search_result(
-            item, audio_only=True, config={})
+            item, audio_only=True, config={}
+        )
 
         self.assertEqual(location, "https://media.example/one.mp3")
         self.assertEqual(title, "One")
@@ -263,16 +300,16 @@ class GuiInteractionTests(unittest.TestCase):
                 config={},
             )
 
-        self.assertEqual(
-            location, "https://media.example/live/video.mp4?token=one")
+        self.assertEqual(location, "https://media.example/live/video.mp4?token=one")
         self.assertEqual(title, location)
         resolve.assert_not_called()
 
     def test_preview_accepts_the_real_config_object(self):
         # The app hands preview a Config, not a dict. Dicts have .get, so a
         # dict here would hide a missing Config.get entirely.
-        with mock.patch.object(config_module, "app_data_dir",
-                               return_value=tempfile.mkdtemp()):
+        with mock.patch.object(
+            config_module, "app_data_dir", return_value=tempfile.mkdtemp()
+        ):
             config = config_module.Config()
         item = {
             "kind": "adult",
@@ -281,18 +318,24 @@ class GuiInteractionTests(unittest.TestCase):
             "url": "https://www.eporner.com/video-one/",
         }
 
-        with mock.patch.object(ytdlp_backend, "resolve_stream",
-                               return_value="https://cdn.example/one.mp4"):
+        with mock.patch.object(
+            ytdlp_backend, "resolve_stream", return_value="https://cdn.example/one.mp4"
+        ):
             location, title = preview.resolve_search_result(
-                item, audio_only=False, config=config)
+                item, audio_only=False, config=config
+            )
 
         self.assertEqual(location, "https://cdn.example/one.mp4")
         self.assertEqual(title, "One")
 
     def test_result_url_prefers_page_url_then_falls_back(self):
         self.assertEqual(
-            preview.result_url({"url": "https://www.eporner.com/video-one/",
-                                "direct_url": "https://cdn.example/one.mp4"}),
+            preview.result_url(
+                {
+                    "url": "https://www.eporner.com/video-one/",
+                    "direct_url": "https://cdn.example/one.mp4",
+                }
+            ),
             "https://www.eporner.com/video-one/",
         )
         self.assertEqual(
@@ -300,8 +343,13 @@ class GuiInteractionTests(unittest.TestCase):
             "https://cdn.example/one.mp4",
         )
         self.assertEqual(
-            preview.result_url({"song_info": SimpleNamespace(
-                download_url=[{"url": "https://media.example/one.mp3"}])}),
+            preview.result_url(
+                {
+                    "song_info": SimpleNamespace(
+                        download_url=[{"url": "https://media.example/one.mp3"}]
+                    )
+                }
+            ),
             "https://media.example/one.mp3",
         )
         self.assertIsNone(preview.result_url({"title": "No URL"}))
@@ -321,8 +369,7 @@ class GuiInteractionTests(unittest.TestCase):
         with mock.patch.object(wx, "TheClipboard", clipboard):
             panel.results_list.Select(0)
             panel.on_copy_url(None)
-            self.assertEqual(
-                clipboard.text, "https://www.eporner.com/video-one/")
+            self.assertEqual(clipboard.text, "https://www.eporner.com/video-one/")
             self.assertEqual(self.frame.messages[-1], "Copied 1 URL.")
 
             panel.results_list.Select(1)
@@ -352,8 +399,7 @@ class GuiInteractionTests(unittest.TestCase):
             (root / "plugins").mkdir()
             with (
                 mock.patch.object(media_player.sys, "platform", "win32"),
-                mock.patch.object(
-                    media_player.sys, "_MEIPASS", str(root), create=True),
+                mock.patch.object(media_player.sys, "_MEIPASS", str(root), create=True),
                 mock.patch.dict(os.environ, {}, clear=False),
             ):
                 os.environ.pop("PYTHON_VLC_LIB_PATH", None)
@@ -408,8 +454,10 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ADULT
         item = {
-            "title": "Example", "url": "https://xvideos.com/video.1",
-            "provider": "xvideos", "kind": "adult",
+            "title": "Example",
+            "url": "https://xvideos.com/video.1",
+            "provider": "xvideos",
+            "kind": "adult",
         }
         panel.results = [item]
         panel.results_list.InsertItem(0, item["title"])
@@ -441,10 +489,14 @@ class GuiInteractionTests(unittest.TestCase):
         panel.done = True
         panel.results = []
 
-        panel._insert_deduped({
-            "title": "Late Arrival", "artist": "Someone",
-            "source": "Bandcamp", "kind": "music",
-        })
+        panel._insert_deduped(
+            {
+                "title": "Late Arrival",
+                "artist": "Someone",
+                "source": "Bandcamp",
+                "kind": "music",
+            }
+        )
 
         self.assertIn("Bandcamp", self.frame.messages[-1])
 
@@ -453,17 +505,21 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SearchPanel(self.host, self.frame)
 
         self.assertEqual(
-            [panel.engine_choice.GetString(index)
-             for index in range(panel.engine_choice.GetCount())],
+            [
+                panel.engine_choice.GetString(index)
+                for index in range(panel.engine_choice.GetCount())
+            ],
             ENGINE_LABELS[:GENERAL_ENGINE_COUNT],
         )
 
         self.frame.config["adult_sites_enabled"] = True
         panel.refresh_engine_choices()
         self.assertEqual(
-            [panel.engine_choice.GetString(index)
-             for index in range(panel.engine_choice.GetCount())],
-            ENGINE_LABELS,
+            [
+                panel.engine_choice.GetString(index)
+                for index in range(panel.engine_choice.GetCount())
+            ],
+            ENGINE_LABELS[:15],
         )
 
         panel.engine_choice.SetSelection(ENGINE_TRANS)
@@ -472,20 +528,53 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(panel.engine_choice.GetCount(), GENERAL_ENGINE_COUNT)
         self.assertEqual(panel.engine_choice.GetSelection(), ENGINE_MUSIC)
 
+        self.frame.config["soulseek_enabled"] = True
+        panel.refresh_engine_choices()
+        self.assertEqual(
+            [
+                panel.engine_choice.GetString(index)
+                for index in range(panel.engine_choice.GetCount())
+            ],
+            [ENGINE_LABELS[index] for index in range(GENERAL_ENGINE_COUNT)]
+            + [
+                ENGINE_LABELS[ENGINE_SOULSEEK_AUDIO],
+                ENGINE_LABELS[ENGINE_SOULSEEK_VIDEO],
+                ENGINE_LABELS[ENGINE_SOULSEEK_BOOKS],
+                ENGINE_LABELS[ENGINE_SOULSEEK_TORRENTS],
+            ],
+        )
+
     def test_search_sort_choices_and_ordering(self):
         panel = SearchPanel(self.host, self.frame)
         self.assertEqual(
-            [panel.sort_choice.GetString(index)
-             for index in range(panel.sort_choice.GetCount())],
+            [
+                panel.sort_choice.GetString(index)
+                for index in range(panel.sort_choice.GetCount())
+            ],
             SORT_LABELS,
         )
         items = [
-            {"title": "Zulu", "artist": "Beta", "source": "Site B",
-             "duration_s": 90, "_search_order": 0},
-            {"title": "Alpha", "artist": "Gamma", "source": "Site A",
-             "duration_s": None, "_search_order": 1},
-            {"title": "Bravo", "artist": "Alpha", "source": "Site B",
-             "duration_s": 30, "_search_order": 2},
+            {
+                "title": "Zulu",
+                "artist": "Beta",
+                "source": "Site B",
+                "duration_s": 90,
+                "_search_order": 0,
+            },
+            {
+                "title": "Alpha",
+                "artist": "Gamma",
+                "source": "Site A",
+                "duration_s": None,
+                "_search_order": 1,
+            },
+            {
+                "title": "Bravo",
+                "artist": "Alpha",
+                "source": "Site B",
+                "duration_s": 30,
+                "_search_order": 2,
+            },
         ]
 
         self.assertEqual(
@@ -517,19 +606,18 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SearchPanel(self.host, self.frame)
         panel.query_text.SetValue("dragnet")
         panel.order_choice.SetSelection(
-            search_order.ORDERS.index(search_order.ORDER_RECENT))
+            search_order.ORDERS.index(search_order.ORDER_RECENT)
+        )
 
         with mock.patch.object(panel, "on_search") as search:
             panel.on_order_changed(None)
 
-        self.assertEqual(
-            self.frame.config["search_order"], search_order.ORDER_RECENT)
+        self.assertEqual(self.frame.config["search_order"], search_order.ORDER_RECENT)
         search.assert_called_once_with(None)
 
     def test_search_status_names_sources_that_cannot_honour_order(self):
         self.assertEqual(
-            _order_phrase(
-                search_order.ORDER_POPULAR, ["Bandcamp"], 2),
+            _order_phrase(search_order.ORDER_POPULAR, ["Bandcamp"], 2),
             "1 site cannot sort by most popular, so it answered by best "
             "match: Bandcamp.",
         )
@@ -562,8 +650,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(panel.results_list.GetItemText(1), "Zulu")
         self.assertTrue(panel.results_list.IsSelected(1))
         self.assertEqual(panel.results_list.GetFocusedItem(), 1)
-        self.assertEqual(
-            self.frame.messages[-1], "Sorted 2 results by Name.")
+        self.assertEqual(self.frame.messages[-1], "Sorted 2 results by Name.")
 
     def test_each_adult_combo_choice_routes_its_category(self):
         panel = SearchPanel(self.host, self.frame)
@@ -571,13 +658,123 @@ class GuiInteractionTests(unittest.TestCase):
         for engine, category in ADULT_ENGINE_CATEGORIES.items():
             token = object()
             panel.token = token
-            with (mock.patch.object(
-                    adult_backend, "search", return_value=([], [], []))
-                  as search,
-                  mock.patch.object(wx, "CallAfter")):
+            with (
+                mock.patch.object(
+                    adult_backend, "search", return_value=([], [], [])
+                ) as search,
+                mock.patch.object(wx, "CallAfter"),
+            ):
                 panel._search("example", engine, token, stop, ["pornhub"])
 
             self.assertEqual(search.call_args.kwargs["category"], category)
+
+    def test_soulseek_sections_are_exclusive_searches(self):
+        self.frame.config["soulseek_enabled"] = True
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("ambient")
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_SOULSEEK_AUDIO)
+        )
+        panel.on_engine_changed(wx.CommandEvent())
+
+        self.assertEqual(
+            [
+                panel.sort_choice.GetString(index)
+                for index in range(panel.sort_choice.GetCount())
+            ],
+            SOULSEEK_SORT_LABELS,
+        )
+        panel._apply_engine_columns(ENGINE_SOULSEEK_AUDIO)
+        self.assertEqual(
+            [
+                panel.results_list.GetColumn(index).GetText()
+                for index in range(panel.results_list.GetColumnCount())
+            ],
+            list(SOULSEEK_COLUMN_HEADINGS),
+        )
+
+        with mock.patch.object(threading, "Thread") as worker:
+            panel.on_search(None)
+
+        self.assertEqual(worker.call_args.kwargs["args"][1], ENGINE_SOULSEEK_AUDIO)
+        self.assertIn("Soulseek music and audio", self.frame.messages[-1])
+
+        token = panel.token = object()
+        stop = threading.Event()
+        with (
+            mock.patch.object(soulseek_backend, "search", return_value=[]) as search,
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search(
+                "ambient",
+                ENGINE_SOULSEEK_AUDIO,
+                token,
+                stop,
+                [],
+                search_order.ORDER_RELEVANCE,
+            )
+        self.assertEqual(search.call_args.args[2], "audio")
+
+        sizes = [
+            {"title": "Large", "size_bytes": 200, "_search_order": 0},
+            {"title": "Small", "size_bytes": 10, "_search_order": 1},
+        ]
+        self.assertEqual(
+            [
+                item["title"]
+                for item in _sorted_results(sizes, SORT_SHORTEST, ENGINE_SOULSEEK_AUDIO)
+            ],
+            ["Small", "Large"],
+        )
+
+    def test_music_archive_and_adult_searches_never_call_soulseek(self):
+        self.frame.config["soulseek_enabled"] = True
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        token = panel.token = object()
+
+        with (
+            mock.patch.object(archive_backend, "search", return_value=([], [], [])),
+            mock.patch.object(adult_backend, "search", return_value=([], [], [])),
+            mock.patch.object(musicdl_backend, "search", return_value=([], [], [])),
+            mock.patch.object(soulseek_backend, "search") as soulseek_search,
+            mock.patch.object(threading, "Thread"),
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search(
+                "music",
+                ENGINE_MUSIC,
+                token,
+                stop,
+                ["example"],
+                search_order.ORDER_RELEVANCE,
+            )
+            panel._search(
+                "radio",
+                ENGINE_ARCHIVE_AUDIO,
+                token,
+                stop,
+                ["audio_music"],
+                search_order.ORDER_RELEVANCE,
+            )
+            panel._search(
+                "movie",
+                ENGINE_ARCHIVE_VIDEO,
+                token,
+                stop,
+                ["movies"],
+                search_order.ORDER_RELEVANCE,
+            )
+            panel._search(
+                "adult",
+                ENGINE_STRAIGHT,
+                token,
+                stop,
+                ["pornhub"],
+                search_order.ORDER_RELEVANCE,
+            )
+
+        soulseek_search.assert_not_called()
 
     def test_book_engine_relabels_columns_and_sort_choices(self):
         panel = SearchPanel(self.host, self.frame)
@@ -585,8 +782,10 @@ class GuiInteractionTests(unittest.TestCase):
         panel.on_engine_changed(wx.CommandEvent())
 
         self.assertEqual(
-            [panel.sort_choice.GetString(index)
-             for index in range(panel.sort_choice.GetCount())],
+            [
+                panel.sort_choice.GetString(index)
+                for index in range(panel.sort_choice.GetCount())
+            ],
             BOOK_SORT_LABELS,
         )
         # Nothing to play, so the preview button must not offer itself.
@@ -594,8 +793,10 @@ class GuiInteractionTests(unittest.TestCase):
 
         panel._apply_engine_columns(ENGINE_BOOKS)
         self.assertEqual(
-            [panel.results_list.GetColumn(index).GetText()
-             for index in range(panel.results_list.GetColumnCount())],
+            [
+                panel.results_list.GetColumn(index).GetText()
+                for index in range(panel.results_list.GetColumnCount())
+            ],
             list(BOOK_COLUMN_HEADINGS),
         )
 
@@ -603,8 +804,10 @@ class GuiInteractionTests(unittest.TestCase):
         panel.on_engine_changed(wx.CommandEvent())
         panel._apply_engine_columns(ENGINE_MUSIC)
         self.assertEqual(
-            [panel.results_list.GetColumn(index).GetText()
-             for index in range(panel.results_list.GetColumnCount())],
+            [
+                panel.results_list.GetColumn(index).GetText()
+                for index in range(panel.results_list.GetColumnCount())
+            ],
             list(COLUMN_HEADINGS),
         )
         self.assertTrue(panel.preview_btn.IsEnabled())
@@ -612,20 +815,25 @@ class GuiInteractionTests(unittest.TestCase):
     def test_media_engines_relabel_their_own_columns(self):
         panel = SearchPanel(self.host, self.frame)
         for engine, headings in (
-                (ENGINE_AUDIOBOOKS, AUDIOBOOK_COLUMN_HEADINGS),
-                (ENGINE_ARCHIVE_AUDIO, ARCHIVE_COLUMN_HEADINGS),
-                (ENGINE_ARCHIVE_VIDEO, ARCHIVE_COLUMN_HEADINGS)):
+            (ENGINE_AUDIOBOOKS, AUDIOBOOK_COLUMN_HEADINGS),
+            (ENGINE_ARCHIVE_AUDIO, ARCHIVE_COLUMN_HEADINGS),
+            (ENGINE_ARCHIVE_VIDEO, ARCHIVE_COLUMN_HEADINGS),
+        ):
             panel._apply_engine_columns(engine)
             self.assertEqual(
-                [panel.results_list.GetColumn(index).GetText()
-                 for index in range(panel.results_list.GetColumnCount())],
+                [
+                    panel.results_list.GetColumn(index).GetText()
+                    for index in range(panel.results_list.GetColumnCount())
+                ],
                 list(headings),
             )
         panel.engine_choice.SetSelection(ENGINE_ARCHIVE_VIDEO)
         panel.on_engine_changed(wx.CommandEvent())
         self.assertEqual(
-            [panel.sort_choice.GetString(index)
-             for index in range(panel.sort_choice.GetCount())],
+            [
+                panel.sort_choice.GetString(index)
+                for index in range(panel.sort_choice.GetCount())
+            ],
             ARCHIVE_SORT_LABELS,
         )
 
@@ -638,21 +846,23 @@ class GuiInteractionTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            [item["title"]
-             for item in _sorted_results(items, SORT_SHORTEST, ENGINE_BOOKS)],
+            [
+                item["title"]
+                for item in _sorted_results(items, SORT_SHORTEST, ENGINE_BOOKS)
+            ],
             ["Oldest", "Middle", "Newest", "Undated"],
         )
         self.assertEqual(
-            [item["title"]
-             for item in _sorted_results(items, SORT_LONGEST,
-                                         ENGINE_ARCHIVE_VIDEO)],
+            [
+                item["title"]
+                for item in _sorted_results(items, SORT_LONGEST, ENGINE_ARCHIVE_VIDEO)
+            ],
             ["Newest", "Middle", "Oldest", "Undated"],
         )
 
     def test_search_queues_book_and_audiobook_results(self):
         panel = SearchPanel(self.host, self.frame)
-        for engine, kind in ((ENGINE_BOOKS, "book"),
-                             (ENGINE_AUDIOBOOKS, "audiobook")):
+        for engine, kind in ((ENGINE_BOOKS, "book"), (ENGINE_AUDIOBOOKS, "audiobook")):
             self.frame.queue.calls = []
             panel.result_engine = engine
             item = {"title": "One", "kind": kind, "identifier": "one"}
@@ -668,11 +878,20 @@ class GuiInteractionTests(unittest.TestCase):
     def test_archive_item_with_one_file_queues_without_asking(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ARCHIVE_AUDIO
-        item = {"title": "Dragnet", "kind": "archive", "identifier": "dragnet",
-                "video": False}
-        files = [{"title": "Episode 1", "file_name": "ep1.mp3",
-                  "identifier": "dragnet",
-                  "direct_url": "https://archive.org/download/dragnet/ep1.mp3"}]
+        item = {
+            "title": "Dragnet",
+            "kind": "archive",
+            "identifier": "dragnet",
+            "video": False,
+        }
+        files = [
+            {
+                "title": "Episode 1",
+                "file_name": "ep1.mp3",
+                "identifier": "dragnet",
+                "direct_url": "https://archive.org/download/dragnet/ep1.mp3",
+            }
+        ]
 
         panel._archive_files_ready(panel.archive_token, item, files)
 
@@ -685,22 +904,33 @@ class GuiInteractionTests(unittest.TestCase):
     def test_archive_item_with_many_files_offers_a_picker(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ARCHIVE_AUDIO
-        item = {"title": "Dragnet", "kind": "archive", "identifier": "dragnet",
-                "video": False}
+        item = {
+            "title": "Dragnet",
+            "kind": "archive",
+            "identifier": "dragnet",
+            "video": False,
+        }
         files = [
-            {"title": f"Episode {number}", "file_name": f"ep{number}.mp3",
-             "identifier": "dragnet", "direct_url": f"https://x/ep{number}.mp3"}
+            {
+                "title": f"Episode {number}",
+                "file_name": f"ep{number}.mp3",
+                "identifier": "dragnet",
+                "direct_url": f"https://x/ep{number}.mp3",
+            }
             for number in (1, 2, 3)
         ]
 
-        with mock.patch.object(ItemPickerDialog, "ShowModal",
-                               return_value=wx.ID_OK), \
-                mock.patch.object(ItemPickerDialog, "selected_items",
-                                  return_value=files[:2]):
+        with (
+            mock.patch.object(ItemPickerDialog, "ShowModal", return_value=wx.ID_OK),
+            mock.patch.object(
+                ItemPickerDialog, "selected_items", return_value=files[:2]
+            ),
+        ):
             panel._archive_files_ready(panel.archive_token, item, files)
 
-        self.assertEqual([call[2] for call in self.frame.queue.calls],
-                         ["Episode 1", "Episode 2"])
+        self.assertEqual(
+            [call[2] for call in self.frame.queue.calls], ["Episode 1", "Episode 2"]
+        )
         self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
 
     def test_books_cannot_be_previewed(self):
@@ -733,6 +963,272 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(config["justforfans_auth_file"], "justforfans.json")
         self.assertTrue(config.saved)
         dialog.Destroy()
+
+    def test_soulseek_settings_save_credentials_sharing_and_extra_folders(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertEqual(dialog.notebook.GetPageText(2), "Soulseek")
+        self.assertFalse(dialog.soulseek_enabled_check.GetValue())
+        self.assertTrue(dialog.soulseek_share_library_check.GetValue())
+        self.assertFalse(dialog.soulseek_username_text.IsEnabled())
+        self.assertEqual(
+            dialog.soulseek_account_button.GetLabel(), "Sign in or sign &up"
+        )
+        self.assertFalse(dialog.soulseek_account_button.IsEnabled())
+
+        dialog.soulseek_enabled_check.SetValue(True)
+        dialog.soulseek_enabled_check.ProcessEvent(
+            wx.CommandEvent(wx.wxEVT_CHECKBOX, dialog.soulseek_enabled_check.GetId())
+        )
+        dialog.soulseek_username_text.SetValue("listener")
+        dialog.soulseek_password_text.SetValue("secret")
+        self.assertTrue(dialog.soulseek_account_button.IsEnabled())
+        with (
+            mock.patch.object(soulseek_backend, "verify_account") as verify,
+            mock.patch.object(
+                wx, "CallAfter", side_effect=lambda function, *args: function(*args)
+            ),
+            mock.patch.object(wx, "MessageBox"),
+        ):
+            dialog._check_soulseek_account("listener", "secret")
+        verify.assert_called_once_with("listener", "secret")
+        self.assertIn(
+            "Signed in as listener", dialog.soulseek_account_status.GetLabel()
+        )
+        dialog.soulseek_folders_list.Append("C:\\Media\\One")
+        dialog.soulseek_folders_list.Append("D:\\Media\\Two")
+        dialog.soulseek_slots_spin.SetValue(4)
+        dialog.apply()
+
+        self.assertTrue(config["soulseek_enabled"])
+        self.assertEqual(config["soulseek_username"], "listener")
+        self.assertEqual(config["soulseek_password"], "secret")
+        self.assertEqual(
+            config["soulseek_shared_folders"],
+            ["C:\\Media\\One", "D:\\Media\\Two"],
+        )
+        self.assertEqual(config["soulseek_upload_slots"], 4)
+        self.assertTrue(config.saved)
+        dialog.Destroy()
+
+    def test_soulseek_messages_exposes_friends_and_private_transcript(self):
+        self.frame.config = _SettingsConfig()
+        self.frame.config["soulseek_enabled"] = True
+        with (
+            mock.patch.object(
+                soulseek_backend,
+                "friends_snapshot",
+                return_value=[{"username": "alice", "status": "Online"}],
+            ),
+            mock.patch.object(
+                soulseek_backend,
+                "private_messages_snapshot",
+                return_value=[
+                    {
+                        "timestamp": 123,
+                        "user": "alice",
+                        "message": "hello",
+                        "outgoing": False,
+                    }
+                ],
+            ),
+        ):
+            panel = MessagesPanel(self.host, self.frame)
+
+        self.assertEqual(panel.friends_list.GetItemText(0), "alice")
+        self.assertEqual(panel.friends_list.GetItemText(0, 1), "Online")
+        self.assertEqual(panel.list.GetItemText(0, 1), "From")
+        self.assertEqual(panel.list.GetItemText(0, 3), "hello")
+
+        panel.recipient_text.SetValue("bob")
+        panel._friend_changed(
+            "bob",
+            True,
+            [
+                {"username": "alice", "status": "Online"},
+                {"username": "bob", "status": "Away"},
+            ],
+        )
+        self.assertEqual(self.frame.config["soulseek_friends"], ["bob"])
+        self.assertEqual(panel.friends_list.GetItemCount(), 2)
+        self.assertIn("Added Soulseek friend bob", self.frame.messages[-1])
+        panel.Destroy()
+
+    def test_soulseek_chat_and_messages_tabs_follow_enabled_setting(self):
+        class OptionalPanel(wx.Panel):
+            def __init__(self, parent, frame):
+                super().__init__(parent)
+                self.stopped = False
+
+            def shutdown(self):
+                self.stopped = True
+
+        holder = SimpleNamespace(
+            config=_SettingsConfig(),
+            notebook=wx.Notebook(self.host),
+            chat_panel=None,
+            messages_panel=None,
+        )
+        holder.config["soulseek_enabled"] = True
+        with (
+            mock.patch("blinddl.gui.mainframe.ChatPanel", OptionalPanel),
+            mock.patch("blinddl.gui.mainframe.MessagesPanel", OptionalPanel),
+        ):
+            MainFrame._sync_soulseek_tabs(holder)
+            self.assertEqual(holder.notebook.GetPageCount(), 2)
+            self.assertEqual(holder.notebook.GetPageText(0), "Chat")
+            self.assertEqual(holder.notebook.GetPageText(1), "Messages")
+
+            holder.config["soulseek_enabled"] = False
+            MainFrame._sync_soulseek_tabs(holder)
+
+        self.assertEqual(holder.notebook.GetPageCount(), 0)
+        self.assertIsNone(holder.chat_panel)
+        self.assertIsNone(holder.messages_panel)
+
+    def test_soulseek_result_queues_its_own_backend_in_soulseek_sections(self):
+        panel = SearchPanel(self.host, self.frame)
+        item = {
+            "title": "Shared file.flac",
+            "kind": "soulseek",
+            "username": "peer",
+            "remote_path": "Music\\Shared file.flac",
+        }
+        for engine in (
+            ENGINE_SOULSEEK_AUDIO,
+            ENGINE_SOULSEEK_VIDEO,
+            ENGINE_SOULSEEK_BOOKS,
+            ENGINE_SOULSEEK_TORRENTS,
+        ):
+            self.frame.queue.calls = []
+            panel.result_engine = engine
+            panel.results = [item]
+            panel.results_list.DeleteAllItems()
+            panel.results_list.InsertItem(0, item["title"])
+            panel.results_list.Select(0)
+
+            panel.on_download_selected(None)
+
+            self.assertEqual(
+                self.frame.queue.calls, [("soulseek", item, item["title"])]
+            )
+
+    def test_only_explicit_soulseek_sections_map_to_peer_file_types(self):
+        self.assertEqual(_soulseek_media_kind(ENGINE_SOULSEEK_AUDIO), "audio")
+        self.assertEqual(_soulseek_media_kind(ENGINE_SOULSEEK_VIDEO), "video")
+        self.assertEqual(_soulseek_media_kind(ENGINE_SOULSEEK_BOOKS), "book")
+        self.assertEqual(_soulseek_media_kind(ENGINE_SOULSEEK_TORRENTS), "torrent")
+        for engine in (
+            ENGINE_MUSIC,
+            ENGINE_SOUNDCLOUD,
+            ENGINE_AUDIOBOOKS,
+            ENGINE_ARCHIVE_AUDIO,
+            ENGINE_ARCHIVE_VIDEO,
+            ENGINE_STRAIGHT,
+            ENGINE_BOOKS,
+            ENGINE_TORRENTS,
+            ENGINE_YOUTUBE,
+        ):
+            self.assertIsNone(_soulseek_media_kind(engine))
+
+    def test_soulseek_columns_show_the_remote_folder(self):
+        panel = SearchPanel(self.host, self.frame)
+        item = {
+            "title": "Track.flac",
+            "kind": "soulseek",
+            "username": "peer",
+            "folder": "Music\\Album",
+            "availability": "free slot",
+            "file_size": "1.0 MiB",
+        }
+        panel._insert_result_row(0, item, ENGINE_SOULSEEK_AUDIO)
+        panel._apply_engine_columns(ENGINE_SOULSEEK_AUDIO)
+
+        self.assertEqual(panel.results_list.GetColumn(3).GetText(), "Folder")
+        self.assertEqual(panel.results_list.GetItemText(0, 3), "Music\\Album")
+        panel.Destroy()
+
+    def test_user_browser_tree_filter_and_folder_download(self):
+        frame = self.frame
+        frame.config = _SettingsConfig()
+        dialog = UserBrowserDialog(self.host, frame)
+        dialog.username_text.SetValue("peer")
+        dialog._loaded(
+            [
+                {"name": "Music", "locked": False, "files": []},
+                {
+                    "name": "Music\\Album",
+                    "locked": False,
+                    "files": [
+                        {
+                            "title": "Track.flac",
+                            "kind": "soulseek",
+                            "username": "peer",
+                            "remote_path": "Music\\Album\\Track.flac",
+                            "folder": "Music\\Album",
+                            "file_size": "1.0 MiB",
+                            "format": "FLAC",
+                            "locked": False,
+                        }
+                    ],
+                },
+            ]
+        )
+        album = dialog._tree_items["music\\album"]
+        dialog.tree.SelectItem(album)
+        dialog._render()
+        self.assertEqual(dialog.list.GetItemText(0), "Track.flac")
+
+        dialog.filter_text.SetValue("track")
+        dialog._render()
+        self.assertEqual(dialog.list.GetItemCount(), 1)
+        dialog._queue_files(
+            dialog._files_in_folder("Music\\Album"), "Music\\Album"
+        )
+        payload = frame.queue.calls[-1][1]
+        self.assertEqual(payload["target_relative_path"], "Album\\Track.flac")
+        dialog.Destroy()
+
+    def test_uploads_panel_combines_soulseek_and_torrent_rows(self):
+        soul = {
+            "key": "peer\\file",
+            "title": "Shared.flac",
+            "service": "Soulseek",
+            "peer": "peer",
+            "status": "Uploading",
+            "percent": 50,
+            "speed": 1024,
+            "active": True,
+        }
+        torrent = {
+            "key": "hash",
+            "title": "Release",
+            "service": "BitTorrent",
+            "peer": "2 peers",
+            "status": "Seeding",
+            "ratio": 1.5,
+            "speed": 2048,
+            "active": True,
+        }
+        with (
+            mock.patch.object(
+                soulseek_backend, "uploads_snapshot", return_value=[soul]
+            ),
+            mock.patch(
+                "blinddl.gui.uploads_panel.torrent_engine.uploads",
+                return_value=[torrent],
+            ),
+        ):
+            panel = UploadsPanel(self.host, self.frame)
+
+        self.assertEqual(panel.list.GetItemCount(), 2)
+        self.assertEqual(
+            {panel.list.GetItemText(row, 1) for row in range(2)},
+            {"Soulseek", "BitTorrent"},
+        )
+        panel.shutdown()
+        panel.Destroy()
 
     def test_sources_dialog_lists_general_adult_providers_together(self):
         config = _SettingsConfig()
@@ -792,34 +1288,53 @@ class GuiInteractionTests(unittest.TestCase):
 
     def test_subscription_view_sorting_covers_each_persisted_mode(self):
         rows = [
-            {"title": "Zulu", "url": "https://youtube.com/z",
-             "enabled": False, "last_checked": None, "seen_ids": ["1"]},
-            {"title": "Alpha", "url": "https://bandcamp.com/a",
-             "enabled": True, "last_checked": "2026-08-08 10:00",
-             "seen_ids": ["1", "2", "3"]},
-            {"title": "Beta", "url": "https://youtube.com/b",
-             "enabled": True, "last_checked": "2026-08-07 10:00",
-             "seen_ids": ["1", "2"]},
+            {
+                "title": "Zulu",
+                "url": "https://youtube.com/z",
+                "enabled": False,
+                "last_checked": None,
+                "seen_ids": ["1"],
+            },
+            {
+                "title": "Alpha",
+                "url": "https://bandcamp.com/a",
+                "enabled": True,
+                "last_checked": "2026-08-08 10:00",
+                "seen_ids": ["1", "2", "3"],
+            },
+            {
+                "title": "Beta",
+                "url": "https://youtube.com/b",
+                "enabled": True,
+                "last_checked": "2026-08-07 10:00",
+                "seen_ids": ["1", "2"],
+            },
         ]
 
         self.assertEqual(
-            [row["title"] for row in _sorted_subscriptions(
-                rows, SUBS_SORT_TITLE)], ["Alpha", "Beta", "Zulu"])
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_TITLE)],
+            ["Alpha", "Beta", "Zulu"],
+        )
         self.assertEqual(
-            [row["title"] for row in _sorted_subscriptions(
-                rows, SUBS_SORT_SITE)], ["Alpha", "Beta", "Zulu"])
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_SITE)],
+            ["Alpha", "Beta", "Zulu"],
+        )
         self.assertEqual(
-            [row["title"] for row in _sorted_subscriptions(
-                rows, SUBS_SORT_CHECKED)], ["Alpha", "Beta", "Zulu"])
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_CHECKED)],
+            ["Alpha", "Beta", "Zulu"],
+        )
         self.assertEqual(
-            [row["title"] for row in _sorted_subscriptions(
-                rows, SUBS_SORT_STALE)], ["Zulu", "Beta", "Alpha"])
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_STALE)],
+            ["Zulu", "Beta", "Alpha"],
+        )
         self.assertEqual(
-            [row["title"] for row in _sorted_subscriptions(
-                rows, SUBS_SORT_TRACKED)], ["Alpha", "Beta", "Zulu"])
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_TRACKED)],
+            ["Alpha", "Beta", "Zulu"],
+        )
         self.assertEqual(
-            [row["title"] for row in _sorted_subscriptions(
-                rows, SUBS_SORT_ENABLED)], ["Alpha", "Beta", "Zulu"])
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_ENABLED)],
+            ["Alpha", "Beta", "Zulu"],
+        )
 
     def test_subscription_feed_order_updates_selected_rows(self):
         panel = SubsPanel(self.host, self.frame)
@@ -827,8 +1342,7 @@ class GuiInteractionTests(unittest.TestCase):
 
         panel._set_feed_order(search_order.ORDER_POPULAR)
 
-        self.assertEqual(
-            self.frame.subs.rows[0]["order"], search_order.ORDER_POPULAR)
+        self.assertEqual(self.frame.subs.rows[0]["order"], search_order.ORDER_POPULAR)
         self.assertIn("Most popular", self.frame.messages[-1])
 
 

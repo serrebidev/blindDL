@@ -554,6 +554,39 @@ class TorrentEngine:
                          status.upload_rate))
         return rows
 
+    def uploads(self):
+        """Structured snapshots for the Uploads tab."""
+        with self._lock:
+            torrents = list(self._torrents.values())
+        rows = []
+        for torrent in torrents:
+            if not torrent.finished_at:
+                continue
+            try:
+                status = torrent.handle.status()
+            except RuntimeError:
+                continue
+            ratio = _ratio(status)
+            peers = max(0, int(getattr(status, "num_peers", 0) or 0))
+            rows.append(
+                {
+                    "key": torrent.key,
+                    "title": torrent.title,
+                    "service": "BitTorrent",
+                    "peer": f"{peers} peer" if peers == 1 else f"{peers} peers",
+                    "status": "Seeding",
+                    "uploaded": int(getattr(status, "all_time_upload", 0) or 0),
+                    "total": int(getattr(status, "total_wanted", 0) or 0),
+                    "ratio": ratio,
+                    "speed": float(getattr(status, "upload_rate", 0) or 0),
+                    "active": True,
+                    "error": "",
+                    "started_at": torrent.finished_at,
+                    "completed_at": None,
+                }
+            )
+        return rows
+
     # -- background upkeep -------------------------------------------------
 
     def _maintain(self):
@@ -748,6 +781,13 @@ def seeding():
     with _engine_lock:
         current = _engine
     return current.seeding() if current is not None else []
+
+
+def uploads():
+    """Current torrent seeds without starting the optional engine."""
+    with _engine_lock:
+        current = _engine
+    return current.uploads() if current is not None else []
 
 
 # -- downloading one torrent -------------------------------------------------

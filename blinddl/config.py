@@ -123,6 +123,39 @@ DEFAULTS = {
     # trackers are reached: that tool already holds the login and the passkey,
     # so blindDL never stores a tracker password of its own.
     "torznab_feeds": [],
+    # Soulseek is an optional peer-to-peer source. When enabled, it adds its
+    # own audio, video, book, and torrent Search choices and keeps one
+    # connection alive for downloads, uploads, and library search replies.
+    "soulseek_enabled": False,
+    "soulseek_username": "",
+    "soulseek_password": "",
+    # The ordinary blindDL Library is public on Soulseek by default. Extra
+    # folders let users share media that lives elsewhere without changing the
+    # download location.
+    "soulseek_share_library": True,
+    "soulseek_shared_folders": [],
+    "soulseek_description": "",
+    # aioslsk listens on a clear and an obfuscated TCP port. UPnP makes those
+    # ports reachable without manual router configuration.
+    "soulseek_listen_port": 60000,
+    "soulseek_obfuscated_port": 60001,
+    "soulseek_upnp": True,
+    "soulseek_obfuscate": False,
+    # Transfer rates are presented consistently with the Torrents page, in
+    # KiB/s. Zero means unlimited.
+    "soulseek_upload_slots": 2,
+    "soulseek_max_upload_kib": 0,
+    "soulseek_max_download_kib": 0,
+    # One network search can contain many thousands of individual files. This
+    # cap keeps the accessible results list responsive.
+    "soulseek_max_results": 500,
+    # Rooms joined from the Chat tab are restored by aioslsk after reconnects.
+    "soulseek_rooms": [],
+    # Soulseek friends are tracked for presence and shown in Messages.
+    "soulseek_friends": [],
+    # Users granted a free-slot preference are ranked with friends by
+    # aioslsk's uploader, but stay independent from the visible friend list.
+    "soulseek_priority_users": [],
     # Anna's Archive membership key. Empty means downloads are resolved
     # through the public LibGen mirrors instead of the fast partner servers.
     "annas_archive_key": "",

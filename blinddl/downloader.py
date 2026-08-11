@@ -23,6 +23,7 @@ from . import (
     deezer_backend,
     musicdl_backend,
     sideb_backend,
+    soulseek_backend,
     torrent_backend,
     torrent_engine,
     ytdlp_backend,
@@ -55,7 +56,7 @@ class DownloadItem:
         self.id = uuid.uuid4().hex
         self.title = title
         # "ytdlp", "musicdl", "sideb", "adult", "book", "audiobook",
-        # "archive" or "torrent"
+        # "archive", "soulseek" or "torrent"
         self.kind = kind
         self.payload = payload  # URL string, musicdl SongInfo, or result dict
         self.audio_only = audio_only
@@ -88,6 +89,8 @@ class DownloadQueue:
         self._cond = threading.Condition()
         self._workers = []
         self._torrent_workers = []
+        self._wanted_workers = 0
+        self._wanted_torrent_workers = 0
         self._ensure_workers()
 
     # -- worker management ------------------------------------------------
@@ -101,10 +104,13 @@ class DownloadQueue:
         them starve every other download in the queue.
         """
         wanted = max(1, int(self.config["max_concurrent"]))
+        self._wanted_workers = wanted
+        self._workers = [worker for worker in self._workers if worker.is_alive()]
         while len(self._workers) < wanted:
+            index = len(self._workers)
             t = threading.Thread(target=self._worker, daemon=True,
-                                 args=(False,),
-                                 name=f"blinddl-worker-{len(self._workers)}")
+                                 args=(False, index),
+                                 name=f"blinddl-worker-{index}")
             t.start()
             self._workers.append(t)
 
@@ -113,17 +119,25 @@ class DownloadQueue:
         torrents = 2
         if self.config.get("torrent_engine"):
             torrents = max(2, int(self.config.get("torrent_max_active", 3)))
+        self._wanted_torrent_workers = torrents
+        self._torrent_workers = [
+            worker for worker in self._torrent_workers if worker.is_alive()
+        ]
         while len(self._torrent_workers) < torrents:
             index = len(self._torrent_workers)
             t = threading.Thread(target=self._worker, daemon=True,
-                                 args=(True,),
+                                 args=(True, index),
                                  name=f"blinddl-torrent-{index}")
             t.start()
             self._torrent_workers.append(t)
 
     def set_concurrency(self, n):
         self.config["max_concurrent"] = n
-        self._ensure_workers()
+        with self._cond:
+            self._ensure_workers()
+            # Workers above a reduced limit wake, see that they are no longer
+            # wanted, and exit instead of lingering for the process lifetime.
+            self._cond.notify_all()
 
     # -- public API -------------------------------------------------------
 
@@ -190,6 +204,11 @@ class DownloadQueue:
         self.add(item)
         return item
 
+    def add_soulseek(self, payload, title):
+        item = DownloadItem(title=title, kind="soulseek", payload=payload)
+        self.add(item)
+        return item
+
     def cancel(self, item_id):
         item = self._find(item_id)
         if item is None:
@@ -230,11 +249,18 @@ class DownloadQueue:
         if self.notify is not None:
             self.notify(item)
 
-    def _worker(self, torrents_only=False):
+    def _worker(self, torrents_only=False, worker_index=0):
         while True:
             with self._cond:
                 item = None
                 while item is None:
+                    wanted = (
+                        self._wanted_torrent_workers
+                        if torrents_only
+                        else self._wanted_workers
+                    )
+                    if worker_index >= wanted:
+                        return
                     for candidate in self.items:
                         if candidate.status != STATUS_QUEUED:
                             continue
@@ -259,6 +285,8 @@ class DownloadQueue:
                     self._run_audiobook(item)
                 elif item.kind == "archive":
                     self._run_archive(item)
+                elif item.kind == "soulseek":
+                    self._run_soulseek(item)
                 elif item.kind == "torrent":
                     self._run_torrent(item)
                 elif item.kind == "applemusic":
@@ -267,10 +295,15 @@ class DownloadQueue:
                     self._run_musicdl(item)
                 item.percent = 100.0
                 item.status = STATUS_DONE
+                # Every completed blindDL download lives in the default
+                # library, which is a Soulseek share by default. Debouncing in
+                # the backend turns a finished batch into one scan.
+                soulseek_backend.schedule_rescan()
             except (ytdlp_backend.DownloadCancelled,
                     book_backend.BookDownloadCancelled,
                     audiobook_backend.AudiobookDownloadCancelled,
                     archive_backend.ArchiveDownloadCancelled,
+                    soulseek_backend.SoulseekDownloadCancelled,
                     torrent_engine.TorrentDownloadCancelled):
                 item.status = STATUS_CANCELLED
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
@@ -414,6 +447,29 @@ class DownloadQueue:
 
         archive_backend.download(
             item.payload, self.config["download_dir"], progress_cb=progress,
+            cancel_event=item.cancel_event)
+
+    def _run_soulseek(self, item):
+        def progress(info):
+            downloaded = info.get("downloaded") or 0
+            total = info.get("total") or 0
+            if total:
+                item.percent = min(100.0, downloaded * 100.0 / total)
+            speed = info.get("speed") or 0
+            state = info.get("state") or ""
+            queue_position = info.get("queue_position")
+            if speed:
+                item.speed = format_speed(speed)
+            elif queue_position is not None:
+                item.speed = f"Soulseek queue position {queue_position}"
+            else:
+                item.speed = state
+            eta = info.get("eta")
+            item.eta = ytdlp_backend.format_duration(eta) if eta else ""
+            self._notify(item, throttle=True)
+
+        soulseek_backend.download(
+            item.payload, self.config, progress_cb=progress,
             cancel_event=item.cancel_event)
 
     def _run_torrent(self, item):

@@ -10,6 +10,7 @@ and their transitive dependencies:
 - Side B — MIT License (vendored in `sideb/`; see `sideb/VENDORED.md`)
 - Requests — Apache License 2.0
 - Mutagen — GNU General Public License v2 or later
+- aioslsk — GNU General Public License v3
 - PyCryptodome — BSD/Public Domain
 - Deno — MIT License
 - FFmpeg — LGPL v2.1 or later, or GPL when built with GPL components

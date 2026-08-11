@@ -39,7 +39,7 @@ datas = [
 binaries = []
 hiddenimports = []
 
-for package in ("mutagen", "audiobooker", "mediavocab"):
+for package in ("mutagen", "audiobooker", "mediavocab", "aioslsk"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -124,6 +124,7 @@ for distribution in (
     "sideb",
     "requests",
     "mutagen",
+    "aioslsk",
     "pycryptodome",
     "python-vlc",
     "aebndl",
