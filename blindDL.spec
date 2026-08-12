@@ -51,6 +51,7 @@ for package in (
     "async_timeout",
     "async_upnp_client",
     "multidict",
+    "tzdata",
 ):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
