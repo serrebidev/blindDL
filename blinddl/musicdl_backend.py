@@ -14,11 +14,11 @@ multi-source constructor aborts entirely when one source fails to build.
 Searches return normalized dicts that keep the original SongInfo attached
 so the download queue can hand it back to musicdl.
 
-Every site is started at once and the whole search returns after
-SEARCH_TIMEOUT_S (default 30s): a handful of these sites are dead, rate
-limited, or answer only after minutes, and waiting for the slowest one means
-the user gets nothing at all. Whatever answered in time is returned; late
-sites can still report through the per-site callback.
+Every site is admitted within SEARCH_TIMEOUT_S (default 30s), in small waves
+that keep the app responsive: a handful of these sites are dead, rate limited,
+or answer only after minutes, and starting all of them in one CPU-heavy burst
+makes the GUI unusable. Whatever answered in time is returned; late sites can
+still report through the per-site callback.
 
 musicdl is a console tool at heart: it logs to stderr and paints rich
 progress bars while it works, and it drops a search_results.pkl under a
@@ -30,6 +30,7 @@ downloads go to the user's download folder.
 """
 
 import logging
+import math
 import os
 import shutil
 import threading
@@ -63,15 +64,73 @@ SEARCH_SIZE_PER_SOURCE = 200
 # hanging on a dead host for the rest of the session.
 HTTP_TIMEOUT_S = 30
 # musicdl can create another worker pool inside every source. Keep each one at
-# a single worker while launching every source itself immediately; otherwise
-# the source-level pools can multiply this modest fan-out into hundreds of
-# runnable threads.
+# a single worker; otherwise the source-level pools can multiply this modest
+# fan-out into hundreds of runnable threads.
 SOURCE_SEARCH_THREADS = 1
+# Admit a small burst of providers at once. A lease expires even when its
+# provider is still blocked in the network, so dead sites cannot prevent every
+# provider from beginning within the user-visible search budget. Providers
+# that finish sooner return their slot immediately.
+MAX_CONCURRENT_SOURCE_SEARCHES = 8
+MAX_SOURCE_SLOT_LEASE_S = 4.0
 
 _lock = threading.Lock()
 _clients = None  # dict: source -> single-source MusicClient
 _http_timeout_installed = False
 _silenced = False
+_search_slots = threading.BoundedSemaphore(MAX_CONCURRENT_SOURCE_SEARCHES)
+
+
+class _SearchSlotLease:
+    """A concurrency slot that slow I/O cannot hold indefinitely."""
+
+    def __init__(self, duration_s, stop):
+        self.duration_s = duration_s
+        self.stop = stop
+        self.acquired = False
+        self.released = False
+        self.lock = threading.Lock()
+        self.timer = None
+
+    def acquire(self):
+        while self.stop is None or not self.stop.is_set():
+            if _search_slots.acquire(timeout=0.1):
+                self.acquired = True
+                self.timer = threading.Timer(self.duration_s, self.release)
+                self.timer.daemon = True
+                self.timer.start()
+                return True
+        return False
+
+    def release(self):
+        with self.lock:
+            if not self.acquired or self.released:
+                return
+            self.released = True
+            timer = self.timer
+        if timer is not None and timer is not threading.current_thread():
+            timer.cancel()
+        _search_slots.release()
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *_exc):
+        self.release()
+
+
+def _source_slot_lease_seconds(deadline, source_count):
+    """Keep the final provider wave inside the current search deadline."""
+    waves = max(1, math.ceil(source_count / MAX_CONCURRENT_SOURCE_SEARCHES))
+    if waves == 1:
+        return MAX_SOURCE_SLOT_LEASE_S
+    remaining = max(0.0, deadline - time.monotonic())
+    # Leave one quarter of the remaining budget for thread scheduling and the
+    # final wave to do useful work before search() returns its first snapshot.
+    return max(
+        0.01,
+        min(MAX_SOURCE_SLOT_LEASE_S, remaining * 0.75 / (waves - 1)),
+    )
 
 
 def cache_dir():
@@ -266,13 +325,14 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     """Search the chosen music sites at once and return after timeout_s.
 
     sources is a list of musicdl source names; None means every site that
-    could be built. Every source starts immediately, so an unresponsive site
-    cannot keep a working one from receiving the query before the deadline.
+    could be built. A bounded first wave prevents dozens of providers from
+    saturating the CPU together. Its slots rotate on short leases, so a dead
+    site cannot stop later providers from beginning before the deadline.
     Sites still working when the budget runs out are not waited for -- but
     they are not thrown away either: on_site(source, items) fires for every
     site that answers, late ones included, so a caller can keep filling a
     results list after this function has already returned. Set the `stop`
-    event to silence late callbacks from a superseded search.
+    event to silence queued work and late callbacks from a superseded search.
 
     ``order`` is accepted for the shared backend contract. musicdl's site
     adapters do not expose sorting, so they keep their own best-match order.
@@ -295,15 +355,34 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
         clients = {s: c for s, c in clients.items() if s in wanted}
     found = {}  # source -> normalized items, filled in by the worker threads
     found_lock = threading.Lock()
+    slot_lease_s = _source_slot_lease_seconds(deadline, len(clients))
 
     def search_one(source, client):
         if stop is not None and stop.is_set():
             return
-        try:
-            results = client.search(keyword) or {}
-            songs = results.get(source) or []
-        except Exception:  # noqa: BLE001 - one bad site must not kill the rest
-            songs = []
+        with _SearchSlotLease(slot_lease_s, stop) as admitted:
+            if not admitted:
+                return
+            try:
+                # Each MusicClient contains exactly one provider. Calling its
+                # provider directly avoids MusicClient.search creating a
+                # redundant one-worker executor around another one-worker
+                # executor in BaseMusicClient.search.
+                provider = getattr(client, "music_clients", {}).get(source)
+                if provider is None:
+                    # Keep light-weight third-party/test clients compatible
+                    # with the backend contract.
+                    results = client.search(keyword) or {}
+                    songs = results.get(source) or []
+                else:
+                    songs = provider.search(
+                        keyword=keyword,
+                        num_threadings=SOURCE_SEARCH_THREADS,
+                        request_overrides=client.requests_overrides[source],
+                        rule=client.search_rules[source],
+                    ) or []
+            except Exception:  # noqa: BLE001 - one bad site must not kill the rest
+                songs = []
         items = _normalize(source, songs)
         with found_lock:
             found[source] = items

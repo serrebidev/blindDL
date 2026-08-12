@@ -35,6 +35,49 @@ class _BlockingClient:
 
 
 class SearchConcurrencyTests(unittest.TestCase):
+    def test_search_caps_the_initial_provider_burst(self):
+        total = musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES + 5
+        state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
+        release = threading.Event()
+        clients = {}
+        for index in range(total):
+            source = f"Test{index:02d}MusicClient"
+            clients[source] = _BlockingClient(source, state, release)
+
+        finished = threading.Event()
+
+        def run_search():
+            try:
+                musicdl_backend.search("query", timeout_s=1)
+            finally:
+                finished.set()
+
+        with (mock.patch.object(musicdl_backend, "_clients", clients),
+              mock.patch.object(
+                  musicdl_backend, "_source_slot_lease_seconds",
+                  return_value=10.0,
+              )):
+            worker = threading.Thread(target=run_search, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 1
+            while (state["active"] <
+                   musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES and
+                   time.monotonic() < deadline):
+                time.sleep(0.01)
+
+            self.assertEqual(
+                state["active"],
+                musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES,
+            )
+            self.assertEqual(
+                state["maximum"],
+                musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES,
+            )
+            release.set()
+            worker.join(2)
+
+        self.assertTrue(finished.is_set())
+
     def test_search_starts_every_provider_before_the_deadline(self):
         total = 24
         state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
@@ -61,6 +104,26 @@ class SearchConcurrencyTests(unittest.TestCase):
         self.assertEqual(state["maximum"], total)
         self.assertFalse(any(t.name.startswith("search-Test")
                              for t in threading.enumerate()))
+
+    def test_search_calls_the_provider_without_the_wrapper_executor(self):
+        source = "TestMusicClient"
+        provider = mock.Mock()
+        provider.search.return_value = []
+        client = mock.Mock()
+        client.music_clients = {source: provider}
+        client.requests_overrides = {source: {"headers": {"X-Test": "1"}}}
+        client.search_rules = {source: {"kind": "song"}}
+
+        with mock.patch.object(musicdl_backend, "_clients", {source: client}):
+            musicdl_backend.search("query", timeout_s=1)
+
+        provider.search.assert_called_once_with(
+            keyword="query",
+            num_threadings=musicdl_backend.SOURCE_SEARCH_THREADS,
+            request_overrides={"headers": {"X-Test": "1"}},
+            rule={"kind": "song"},
+        )
+        client.search.assert_not_called()
 
     def test_first_use_client_setup_counts_toward_the_deadline(self):
         state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
