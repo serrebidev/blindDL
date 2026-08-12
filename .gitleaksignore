@@ -1,0 +1,3 @@
+# Historical dummy values used to test LibGen URL parsing; not credentials.
+4ea458ad606dc35ec6832daf1e1a91d63cde4e47:tests/test_book_backend.py:generic-api-key:264
+4ea458ad606dc35ec6832daf1e1a91d63cde4e47:tests/test_book_backend.py:generic-api-key:270
