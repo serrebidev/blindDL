@@ -35,8 +35,8 @@ class _BlockingClient:
 
 
 class SearchConcurrencyTests(unittest.TestCase):
-    def test_search_caps_provider_concurrency_across_late_work(self):
-        total = musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES + 5
+    def test_search_starts_every_provider_before_the_deadline(self):
+        total = 24
         state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
         release = threading.Event()
         stop = threading.Event()
@@ -58,11 +58,37 @@ class SearchConcurrencyTests(unittest.TestCase):
             time.sleep(0.01)
 
         self.assertEqual(len(asked), total)
-        self.assertEqual(
-            state["maximum"],
-            musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES,
-        )
+        self.assertEqual(state["maximum"], total)
         self.assertFalse(any(t.name.startswith("search-Test")
+                             for t in threading.enumerate()))
+
+    def test_first_use_client_setup_counts_toward_the_deadline(self):
+        state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
+        release = threading.Event()
+        client = _BlockingClient("TestMusicClient", state, release)
+
+        def build_clients():
+            time.sleep(0.15)
+            return {"TestMusicClient": client}
+
+        started = time.monotonic()
+        try:
+            with mock.patch.object(
+                musicdl_backend, "_get_clients", side_effect=build_clients
+            ):
+                musicdl_backend.search("query", timeout_s=0.2)
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        deadline = time.monotonic() + 2
+        while (any(t.name == "search-TestMusicClient"
+                   for t in threading.enumerate()) and
+               time.monotonic() < deadline):
+            time.sleep(0.01)
+
+        self.assertLess(elapsed, 0.3)
+        self.assertFalse(any(t.name == "search-TestMusicClient"
                              for t in threading.enumerate()))
 
     def test_musicdl_clients_limit_nested_search_workers(self):

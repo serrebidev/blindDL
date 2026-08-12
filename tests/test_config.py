@@ -42,6 +42,17 @@ class ConfigLoadTests(unittest.TestCase):
         self.assertFalse(config["adult_sites_enabled"])
         self.assertEqual(config["disabled_music_sources"], [])
 
+    def test_old_default_search_timeout_migrates_to_thirty_seconds(self):
+        config = self._load({"config_version": 1, "search_timeout_s": 5})
+
+        self.assertEqual(config["search_timeout_s"], 30)
+        self.assertEqual(config["config_version"], config_module.CONFIG_VERSION)
+
+    def test_custom_search_timeout_survives_migration(self):
+        config = self._load({"config_version": 1, "search_timeout_s": 12})
+
+        self.assertEqual(config["search_timeout_s"], 12)
+
 
 if __name__ == "__main__":
     unittest.main()

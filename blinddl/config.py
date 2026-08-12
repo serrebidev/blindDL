@@ -21,7 +21,7 @@ def app_data_dir():
 
 # Saved configs carry every key, so a changed default would never reach a
 # user who has run blindDL before. This is how one is handed on anyway.
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 DEFAULTS = {
     # Where finished downloads go.
@@ -50,7 +50,7 @@ DEFAULTS = {
     # Seconds a music search waits for each site before giving up on it.
     # Sites are searched in parallel, so this is roughly how long a music
     # search takes. Raise it to reach slower sites.
-    "search_timeout_s": 5,
+    "search_timeout_s": 30,
     # Music sites the user switched off, by musicdl source name. Empty means
     # search everything -- including sites added by future musicdl updates,
     # which is why the off list is stored rather than the on list.
@@ -265,6 +265,10 @@ class Config:
             # seeding after the window went away.
             self.data["minimize_to_tray"] = True
             self.data["tray_on_minimize"] = True
+        if from_version < 2 and self.data["search_timeout_s"] == 5:
+            # Five seconds was too short for all music providers to get a
+            # useful chance to answer. Preserve any timeout the user chose.
+            self.data["search_timeout_s"] = 30
         self.data["config_version"] = CONFIG_VERSION
         self.save()
 

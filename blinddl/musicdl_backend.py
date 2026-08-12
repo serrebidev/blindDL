@@ -14,12 +14,11 @@ multi-source constructor aborts entirely when one source fails to build.
 Searches return normalized dicts that keep the original SongInfo attached
 so the download queue can hand it back to musicdl.
 
-Sites are searched through a small, shared concurrency gate and the whole
-search returns after SEARCH_TIMEOUT_S (default 5s): a handful of these sites
-are dead, rate limited, or answer only after minutes, and waiting for the
-slowest one means the user gets nothing at all. Whatever answered in time is
-returned; late sites continue through the same bounded gate without spiking
-CPU use.
+Every site is started at once and the whole search returns after
+SEARCH_TIMEOUT_S (default 30s): a handful of these sites are dead, rate
+limited, or answer only after minutes, and waiting for the slowest one means
+the user gets nothing at all. Whatever answered in time is returned; late
+sites can still report through the per-site callback.
 
 musicdl is a console tool at heart: it logs to stderr and paints rich
 progress bars while it works, and it drops a search_results.pkl under a
@@ -56,25 +55,23 @@ from .config import app_data_dir  # noqa: E402
 ALL_SOURCES = sorted(MusicClientBuilder.REGISTERED_MODULES.keys())
 
 # Per-search wall clock budget. Sites that answer later are dropped.
-SEARCH_TIMEOUT_S = 5.0
+SEARCH_TIMEOUT_S = 30.0
 # How many songs each source is asked for. Upstream adapters often cap their
 # own page size lower, but the ones that can answer do.
 SEARCH_SIZE_PER_SOURCE = 200
 # Hard socket timeout, so an abandoned search thread dies instead of
 # hanging on a dead host for the rest of the session.
-HTTP_TIMEOUT_S = 15
-# musicdl can create another worker pool inside every source. Without both
-# limits, searching all currently registered sources can create hundreds of
-# runnable threads, and timed-out searches compound the load while late sites
-# continue working.
-MAX_CONCURRENT_SOURCE_SEARCHES = 8
+HTTP_TIMEOUT_S = 30
+# musicdl can create another worker pool inside every source. Keep each one at
+# a single worker while launching every source itself immediately; otherwise
+# the source-level pools can multiply this modest fan-out into hundreds of
+# runnable threads.
 SOURCE_SEARCH_THREADS = 1
 
 _lock = threading.Lock()
 _clients = None  # dict: source -> single-source MusicClient
 _http_timeout_installed = False
 _silenced = False
-_search_slots = threading.BoundedSemaphore(MAX_CONCURRENT_SOURCE_SEARCHES)
 
 
 def cache_dir():
@@ -269,13 +266,13 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     """Search the chosen music sites at once and return after timeout_s.
 
     sources is a list of musicdl source names; None means every site that
-    could be built. Sources pass through a shared concurrency gate so late
-    work from repeated searches cannot multiply CPU load. Sites still working
-    when the budget runs out are not waited for -- but they are not thrown
-    away either: on_site(source, items) fires for every site that answers,
-    late ones included, so a caller can keep filling a results list after this
-    function has already returned. Set the `stop` event to prevent queued
-    sources and late callbacks from a superseded search from doing more work.
+    could be built. Every source starts immediately, so an unresponsive site
+    cannot keep a working one from receiving the query before the deadline.
+    Sites still working when the budget runs out are not waited for -- but
+    they are not thrown away either: on_site(source, items) fires for every
+    site that answers, late ones included, so a caller can keep filling a
+    results list after this function has already returned. Set the `stop`
+    event to silence late callbacks from a superseded search.
 
     ``order`` is accepted for the shared backend contract. musicdl's site
     adapters do not expose sorting, so they keep their own best-match order.
@@ -288,6 +285,10 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     take four minutes -- so a caller should tell the user they are pending
     rather than call the search empty.
     """
+    # Include first-use client construction in the user-visible budget. The
+    # normal startup warm-up makes this nearly free, but an immediate search
+    # must not silently run longer than the configured timeout.
+    deadline = time.monotonic() + timeout_s
     clients = _get_clients()
     if sources is not None:
         wanted = set(sources)
@@ -296,14 +297,13 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     found_lock = threading.Lock()
 
     def search_one(source, client):
-        with _search_slots:
-            if stop is not None and stop.is_set():
-                return
-            try:
-                results = client.search(keyword) or {}
-                songs = results.get(source) or []
-            except Exception:  # noqa: BLE001 - one bad site must not kill the rest
-                songs = []
+        if stop is not None and stop.is_set():
+            return
+        try:
+            results = client.search(keyword) or {}
+            songs = results.get(source) or []
+        except Exception:  # noqa: BLE001 - one bad site must not kill the rest
+            songs = []
         items = _normalize(source, songs)
         with found_lock:
             found[source] = items
@@ -320,7 +320,6 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
         thread.start()
         threads.append(thread)
 
-    deadline = time.monotonic() + timeout_s
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))
 
