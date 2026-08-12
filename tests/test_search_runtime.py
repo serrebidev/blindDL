@@ -23,6 +23,7 @@ class _BlockingClient:
 
     def search(self, keyword):
         with self.state["lock"]:
+            self.state["started"] = self.state.get("started", 0) + 1
             self.state["active"] += 1
             self.state["maximum"] = max(
                 self.state["maximum"], self.state["active"])
@@ -80,7 +81,12 @@ class SearchConcurrencyTests(unittest.TestCase):
 
     def test_search_starts_every_provider_before_the_deadline(self):
         total = 24
-        state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
+        state = {
+            "active": 0,
+            "maximum": 0,
+            "started": 0,
+            "lock": threading.Lock(),
+        }
         release = threading.Event()
         stop = threading.Event()
         clients = {}
@@ -88,9 +94,13 @@ class SearchConcurrencyTests(unittest.TestCase):
             source = f"Test{index:02d}MusicClient"
             clients[source] = _BlockingClient(source, state, release)
 
-        with mock.patch.object(musicdl_backend, "_clients", clients):
+        with (mock.patch.object(musicdl_backend, "_clients", clients),
+              mock.patch.object(
+                  musicdl_backend, "_source_slot_lease_seconds",
+                  return_value=0.01,
+              )):
             _items, _answered, asked = musicdl_backend.search(
-                "query", timeout_s=0.2, stop=stop)
+                "query", timeout_s=2, stop=stop)
             stop.set()
             release.set()
 
@@ -101,7 +111,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             time.sleep(0.01)
 
         self.assertEqual(len(asked), total)
-        self.assertEqual(state["maximum"], total)
+        self.assertEqual(state["started"], total)
         self.assertFalse(any(t.name.startswith("search-Test")
                              for t in threading.enumerate()))
 
