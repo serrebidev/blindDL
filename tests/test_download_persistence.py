@@ -59,6 +59,33 @@ class DownloadPersistenceTests(unittest.TestCase):
         self.assertEqual(restored.items[0].payload["picture"], b"small")
         self.assertEqual(restored.items[0].id, active.id)
 
+    def test_saved_soulseek_settings_error_is_automatically_requeued(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            item = DownloadItem(
+                "1010 The Difference.m4a",
+                "soulseek",
+                {"username": "friend", "remote_path": "1010 The Difference.m4a"},
+            )
+            item.status = STATUS_ERROR
+            item.percent = 71
+            item.error = (
+                "Soulseek settings changed during this transfer. Queue it again."
+            )
+            queue.items = [item]
+            queue._save_state()
+
+            restored = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+
+        self.assertEqual(restored.items[0].status, STATUS_QUEUED)
+        self.assertEqual(restored.items[0].percent, 71)
+        self.assertEqual(restored.items[0].error, "")
+
     def test_batch_additions_persists_once_and_notifies_every_item(self):
         with tempfile.TemporaryDirectory() as folder:
             notified = []

@@ -476,6 +476,15 @@ class DownloadQueue:
                 record.get("payload_error") or "unsupported saved data"
             )
             item.seeding = False
+        elif (
+            status == STATUS_ERROR
+            and item.kind == "soulseek"
+            and item.error.startswith(soulseek_backend.SETTINGS_CHANGED_MESSAGE)
+        ):
+            # Releases before automatic reconnect told the user to queue this
+            # transfer again. Upgrade that saved error row on the next launch.
+            item.status = STATUS_QUEUED
+            item.error = ""
         elif status in ACTIVE_STATUSES:
             item.status = STATUS_QUEUED
         elif status == STATUS_DONE and item.kind == "torrent" and item.seeding \
@@ -775,9 +784,21 @@ class DownloadQueue:
             item.eta = ytdlp_backend.format_duration(eta) if eta else ""
             self._notify(item, throttle=True)
 
-        soulseek_backend.download(
-            item.payload, self.config, progress_cb=progress,
-            cancel_event=item.cancel_event)
+        while True:
+            try:
+                soulseek_backend.download(
+                    item.payload, self.config, progress_cb=progress,
+                    cancel_event=item.cancel_event)
+                return
+            except soulseek_backend.SoulseekSettingsChanged:
+                if item.cancel_event.is_set():
+                    raise soulseek_backend.SoulseekDownloadCancelled() from None
+                # Re-issuing the same peer/path lets aioslsk resume its cached
+                # partial transfer after the settings-driven client restart.
+                item.speed = "Soulseek settings changed; reconnecting automatically"
+                item.eta = ""
+                item.error = ""
+                self._notify(item)
 
     def _run_torrent(self, item):
         if self.config.get("torrent_engine") and torrent_engine.available():

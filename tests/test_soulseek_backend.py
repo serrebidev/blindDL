@@ -21,6 +21,7 @@ from aioslsk.protocol.primitives import (
     FileData,
 )
 from aioslsk.search.model import SearchResult
+from aioslsk.shares.manager import SharesManager
 
 from blinddl.config import DEFAULTS
 from blinddl.downloader import DownloadItem, DownloadQueue
@@ -81,6 +82,38 @@ class SoulseekBackendTests(unittest.TestCase):
             soulseek_backend._config_snapshot(config)["private_rooms"], ["Secret"]
         )
         self.assertEqual(settings.users.friends, {"alice", "bob"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows drive semantics")
+    def test_aioslsk_shared_directories_on_different_drives_are_unrelated(self):
+        music = soulseek_backend.SharedDirectory(
+            r"C:\Music", r"C:\Music", "music"
+        )
+        downloads = soulseek_backend.SharedDirectory(
+            r"D:\Downloads", r"D:\Downloads", "downloads"
+        )
+
+        self.assertFalse(music.is_parent_of(downloads))
+        self.assertFalse(music.is_child_of(downloads))
+        self.assertFalse(downloads.is_parent_of(music))
+        self.assertFalse(downloads.is_child_of(music))
+        self.assertTrue(music.is_parent_of(r"C:\Music\Album"))
+
+        settings = soulseek_backend.Settings(
+            credentials=soulseek_backend.CredentialsSettings(
+                username="listener", password="secret"
+            )
+        )
+        settings.shares.directories = [
+            soulseek_backend.SharedDirectorySettingEntry(path=r"C:\Music"),
+            soulseek_backend.SharedDirectorySettingEntry(path=r"D:\Downloads"),
+        ]
+        manager = SharesManager(settings, mock.Mock(), mock.Mock())
+        manager.load_from_settings()
+
+        self.assertEqual(
+            [entry.absolute_path for entry in manager.shared_directories],
+            [r"C:\Music", r"D:\Downloads"],
+        )
 
     def test_free_slot_priority_is_separate_but_reaches_aioslsk_uploader(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -164,8 +197,91 @@ class SoulseekBackendTests(unittest.TestCase):
         self.assertEqual(item.eta, "0:02")
         queue.notify.assert_called()
 
+    def test_downloader_requeues_after_soulseek_settings_change(self):
+        speeds = []
+        queue = DownloadQueue(
+            self.config("downloads"),
+            lambda changed: speeds.append(changed.speed),
+            state_path="",
+            start_workers=False,
+        )
+        item = DownloadItem(
+            "Track.flac",
+            "soulseek",
+            {"username": "peer", "remote_path": "Track.flac"},
+        )
+        attempts = 0
+
+        def fake_download(payload, config, progress_cb, cancel_event):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise soulseek_backend.SoulseekSettingsChanged()
+            progress_cb(
+                {
+                    "downloaded": 768,
+                    "total": 1024,
+                    "speed": 256,
+                    "eta": 1,
+                    "state": "Downloading",
+                    "queue_position": None,
+                }
+            )
+
+        with mock.patch.object(soulseek_backend, "download", side_effect=fake_download):
+            queue._run_soulseek(item)
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(item.percent, 75)
+        self.assertIn(
+            "Soulseek settings changed; reconnecting automatically",
+            speeds,
+        )
+
+    def test_cancel_wins_while_soulseek_transfer_is_requeued(self):
+        queue = DownloadQueue(
+            self.config("downloads"),
+            mock.Mock(),
+            state_path="",
+            start_workers=False,
+        )
+        item = DownloadItem(
+            "Track.flac",
+            "soulseek",
+            {"username": "peer", "remote_path": "Track.flac"},
+        )
+
+        def interrupted(payload, config, progress_cb, cancel_event):
+            cancel_event.set()
+            raise soulseek_backend.SoulseekSettingsChanged()
+
+        with (
+            mock.patch.object(soulseek_backend, "download", side_effect=interrupted),
+            self.assertRaises(soulseek_backend.SoulseekDownloadCancelled),
+        ):
+            queue._run_soulseek(item)
+
 
 class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_restart_raises_requeueable_transfer_error(self):
+        transfer = SimpleNamespace(local_path=None)
+        client = SimpleNamespace(
+            transfers=SimpleNamespace(
+                download=mock.AsyncMock(return_value=transfer)
+            )
+        )
+        service = soulseek_backend._Service()
+        service._configure = mock.AsyncMock(return_value=client)
+        service._client = object()
+
+        with self.assertRaises(soulseek_backend.SoulseekSettingsChanged):
+            await service._download(
+                {},
+                {"username": "peer", "remote_path": "Track.flac"},
+                None,
+                threading.Event(),
+            )
+
     async def test_browse_user_normalizes_public_and_locked_folder_files(self):
         public = [
             DirectoryData("Music\\Album", [_file("Track.flac", "flac", 50)])

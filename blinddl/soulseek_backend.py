@@ -62,6 +62,7 @@ try:
         SharedDirectorySettingEntry,
     )
     from aioslsk.shares.cache import SharesShelveCache
+    from aioslsk.shares.model import SharedDirectory
     from aioslsk.transfer.cache import TransferShelveCache
     from aioslsk.transfer.state import TransferState
 except ImportError as exc:  # pragma: no cover - dependency is included in releases
@@ -76,6 +77,48 @@ logger = logging.getLogger(__name__)
 logging.getLogger("aioslsk").setLevel(logging.ERROR)
 
 SOURCE = "Soulseek"
+SETTINGS_CHANGED_MESSAGE = "Soulseek settings changed during this transfer."
+
+
+def _path_is_within(parent: str, candidate: str) -> bool:
+    """Return whether candidate is inside parent, including parent itself."""
+    try:
+        return os.path.commonpath((candidate, parent)) == parent
+    except ValueError:
+        # Windows raises when the paths use different drives. They cannot have
+        # a parent/child relationship, so this is a normal negative result.
+        return False
+
+
+def _shared_directory_is_parent_of(self, directory) -> bool:
+    path = directory if isinstance(directory, str) else directory.absolute_path
+    return _path_is_within(self.absolute_path, path)
+
+
+def _shared_directory_is_child_of(self, directory) -> bool:
+    path = directory if isinstance(directory, str) else directory.absolute_path
+    return _path_is_within(path, self.absolute_path)
+
+
+def _shared_directory_items_for(self, directory) -> set:
+    return {
+        item
+        for item in self.items
+        if _path_is_within(directory.absolute_path, item.get_absolute_path())
+    }
+
+
+def _install_aioslsk_cross_drive_fix() -> None:
+    """Make aioslsk shared-folder comparisons safe across Windows drives."""
+    if not available():
+        return
+    # aioslsk 1.6.3 lets ValueError from ntpath.commonpath escape from these
+    # methods. Its share manager calls them while reconciling the old cache
+    # with new settings, which prevents Soulseek from reconnecting when a
+    # download or shared folder moves to another drive.
+    SharedDirectory.is_parent_of = _shared_directory_is_parent_of
+    SharedDirectory.is_child_of = _shared_directory_is_child_of
+    SharedDirectory.get_items_for_directory = _shared_directory_items_for
 
 AUDIO_EXTENSIONS = frozenset(
     {
@@ -153,8 +196,15 @@ class SoulseekDownloadCancelled(SoulseekError):
     """Raised when a blindDL cancellation aborts an aioslsk transfer."""
 
 
+class SoulseekSettingsChanged(SoulseekError):
+    """Raised when a client restart interrupts an in-flight transfer."""
+
+
 def available() -> bool:
     return SoulSeekClient is not None
+
+
+_install_aioslsk_cross_drive_fix()
 
 
 def _cache_dir(name: str = "soulseek") -> str:
@@ -1309,9 +1359,7 @@ class _Service:
                     transfer.local_path = candidate
         while True:
             if client is not self._client:
-                raise SoulseekError(
-                    "Soulseek settings changed during this transfer. Queue it again."
-                )
+                raise SoulseekSettingsChanged(SETTINGS_CHANGED_MESSAGE)
             if cancel_event is not None and cancel_event.is_set():
                 try:
                     await client.transfers.abort(transfer)
