@@ -2,33 +2,122 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Apple Music backend: download via gamdl (optional dependency).
+"""Apple Music backend: search, resolve, and download in-process.
 
-gamdl (Glomatico's Apple Music Downloader) downloads AAC/M4A from Apple
-Music using browser cookies.  Install it separately:
+Searching uses the iTunes Search API, which is public, credential-free, and
+serves the same catalogue Apple Music's own pages use. Downloading runs the
+Apple Music web pipeline entirely inside blindDL -- anonymous developer
+token, catalog metadata, HLS stream, Widevine L3 license exchange, and an
+ffmpeg AES-128 decrypt-and-remux to M4A -- the same technique the gamdl /
+AppleMusicDecrypt family of tools pioneered. No external downloader is
+needed; the only tool involved is the ffmpeg blindDL already bundles.
 
-    pip install gamdl
-
-Then place your Apple Music cookies file (Netscape format) somewhere and
-set the path in Settings.  The backend is skipped when gamdl is not
-installed or no cookies file is configured.
+A full track still needs an Apple Music subscription. Export your browser
+cookies while logged in at music.apple.com (Settings, Accounts, Apple Music,
+Copy from browser) and point the cookies file setting at the export. Without
+cookies, search and URL resolution keep working; downloads raise a clear
+error instead.
 """
 
 import os
 import re
 import subprocess
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
 _SEARCH_SOURCE = "Apple Music"
 _ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
+_ITUNES_LOOKUP_URL = "https://itunes.apple.com/lookup"
+_AMP_API_URL = "https://amp-api.music.apple.com"
+
+# music.apple.com / geo.music.apple.com / embed.music.apple.com media
+# links: /{cc}/{type}/... where type is a known media type, so a bare
+# music.apple.com page never gets routed to this backend.
 _APPLE_URL_RE = re.compile(
-    r"music\.apple\.com/(?:[a-z]{2}/)?(?:album|playlist|artist|song)/",
+    r"(?:geo\.|embed\.)?music\.apple\.com/(?:[a-z]{2}/)?"
+    r"(?:songs?|albums?|playlists?|artists?|music-videos?|posts?|stations?"
+    r"|library-songs?|library-albums?|library-playlists?)/",
     re.IGNORECASE)
+# Legacy iTunes storefront links: itunes.apple.com/us/album/{slug}/id123
+_ITUNES_STORE_URL_RE = re.compile(
+    r"itunes\.apple\.com/[^/]+/(?:album|playlist|artist)/", re.IGNORECASE)
+_ITUNES_ID_PART_RE = re.compile(r"^id(\d+)$", re.IGNORECASE)
+
+_MEDIA_TYPE_MAP = {
+    "song": "song", "songs": "song",
+    "album": "album", "albums": "album",
+    "playlist": "playlist", "playlists": "playlist",
+    "artist": "artist", "artists": "artist",
+    "music-video": "music_video", "music-videos": "music_video",
+    "musicvideo": "music_video",
+    "post": "post", "station": "station", "stations": "station",
+    "library-song": "song", "library-songs": "song",
+    "library-album": "album", "library-playlist": "playlist",
+    "library-playlists": "playlist",
+}
+
+_UNSUPPORTED_MEDIA_TYPES = ("artist", "music_video", "post", "station")
 
 
 def is_apple_music_url(url):
-    return bool(_APPLE_URL_RE.search(url))
+    """True for any URL blindDL can hand to the Apple Music backend."""
+    url = str(url or "")
+    return bool(_APPLE_URL_RE.search(url) or _ITUNES_STORE_URL_RE.search(url))
+
+
+def parse_apple_url(url):
+    """Split an Apple Music link into its parts.
+
+    Returns a dict with ``storefront``, ``media_type`` (song/album/playlist/
+    ...), ``media_id`` and an optional ``sub_id`` (the ``?i=`` song id on an
+    album page), or None when the URL is not a supported Apple Music link.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return None
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not (host.endswith("music.apple.com") or host == "itunes.apple.com"):
+        return None
+    query = parse_qs(parsed.query)
+    sub_id = (query.get("i") or [None])[0]
+    path = parsed.path or ""
+    media_id = None
+    media_type = None
+    if host == "itunes.apple.com":
+        parts = [p for p in path.strip("/").split("/") if p]
+        # /{country}/{type}/{slug}/id{id} or /{country}/{type}/id{id}
+        if len(parts) >= 3:
+            storefront, media_type = parts[0], parts[1]
+            for part in parts[2:]:
+                match = _ITUNES_ID_PART_RE.match(part)
+                if match:
+                    media_id = match.group(1)
+                    break
+    else:
+        # music.apple.com/{cc}/{type}/{slug}/{id} or /{cc}/{type}/{id}
+        parts = [p for p in path.strip("/").split("/") if p]
+        if len(parts) >= 2:
+            storefront = parts[0]
+            media_type = parts[1]
+            # Catalog ids are numeric (songs, albums, artists) or prefixed
+            # (playlists: pl.*, stations: ra.*, curators: sp.*).
+            if re.fullmatch(r"\d+|[a-z]{2}\.[A-Za-z0-9._-]+",
+                            parts[-1] or "", re.IGNORECASE):
+                media_id = parts[-1]
+    if not media_id:
+        return None
+    media_type = _MEDIA_TYPE_MAP.get(str(media_type or "").lower())
+    if media_type is None:
+        return None
+    return {
+        "storefront": storefront,
+        "media_type": media_type,
+        "media_id": media_id,
+        "sub_id": sub_id,
+        "url": url,
+    }
 
 
 def search(query, config=None, order=None):
@@ -58,83 +147,426 @@ def search(query, config=None, order=None):
         url = track.get("trackViewUrl") or ""
         if not url:
             continue
-        items.append({
-            "id": f"applemusic:{track.get('trackId') or url}",
-            "kind": "applemusic",
-            "title": track.get("trackName") or "Unknown title",
-            "artist": track.get("artistName") or "",
-            "album": track.get("collectionName") or "",
-            "source": _SEARCH_SOURCE,
-            "duration_s": int(track.get("trackTimeMillis") or 0) // 1000,
-            "url": url,
-        })
+        items.append(_track_item(track, url))
     return items
 
 
-def extract_flat(url, config=None):
-    """Apple Music URLs are resolved by gamdl at download time.
-    Return a single placeholder item so the URL panel can proceed.
+def _track_item(track, url):
+    return {
+        "id": f"applemusic:{track.get('trackId') or url}",
+        "kind": "applemusic",
+        "title": track.get("trackName") or "Unknown title",
+        "artist": track.get("artistName") or "",
+        "album": track.get("collectionName") or "",
+        "source": _SEARCH_SOURCE,
+        "duration_s": int(track.get("trackTimeMillis") or 0) // 1000,
+        "url": url,
+        "preview_url": track.get("previewUrl") or "",
+        "artwork_url": _larger_artwork(track.get("artworkUrl100") or ""),
+    }
+
+
+def _larger_artwork(artwork_url):
+    return artwork_url.replace("100x100bb", "600x600bb")
+
+
+def _lookup(media_id, entity="song"):
+    """One iTunes lookup call; returns the results list or []."""
+    try:
+        response = requests.get(
+            _ITUNES_LOOKUP_URL,
+            params={"id": media_id, "entity": entity, "limit": 200},
+            timeout=30,
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+    except (requests.RequestException, ValueError):
+        return []
+    return results or []
+
+
+def _lookup_song_item(media_id, url):
+    """Resolve a single song's metadata through the iTunes lookup API."""
+    results = _lookup(media_id, entity="song")
+    track = next(
+        (result for result in results
+         if str(result.get("trackId")) == str(media_id)),
+        results[0] if results else None,
+    )
+    if not track or not track.get("trackViewUrl"):
+        return None
+    return _track_item(track, url)
+
+
+def _collection_items(info, url):
+    """Resolve an album or playlist link to its track list.
+
+    The iTunes lookup API returns the release as its first result and every
+    track after it, which is exactly what the URL tab's picker needs. Falls
+    back to an empty list when the link cannot be resolved, and the caller
+    then returns a single placeholder item.
     """
-    if not is_apple_music_url(url):
-        raise RuntimeError(f"Not an Apple Music URL: {url}")
-    return [{
+    results = _lookup(info["media_id"], entity="song")
+    if len(results) < 2:
+        return []
+    collection = results[0]
+    items = []
+    for track in results[1:]:
+        track_url = track.get("trackViewUrl") or ""
+        if not track_url:
+            continue
+        item = _track_item(track, track_url)
+        item["album"] = item["album"] or collection.get("collectionName") or ""
+        items.append(item)
+    return items
+
+
+def _placeholder_item(url, media_type):
+    """A single un-resolved item so the queue can still proceed."""
+    slug = url.rstrip("/").rsplit("/", 1)[-1]
+    return {
         "id": f"applemusic:{url}",
         "kind": "applemusic",
-        "title": url.rsplit("/", 1)[-1] if "/" in url else url,
+        "title": slug or f"Apple Music {media_type}",
         "artist": "",
         "source": _SEARCH_SOURCE,
         "duration_s": 0,
         "url": url,
-    }], "Apple Music"
+    }
 
 
-def _find_gamdl():
-    """Return the gamdl executable path, or None."""
-    import shutil
-    path = shutil.which("gamdl")
-    if path:
-        return path
-    # Try the common pipx / user install locations.
-    import sys
-    script_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
-    candidate = os.path.join(script_dir, "gamdl.exe"
-                             if sys.platform == "win32" else "gamdl")
-    if os.path.isfile(candidate):
-        return candidate
-    return None
+def extract_flat(url, config=None):
+    """Resolve an Apple Music URL into queue items with real metadata.
+
+    Songs resolve through the iTunes lookup API. Albums and playlists come
+    back as one item per track, so the URL tab's picker can choose which
+    songs to queue; when the link cannot be resolved a single placeholder
+    item keeps the queue flowing.
+    """
+    info = parse_apple_url(url)
+    if info is None:
+        raise RuntimeError(f"Not an Apple Music URL: {url}")
+    media_type = info["media_type"]
+    if media_type in _UNSUPPORTED_MEDIA_TYPES:
+        raise RuntimeError(
+            "blindDL supports Apple Music songs, albums, and playlists only.")
+    if media_type == "song" or info.get("sub_id"):
+        media_id = info["sub_id"] or info["media_id"]
+        item = _lookup_song_item(media_id, url) or _placeholder_item(url, "song")
+        return [item], item["title"]
+    items = _collection_items(info, url)
+    if not items:
+        # iTunes lookup does not know playlist ids; fall back to the catalog
+        # API with an anonymous developer token.
+        items = _catalog_collection_items(info)
+    if items:
+        return items, items[0].get("album") or f"Apple Music {media_type}"
+    item = _placeholder_item(url, media_type)
+    return [item], item["title"]
+
+
+def _anonymous_api():
+    """Apple Music catalog API with an anonymous developer token.
+
+    The token is generated client-side from the music.apple.com bundle, so
+    catalog lookups (playlist/album track lists) work without cookies.
+    """
+    from musicdl.modules.utils import appleutils
+
+    return appleutils.AppleMusicClientAPIUtils.create(
+        storefront="us", language="en-US")
+
+
+def _catalog_collection_items(info):
+    """Resolve an album/playlist link to its tracks via the catalog API.
+
+    Used when the iTunes lookup API cannot answer (playlist ids are
+    ``pl.*`` and unknown to it). Returns [] when the link cannot be
+    resolved, so the caller can fall back to a placeholder item.
+    """
+    try:
+        api = _anonymous_api()
+    except Exception:  # noqa: BLE001 - network/token failure
+        return []
+    try:
+        if info["media_type"] == "playlist":
+            collection = api.getplaylist(
+                info["media_id"], limit_tracks=300)["data"][0]
+        else:
+            collection = _catalog_album(api, info["media_id"])
+    except Exception:  # noqa: BLE001 - not found, restricted, offline
+        return []
+    name = _attr(collection, "name")
+    storefront = info["storefront"] or "us"
+    items = []
+    for track in _relationships_tracks(collection):
+        track_id = _track_id(track)
+        if not track_id:
+            continue
+        attrs = track.get("attributes") or {}
+        items.append({
+            "id": f"applemusic:{track_id}",
+            "kind": "applemusic",
+            "title": attrs.get("name") or "Unknown title",
+            "artist": attrs.get("artistName") or "",
+            "album": attrs.get("albumName") or name or "",
+            "source": _SEARCH_SOURCE,
+            "duration_s": int(attrs.get("durationInMillis") or 0) // 1000,
+            "url": f"https://music.apple.com/{storefront}/song/{track_id}",
+            "preview_url": (attrs.get("previews") or [{}])[0].get("url") or "",
+            "artwork_url": ((attrs.get("artwork") or {}).get("url") or ""),
+        })
+    return items
+
+
+# -- downloading -----------------------------------------------------------
+
+
+def _cookies_from_file(path):
+    """Parse a Netscape cookies.txt into a {name: value} dict.
+
+    Handles both plain cookies and the ``#HttpOnly_``-prefixed lines modern
+    exporters write.
+    """
+    cookies = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    if not line.startswith("#HttpOnly_"):
+                        continue
+                fields = line.split("\t")
+                if len(fields) < 7:
+                    continue
+                name = fields[5].strip()
+                value = fields[6].strip()
+                if name:
+                    cookies[name] = value
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not read the Apple Music cookies file: {exc}") from exc
+    return cookies
+
+
+def _authenticated_api(config):
+    """Build the authenticated Apple Music API and iTunes metadata client.
+
+    Raises a RuntimeError with a user-actionable message when the cookies
+    file is missing or does not carry a media-user-token.
+    """
+    from musicdl.modules.utils import appleutils
+
+    cookies_path = str((config or {}).get("apple_music_cookies") or "")
+    if not cookies_path or not os.path.isfile(cookies_path):
+        raise RuntimeError(
+            "No Apple Music cookies file configured. Export your browser "
+            "cookies while logged in at music.apple.com (Settings, Accounts, "
+            "Apple Music, Copy from browser), then set the path in Settings.")
+    cookies = _cookies_from_file(cookies_path)
+    if not cookies.get("media-user-token"):
+        raise RuntimeError(
+            "Your Apple Music cookies file has no media-user-token. Export "
+            "fresh cookies while logged in at music.apple.com.")
+    try:
+        api = appleutils.AppleMusicClientAPIUtils.createfromnetscapecookies(
+            cookies=cookies, language="en-US")
+    except Exception as exc:  # noqa: BLE001 - expired or revoked token
+        raise RuntimeError(
+            f"Apple Music sign-in failed: {exc}") from exc
+    itunes_api = None
+    try:
+        itunes_api = appleutils.AppleMusicClientItunesApiUtils(
+            storefront=api.storefront or "us", language=api.language)
+    except Exception:  # noqa: BLE001 - metadata dates are a nice-to-have
+        itunes_api = None
+    return api, itunes_api
+
+
+def _catalog_song(api, media_id):
+    song = api.getsong(str(media_id))
+    return song["data"][0]
+
+
+def _catalog_album(api, album_id):
+    """Fetch an album resource with its track list.
+
+    ``getalbum`` does not request the tracks relationship, so this asks the
+    catalog endpoint for ``include[tracks]`` and returns the unwrapped
+    album resource.
+    """
+    response = api.client.get(
+        f"{_AMP_API_URL}/v1/catalog/{api.storefront}/albums/{album_id}",
+        params={
+            "include[tracks]": "data",
+            "extend": "extendedAssetUrls",
+            "l": api.language,
+        },
+    )
+    response.raise_for_status()
+    return response.json()["data"][0]
+
+
+def _relationships_tracks(collection):
+    return ((collection.get("relationships") or {})
+            .get("tracks", {}).get("data", []) or [])
+
+
+def _track_id(track):
+    play_params = (track.get("attributes") or {}).get("playParams") or {}
+    return play_params.get("catalogId") or track.get("id")
+
+
+def _attr(resource, name):
+    return (resource.get("attributes") or {}).get(name) or ""
+
+
+def _safe_name(name):
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(name or "").strip())
+    return cleaned or "Unknown"
+
+
+def _check_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Cancelled.")
+
+
+def _ffmpeg_decrypt_remux(stream_url, decryption_key, out_path):
+    """Download an Apple Music AES-128 HLS stream and remux it to M4A.
+
+    The legacy AAC streams are AES-128 HLS whose key is a Widevine PSSH;
+    ffmpeg's -decryption_key decrypts the segments as it downloads them, so
+    a single ffmpeg invocation produces the finished M4A.
+    """
+    command = ["ffmpeg", "-loglevel", "error", "-y"]
+    if decryption_key:
+        command += ["-decryption_key", decryption_key]
+    command += ["-i", stream_url, "-c", "copy", "-movflags", "+faststart",
+                out_path]
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=1800,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg was not found; blindDL needs it to decode Apple Music "
+            "streams.") from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Apple Music download timed out.") from None
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            f"ffmpeg could not download the Apple Music stream: {detail[-400:]}")
+
+
+def _write_tags(out_path, item):
+    """Tag the finished M4A and embed cover art and synced lyrics."""
+    from mutagen.mp4 import MP4
+
+    try:
+        tags = MP4(out_path)
+        if item.media_tags is not None:
+            tags.update(item.media_tags.asmp4tags())
+        cover_url = item.cover_url
+        if cover_url:
+            try:
+                response = requests.get(cover_url, timeout=30)
+                response.raise_for_status()
+                tags["covr"] = [response.content]
+            except (requests.RequestException, OSError):
+                pass
+        tags.save()
+    except Exception:  # noqa: BLE001 - a tagging failure must not lose audio
+        pass
+    if item.lyrics is not None and item.lyrics.synced:
+        try:
+            with open(os.path.splitext(out_path)[0] + ".lrc", "w",
+                      encoding="utf-8", newline="\n") as handle:
+                handle.write(item.lyrics.synced)
+        except OSError:
+            pass
+
+
+def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
+                   cancel_event=None):
+    """Download one song's HLS stream, decrypt it, and tag the M4A."""
+    from musicdl.modules.utils import appleutils
+
+    _check_cancelled(cancel_event)
+    try:
+        item = appleutils.AppleMusicClientDownloadSongUtils.getdownloaditem(
+            song_metadata=metadata,
+            playlist_metadata=playlist_metadata,
+            codec=appleutils.SongCodec.AAC_LEGACY,
+            apple_music_api=api,
+            itunes_api=itunes_api,
+            use_wrapper=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the queue
+        raise RuntimeError(
+            f"Could not prepare the Apple Music track: {exc}") from exc
+    stream = item.stream_info.audio_track if item.stream_info else None
+    if stream is None or not stream.stream_url:
+        raise RuntimeError("Apple Music returned no playable stream.")
+    decryption_key = (
+        item.decryption_key.audio_track.key
+        if item.decryption_key and item.decryption_key.audio_track else None
+    )
+    tags = item.media_tags
+    title = _attr(metadata, "name") or "Unknown title"
+    track_no = getattr(tags, "track", None) if tags is not None else None
+    if track_no:
+        title = f"{int(track_no):02d} {title}"
+    out_path = os.path.join(target_dir, f"{_safe_name(title)}.m4a")
+    _check_cancelled(cancel_event)
+    _ffmpeg_decrypt_remux(stream.stream_url, decryption_key, out_path)
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) <= 0:
+        raise RuntimeError("Apple Music produced an empty file.")
+    _write_tags(out_path, item)
 
 
 def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
-    """Download an Apple Music URL via gamdl."""
-    gamdl = _find_gamdl()
-    if not gamdl:
-        raise RuntimeError(
-            "gamdl is not installed.  Install it with:\n"
-            "    pip install gamdl\n"
-            "Then place your Apple Music cookies file and set the path in "
-            "Settings.")
-    cookies_path = (config or {}).get("apple_music_cookies", "")
-    if not cookies_path or not os.path.isfile(cookies_path):
-        raise RuntimeError(
-            "No Apple Music cookies file configured.  Export your browser "
-            "cookies in Netscape format while logged in at music.apple.com, "
-            "then set the path in Settings.")
+    """Download an Apple Music song, album, or playlist in-process.
+
+    Requires configured Apple Music cookies with a media-user-token (an
+    active subscription). A single song lands in ``out_dir``; album and
+    playlist tracks land in a subfolder named after the release.
+    """
     os.makedirs(out_dir, exist_ok=True)
-    cmd = [
-        gamdl, url,
-        "--output-path", out_dir,
-        "--cookies-path", cookies_path,
-        "--no-synced-lyrics",
-        "--no-config-file",
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True,
-                       timeout=600)
-    except subprocess.CalledProcessError as e:
+    api, itunes_api = _authenticated_api(config)
+    info = parse_apple_url(url)
+    if info is None:
+        raise RuntimeError(f"Not an Apple Music URL: {url}")
+    media_type = info["media_type"]
+    if media_type in _UNSUPPORTED_MEDIA_TYPES:
         raise RuntimeError(
-            f"gamdl failed:\n{e.stderr or e.stdout or 'Unknown error'}") from e
-    except FileNotFoundError:
-        raise RuntimeError("gamdl executable not found.") from None
+            "blindDL supports Apple Music songs, albums, and playlists only.")
+    if media_type == "song" or info.get("sub_id"):
+        media_id = info["sub_id"] or info["media_id"]
+        metadata = _catalog_song(api, media_id)
+        _download_song(api, itunes_api, metadata, None, out_dir, cancel_event)
+        return
+    if media_type == "album":
+        collection = _catalog_album(api, info["media_id"])
+        kind_name = "Album"
+    else:
+        collection = api.getplaylist(
+            info["media_id"], limit_tracks=300)["data"][0]
+        kind_name = "Playlist"
+    tracks = _relationships_tracks(collection)
+    if not tracks:
+        raise RuntimeError(f"The Apple Music {kind_name.lower()} has no tracks.")
+    target_dir = os.path.join(out_dir, _safe_name(
+        _attr(collection, "name") or kind_name))
+    os.makedirs(target_dir, exist_ok=True)
+    for track in tracks:
+        _check_cancelled(cancel_event)
+        metadata = _catalog_song(api, _track_id(track))
+        _download_song(api, itunes_api, metadata, collection, target_dir,
+                       cancel_event)
 
 
 def download_track(url, out_dir, config=None, progress_cb=None,

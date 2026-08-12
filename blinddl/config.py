@@ -178,9 +178,10 @@ DEFAULTS = {
     # Deezer ARL cookie: unlocks native FLAC/MP3 320 downloads and Deezer's
     # word-level (karaoke) lyrics. Empty = Side B audio and LRCLIB lyrics.
     "deezer_arl": "",
-    # Apple Music cookies file (Netscape format): unlocks Apple Music
-    # downloads via gamdl. Export browser cookies while logged in at
-    # music.apple.com. Empty = gamdl backend is skipped.
+    # Apple Music cookies file (Netscape format): unlocks full Apple Music
+    # downloads (songs, albums, and playlists). Export browser cookies while
+    # logged in at music.apple.com. Empty = Apple Music downloads are
+    # unavailable, though search and URL resolution still work.
     "apple_music_cookies": "",
     # Embed synced lyrics into Side B (Deezer) downloads.
     "sideb_lyrics": True,
