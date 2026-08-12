@@ -287,8 +287,12 @@ def is_deezer_url(url):
 
 
 def _api_get(path, params=None):
+    # `next` links returned by the API are absolute URLs; only prefix the
+    # base for the relative paths callers build by hand.
+    url = (path if path.startswith(("http://", "https://"))
+           else f"{_API_URL}{path}")
     resp = requests.get(
-        f"{_API_URL}{path}", params=params or {},
+        url, params=params or {},
         headers={"User-Agent": _USER_AGENT}, timeout=HTTP_TIMEOUT_S)
     resp.raise_for_status()
     data = resp.json()
@@ -365,12 +369,22 @@ def extract_flat(url, config=None):
 
     if kind == "playlist":
         playlist = _api_get(f"/playlist/{obj_id}")
-        tracks_data = _api_get(f"/playlist/{obj_id}/tracks")
         items = []
-        for entry in tracks_data.get("data", []):
-            t = entry.get("track") if isinstance(entry, dict) else entry
-            if t:
-                items.append(_track_to_item(t))
+        # /playlist/{id}/tracks pages 25 tracks at a time and returns bare
+        # track objects (no {"track": ...} wrapper). Follow the API's own
+        # `next` links until the playlist is exhausted.
+        next_path = f"/playlist/{obj_id}/tracks"
+        seen = set()
+        while next_path and next_path not in seen:
+            seen.add(next_path)
+            page = _api_get(next_path)
+            for entry in page.get("data", []):
+                if isinstance(entry, dict) and isinstance(
+                        entry.get("track"), dict):
+                    entry = entry["track"]
+                if isinstance(entry, dict):
+                    items.append(_track_to_item(entry))
+            next_path = page.get("next")
         return items, playlist.get("title") or url
 
     if kind == "artist":
