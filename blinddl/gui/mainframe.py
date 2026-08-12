@@ -13,7 +13,6 @@ import wx
 
 from .. import (
     APP_NAME,
-    musicdl_backend,
     soulseek_backend,
     torrent_engine,
     updater,
@@ -51,6 +50,7 @@ class MainFrame(wx.Frame):
         self.SetIcon(app_icon(32))
 
         self._closing = False
+        self._background_started = False
         # Set when the user asks to leave outright -- File > Exit or the
         # tray's own Exit -- so that path is never turned into a hide.
         self._quitting = False
@@ -68,19 +68,28 @@ class MainFrame(wx.Frame):
 
         self._build_ui()
         self.downloads_panel.refresh_all()
-        self.queue.start()
         self._build_menus()
         self._bind_shortcuts()
         soulseek_backend.add_listener(self._queue_soulseek_event)
 
-        self.subs.start()
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(wx.EVT_ICONIZE, self.on_iconize)
         self._apply_tray_setting()
+        # MainFrame is constructed before __main__ can show it. Defer all
+        # background services briefly so Windows can paint a responsive window
+        # before Soulseek loads a large share index.
+        self._background_start_timer = wx.CallLater(
+            250, self._start_background_services
+        )
+
+    def _start_background_services(self):
+        """Start persistent work after the first window has been presented."""
+        if self._closing or self._background_started:
+            return
+        self._background_started = True
+        self.queue.start()
+        self.subs.start()
         self._maybe_auto_update()
-        # Build the music-site clients now so the first search does not pay
-        # for it, and clear last session's search scratch files.
-        threading.Thread(target=musicdl_backend.warm_up, daemon=True).start()
         if self.config["soulseek_enabled"]:
             self._apply_soulseek_setting()
 
@@ -594,9 +603,12 @@ class MainFrame(wx.Frame):
         """Bring the window back and put the user where they left off."""
         if self._closing:
             return
-        self.Show()
+        pending_hide = getattr(self, "_tray_hide_timer", None)
+        if pending_hide is not None and pending_hide.IsRunning():
+            pending_hide.Stop()
         if self.IsIconized():
             self.Iconize(False)
+        self.Show()
         self.Raise()
         page = self.notebook.GetSelection()
         if page != wx.NOT_FOUND:
@@ -630,8 +642,18 @@ class MainFrame(wx.Frame):
             or not self.config["tray_on_minimize"]
         ):
             return
-        # Undo the iconize first: a window that is hidden while minimized
-        # comes back minimized, and the taskbar keeps a button for it.
+        # Let Windows finish its native minimize transition before changing
+        # the state again. Doing both inside EVT_ICONIZE races Explorer: the
+        # taskbar can restore the button after Hide() has removed it.
+        wx.CallAfter(self._finish_minimize_to_tray)
+
+    def _finish_minimize_to_tray(self):
+        if (
+            self._closing
+            or not self.config["tray_on_minimize"]
+            or not self.IsIconized()
+        ):
+            return
         self.Iconize(False)
         self._hide_to_tray()
 
@@ -645,9 +667,16 @@ class MainFrame(wx.Frame):
             and event.CanVeto()
         ):
             event.Veto()
-            self._hide_to_tray()
+            # Windows may make a vetoed close window visible again after this
+            # handler returns. Hiding on the next event-loop turn avoids that
+            # close-transition race.
+            self._tray_hide_timer = wx.CallLater(100, self._hide_to_tray)
             return
         self._closing = True
+        for timer_name in ("_background_start_timer", "_tray_hide_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None and timer.IsRunning():
+                timer.Stop()
         soulseek_backend.remove_listener(self._queue_soulseek_event)
         if self.chat_panel is not None:
             self.chat_panel.shutdown()

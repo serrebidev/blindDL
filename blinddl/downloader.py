@@ -44,6 +44,50 @@ STATUS_CANCELLED = "Cancelled"
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_DOWNLOADING)
 FINISHED_STATUSES = (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED)
 
+ADD_QUEUED = "queued"
+ADD_RESUMED = "resumed"
+ADD_SKIPPED = "skipped"
+ADD_ALREADY_ACTIVE = "already-active"
+
+
+def addition_summary(items, titles=()):
+    """Describe what happened when one or more selections were added."""
+    items = list(items)
+    titles = list(titles)
+    actions = [getattr(item, "add_action", ADD_QUEUED) for item in items]
+    if not actions:
+        return "Nothing was added."
+    if len(actions) == 1:
+        title = getattr(items[0], "title", "") if items[0] is not None else ""
+        title = title or (titles[0] if titles else "download")
+        return {
+            ADD_QUEUED: f"Queued: {title}",
+            ADD_RESUMED: f"Resumed: {title}",
+            ADD_SKIPPED: f"Already downloaded; skipped: {title}",
+            ADD_ALREADY_ACTIVE: f"Already queued or downloading: {title}",
+        }.get(actions[0], f"Queued: {title}")
+
+    if len(set(actions)) == 1:
+        count = len(actions)
+        return {
+            ADD_QUEUED: f"Queued {count} downloads.",
+            ADD_RESUMED: f"Resumed {count} downloads.",
+            ADD_SKIPPED: f"Skipped {count} already-downloaded files.",
+            ADD_ALREADY_ACTIVE: (
+                f"{count} downloads were already queued or downloading."
+            ),
+        }.get(actions[0], f"Queued {count} downloads.")
+
+    labels = (
+        (ADD_QUEUED, "queued"),
+        (ADD_RESUMED, "resumed"),
+        (ADD_SKIPPED, "already downloaded and skipped"),
+        (ADD_ALREADY_ACTIVE, "already active"),
+    )
+    parts = [f"{actions.count(action)} {label}"
+             for action, label in labels if action in actions]
+    return ", ".join(parts).capitalize() + "."
+
 
 def format_speed(bytes_per_second):
     if not bytes_per_second:
@@ -79,6 +123,10 @@ class DownloadItem:
         self.seeding = False
         self.cancel_event = threading.Event()
         self._last_notify = 0.0
+        # Transient result of the most recent attempt to add this item.  It is
+        # intentionally not persisted; callers can use it to announce whether
+        # a selection was queued, resumed, or was already present.
+        self.add_action = ADD_QUEUED
 
     def update_from_ytdlp(self, d):
         if d.get("status") == "downloading":
@@ -179,17 +227,182 @@ class DownloadQueue:
 
     # -- public API -------------------------------------------------------
 
+    @staticmethod
+    def _payload_value(payload, name, default=None):
+        if isinstance(payload, dict):
+            return payload.get(name, default)
+        return getattr(payload, name, default)
+
+    @classmethod
+    def _download_key(cls, item):
+        """Return the stable identity of the file represented by *item*.
+
+        Search rows contain volatile details such as peer counts, file sizes,
+        and signed URLs.  Comparing their complete payload would therefore
+        miss the same file after a fresh search.  Each backend's durable
+        identifier is used instead, together with output settings that can
+        legitimately produce a different file.
+        """
+        payload = item.payload
+        kind = item.kind
+
+        if kind == "soulseek":
+            username = str(cls._payload_value(payload, "username") or "")
+            remote_path = str(
+                cls._payload_value(payload, "remote_path") or ""
+            ).replace("/", "\\")
+            relative_path = str(
+                cls._payload_value(payload, "target_relative_path") or ""
+            ).replace("/", "\\")
+            if username and remote_path:
+                return (kind, username.casefold(), remote_path.casefold(),
+                        relative_path.casefold())
+
+        if kind == "torrent":
+            infohash = str(cls._payload_value(payload, "infohash") or "").strip()
+            if infohash:
+                return (kind, "infohash", infohash.casefold())
+            for name in ("download_url", "magnet", "id"):
+                value = str(cls._payload_value(payload, name) or "").strip()
+                if value:
+                    return (kind, name, value)
+
+        if kind == "archive":
+            identifier = str(
+                cls._payload_value(payload, "identifier") or ""
+            ).strip()
+            file_name = str(
+                cls._payload_value(payload, "file_name") or ""
+            ).strip()
+            if identifier:
+                return (kind, identifier, file_name,
+                        bool(cls._payload_value(payload, "video", False)))
+
+        if kind == "book":
+            source = str(cls._payload_value(payload, "source") or "")
+            identifier = str(
+                cls._payload_value(payload, "identifier") or ""
+            ).strip()
+            location = identifier or str(
+                cls._payload_value(payload, "download_url") or ""
+            ).strip()
+            if location:
+                return (kind, source, location,
+                        str(cls._payload_value(payload, "format") or ""))
+
+        if kind == "audiobook":
+            source = str(
+                cls._payload_value(payload, "backend_source") or ""
+            )
+            identifier = str(
+                cls._payload_value(payload, "identifier") or ""
+            ).strip()
+            if identifier:
+                return (kind, source, identifier)
+            streams = cls._payload_value(payload, "streams") or ()
+            if streams:
+                return (kind, source, tuple(str(stream) for stream in streams))
+
+        if kind == "musicdl":
+            source = str(cls._payload_value(payload, "source") or "")
+            identifier = str(
+                cls._payload_value(payload, "identifier") or ""
+            ).strip()
+            if identifier:
+                return (kind, source, identifier)
+            location = cls._payload_value(payload, "download_url")
+            if isinstance(location, str) and location.strip():
+                return (kind, source, location.strip())
+            title = str(cls._payload_value(payload, "song_name") or "")
+            singers = str(cls._payload_value(payload, "singers") or "")
+            album = str(cls._payload_value(payload, "album") or "")
+            if title:
+                return (kind, source, title.casefold(), singers.casefold(),
+                        album.casefold())
+
+        if kind == "adult":
+            location = str(cls._payload_value(payload, "url") or "").strip()
+            if location:
+                return (kind, location, item.video_format)
+
+        if isinstance(payload, str):
+            variant = (
+                item.audio_only,
+                item.audio_format if item.audio_only else item.video_format,
+            ) if kind == "ytdlp" else ()
+            return (kind, payload.strip(), variant)
+
+        # Unknown and future backends still get exact-payload de-duplication
+        # when their payload can be represented by the durable JSON format.
+        try:
+            payload_key = json.dumps(
+                cls._json_safe(payload), sort_keys=True, separators=(",", ":")
+            )
+        except (TypeError, ValueError):
+            return (kind, "object", id(payload))
+        return (kind, payload_key)
+
     def add(self, item):
+        """Queue *item*, de-duplicating completed and resumable downloads."""
+        changed = False
         with self._cond:
-            self.items.append(item)
+            key = self._download_key(item)
+            matches = [candidate for candidate in self.items
+                       if self._download_key(candidate) == key]
+            existing = next(
+                (candidate for candidate in matches
+                 if candidate.status in ACTIVE_STATUSES),
+                None,
+            )
+            if existing is None:
+                existing = next(
+                    (candidate for candidate in matches
+                     if candidate.status == STATUS_DONE),
+                    None,
+                )
+            if existing is None and matches:
+                existing = matches[-1]
+
+            if existing is not None:
+                if existing.status == STATUS_DONE:
+                    existing.add_action = ADD_SKIPPED
+                    return existing
+                if existing.status in ACTIVE_STATUSES:
+                    existing.add_action = ADD_ALREADY_ACTIVE
+                    return existing
+
+                # A cancelled or failed row is the queue's knowledge of the
+                # partial transfer. Reuse it so yt-dlp, Soulseek, libtorrent,
+                # and chapter-based backends can continue their own partials.
+                existing.title = item.title
+                existing.payload = item.payload
+                existing.audio_only = item.audio_only
+                existing.audio_format = item.audio_format
+                existing.video_format = item.video_format
+                existing.status = STATUS_QUEUED
+                existing.error = ""
+                existing.speed = ""
+                existing.eta = ""
+                existing.seeding = False
+                existing.cancel_event.clear()
+                existing.add_action = ADD_RESUMED
+                item = existing
+                changed = True
+            else:
+                item.add_action = ADD_QUEUED
+                self.items.append(item)
+                changed = True
+
             if self._batch_depth:
                 self._batched_items.append(item)
-                return
+                return item
             # Two pools wait on this condition and only one of them can take
             # a given item, so every waiter has to look.
             self._cond.notify_all()
-        self._save_state()
-        self._notify(item)
+        if changed:
+            self._save_state()
+            self._notify(item)
+        return item
 
     @contextmanager
     def batch_additions(self):
@@ -229,58 +442,48 @@ class DownloadQueue:
                             audio_only=audio_only,
                             audio_format=self.config["audio_format"],
                             video_format=self.config["video_format"])
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_musicdl(self, song_info, title):
         item = DownloadItem(title=title, kind="musicdl", payload=song_info)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_sideb(self, url, title):
         item = DownloadItem(title=title, kind="sideb", payload=url)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_applemusic(self, url, title):
         item = DownloadItem(title=title, kind="applemusic", payload=url)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_adult(self, payload, title):
         item = DownloadItem(title=title, kind="adult", payload=payload,
                             audio_only=False,
                             video_format=self.config["video_format"])
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_book(self, payload, title):
         item = DownloadItem(title=title, kind="book", payload=payload,
                             audio_only=False)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_audiobook(self, payload, title):
         item = DownloadItem(title=title, kind="audiobook", payload=payload)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_torrent(self, payload, title):
         item = DownloadItem(title=title, kind="torrent", payload=payload,
                             audio_only=False)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_archive(self, payload, title):
         item = DownloadItem(title=title, kind="archive", payload=payload,
                             audio_only=not payload.get("video"))
-        self.add(item)
-        return item
+        return self.add(item)
 
     def add_soulseek(self, payload, title):
         item = DownloadItem(title=title, kind="soulseek", payload=payload)
-        self.add(item)
-        return item
+        return self.add(item)
 
     def cancel(self, item_id):
         item = self._find(item_id)

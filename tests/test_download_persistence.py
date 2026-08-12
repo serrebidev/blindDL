@@ -12,6 +12,9 @@ from unittest import mock
 from blinddl import torrent_engine
 from blinddl.config import DEFAULTS
 from blinddl.downloader import (
+    ADD_ALREADY_ACTIVE,
+    ADD_RESUMED,
+    ADD_SKIPPED,
     DownloadItem,
     DownloadQueue,
     STATUS_CANCELLED,
@@ -103,6 +106,103 @@ class DownloadPersistenceTests(unittest.TestCase):
         save.assert_called_once_with()
         self.assertEqual(len(notified), 100)
         self.assertEqual(queue.counts(), (0, 100, 0, 0))
+
+    def test_requeueing_completed_file_is_skipped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(),
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            completed = queue.add_ytdlp(
+                "https://example.invalid/watch?v=same", "Finished"
+            )
+            completed.status = STATUS_DONE
+            queue._notify(completed)
+
+            result = queue.add_ytdlp(
+                "https://example.invalid/watch?v=same", "Fresh search title"
+            )
+
+        self.assertIs(result, completed)
+        self.assertEqual(result.add_action, ADD_SKIPPED)
+        self.assertEqual(result.status, STATUS_DONE)
+        self.assertEqual(len(queue.items), 1)
+
+    def test_requeueing_known_partial_resumes_existing_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(),
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            partial = queue.add_soulseek({
+                "username": "Friend",
+                "remote_path": "Music\\Album\\Track.flac",
+                "average_speed": 10,
+            }, "Old title")
+            partial.status = STATUS_CANCELLED
+            partial.percent = 63
+            partial.error = "cancelled"
+            partial.cancel_event.set()
+            queue._notify(partial)
+
+            result = queue.add_soulseek({
+                "username": "friend",
+                "remote_path": "Music/Album/Track.flac",
+                "average_speed": 9000,
+            }, "Current title")
+
+        self.assertIs(result, partial)
+        self.assertEqual(result.add_action, ADD_RESUMED)
+        self.assertEqual(result.status, STATUS_QUEUED)
+        self.assertEqual(result.percent, 63)
+        self.assertEqual(result.error, "")
+        self.assertFalse(result.cancel_event.is_set())
+        self.assertEqual(result.title, "Current title")
+        self.assertEqual(result.payload["average_speed"], 9000)
+        self.assertEqual(len(queue.items), 1)
+        self.assertEqual(queue.counts(), (0, 1, 0, 0))
+
+    def test_requeueing_active_file_does_not_duplicate_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(),
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            active = queue.add_archive({
+                "identifier": "radio-show",
+                "file_name": "episode.mp3",
+                "direct_url": "https://archive.invalid/old-token",
+            }, "Episode")
+
+            result = queue.add_archive({
+                "identifier": "radio-show",
+                "file_name": "episode.mp3",
+                "direct_url": "https://archive.invalid/new-token",
+                "size_bytes": 1234,
+            }, "Episode")
+
+        self.assertIs(result, active)
+        self.assertEqual(result.add_action, ADD_ALREADY_ACTIVE)
+        self.assertEqual(len(queue.items), 1)
+
+    def test_same_video_url_with_different_output_is_not_a_duplicate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(),
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            queue.add_ytdlp("https://example.invalid/media", "Audio", True)
+            queue.add_ytdlp("https://example.invalid/media", "Video", False)
+
+        self.assertEqual(len(queue.items), 2)
 
     def test_musicdl_song_info_round_trips_without_pickle(self):
         with tempfile.TemporaryDirectory() as folder:

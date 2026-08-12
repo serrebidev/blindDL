@@ -105,7 +105,6 @@ class ChatPanel(wx.Panel):
         self._show_rooms(soulseek_backend.rooms_snapshot())
         for message in soulseek_backend.room_messages_snapshot():
             self._append_message(message)
-        self.on_refresh()
 
     def focus_input(self):
         self.room_combo.SetFocus()

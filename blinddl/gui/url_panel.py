@@ -9,6 +9,7 @@ import threading
 import wx
 
 from .. import adult_backend, applemusic_backend, deezer_backend, preview, sideb_backend, ytdlp_backend
+from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 
@@ -204,19 +205,26 @@ class UrlPanel(wx.Panel):
                 self.url_text.SetFocus()
                 return
         with self.frame.queue.batch_additions():
+            added = []
             for item in items:
                 if engine == "applemusic":
-                    self.frame.queue.add_applemusic(item["url"], item["title"])
+                    added.append(self.frame.queue.add_applemusic(
+                        item["url"], item["title"]
+                    ))
                 elif engine in ("sideb", "deezer"):
-                    self.frame.queue.add_sideb(item["url"], item["title"])
-                elif engine == "adult":
-                    self.frame.queue.add_adult(item, item["title"])
-                else:
-                    self.frame.queue.add_ytdlp(
-                        item["url"], item["title"], audio_only=audio_only
+                    added.append(
+                        self.frame.queue.add_sideb(item["url"], item["title"])
                     )
+                elif engine == "adult":
+                    added.append(
+                        self.frame.queue.add_adult(item, item["title"])
+                    )
+                else:
+                    added.append(self.frame.queue.add_ytdlp(
+                        item["url"], item["title"], audio_only=audio_only
+                    ))
         self.frame.announce(
-            f"Queued {len(items)} from {title}."
-            if len(items) > 1 else f"Queued: {items[0]['title']}")
+            addition_summary(added, [item["title"] for item in items])
+        )
         self.url_text.Clear()
         self.frame.show_downloads_tab()

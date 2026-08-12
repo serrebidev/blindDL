@@ -12,6 +12,8 @@ import threading
 
 import wx
 
+from ..downloader import addition_summary
+
 from .. import soulseek_backend
 
 
@@ -351,7 +353,8 @@ class UserBrowserDialog(wx.Dialog):
         return files
 
     def _queue_files(self, files, folder=""):
-        queued = 0
+        added = []
+        titles = []
         with self.frame.queue.batch_additions():
             for original in files:
                 if original.get("locked"):
@@ -362,10 +365,12 @@ class UserBrowserDialog(wx.Dialog):
                     item["target_relative_path"] = ntpath.join(
                         ntpath.basename(folder.rstrip("\\")), relative
                     )
-                self.frame.queue.add_soulseek(item, item["title"])
-                queued += 1
-        if queued:
-            self.frame.announce(f"Queued {queued} Soulseek file{'s' if queued != 1 else ''}.")
+                added.append(
+                    self.frame.queue.add_soulseek(item, item["title"])
+                )
+                titles.append(item["title"])
+        if added:
+            self.frame.announce(addition_summary(added, titles))
         else:
             self.frame.announce("That selection contains no downloadable files.")
 

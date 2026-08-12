@@ -363,6 +363,68 @@ class GuiInteractionTests(unittest.TestCase):
         holder.Hide.assert_not_called()
         holder.Raise.assert_called_once()
 
+    def test_close_to_tray_is_deferred_until_after_windows_close_event(self):
+        hide = mock.Mock()
+        holder = SimpleNamespace(
+            _closing=False,
+            _quitting=False,
+            tray=object(),
+            config={"minimize_to_tray": True},
+            _hide_to_tray=hide,
+        )
+        event = mock.Mock()
+        event.CanVeto.return_value = True
+
+        with mock.patch(
+            "blinddl.gui.mainframe.wx.CallLater",
+            side_effect=lambda _delay, callback, *args: callback(*args),
+        ) as call_later:
+            MainFrame.on_close(holder, event)
+
+        event.Veto.assert_called_once_with()
+        call_later.assert_called_once_with(100, hide)
+        hide.assert_called_once_with()
+
+    def test_minimize_to_tray_finishes_after_native_iconize_event(self):
+        finish = mock.Mock()
+        holder = SimpleNamespace(
+            _closing=False,
+            tray=object(),
+            config={"tray_on_minimize": True},
+            _finish_minimize_to_tray=finish,
+        )
+        event = mock.Mock()
+        event.IsIconized.return_value = True
+
+        with mock.patch(
+            "blinddl.gui.mainframe.wx.CallAfter",
+            side_effect=lambda callback, *args: callback(*args),
+        ) as call_after:
+            MainFrame.on_iconize(holder, event)
+
+        event.Skip.assert_called_once_with()
+        call_after.assert_called_once_with(finish)
+        finish.assert_called_once_with()
+
+    def test_background_services_start_only_once_after_window_creation(self):
+        holder = SimpleNamespace(
+            _closing=False,
+            _background_started=False,
+            queue=SimpleNamespace(start=mock.Mock()),
+            subs=SimpleNamespace(start=mock.Mock()),
+            config={"soulseek_enabled": True},
+            _maybe_auto_update=mock.Mock(),
+            _apply_soulseek_setting=mock.Mock(),
+        )
+
+        MainFrame._start_background_services(holder)
+        MainFrame._start_background_services(holder)
+
+        holder.queue.start.assert_called_once_with()
+        holder.subs.start.assert_called_once_with()
+        holder._maybe_auto_update.assert_called_once_with()
+        holder._apply_soulseek_setting.assert_called_once_with()
+
     def test_search_queues_every_selected_result(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = 1

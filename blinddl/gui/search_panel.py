@@ -27,6 +27,7 @@ from .. import (
     ytdlp_backend,
 )
 from ..search_order import ORDER_RECENT, ORDER_RELEVANCE
+from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 
@@ -1462,14 +1463,16 @@ class SearchPanel(wx.Panel):
             self.frame.announce("Nothing selected.")
             return
         with self.frame.queue.batch_additions():
+            added = []
             for entry in chosen:
                 payload = dict(entry)
                 payload["collection_title"] = item["title"]
-                self.frame.queue.add_archive(payload, entry["title"])
-        if len(chosen) == 1:
-            self.frame.announce(f"Queued: {chosen[0]['title']}")
-        else:
-            self.frame.announce(f"Queued {len(chosen)} downloads.")
+                added.append(
+                    self.frame.queue.add_archive(payload, entry["title"])
+                )
+        self.frame.announce(
+            addition_summary(added, [entry["title"] for entry in chosen])
+        )
 
     def on_results_char(self, event):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
@@ -1798,36 +1801,52 @@ class SearchPanel(wx.Panel):
             self._queue_archive_item(self.results[indices[0]])
             return
         with self.frame.queue.batch_additions():
+            added = []
             for index in indices:
                 item = self.results[index]
                 if item.get("kind") == "soulseek":
-                    self.frame.queue.add_soulseek(item, item["title"])
+                    added.append(
+                        self.frame.queue.add_soulseek(item, item["title"])
+                    )
                 elif engine == ENGINE_MUSIC:
                     if item.get("kind") in ("sideb", "deezer"):
-                        self.frame.queue.add_sideb(item["url"], item["title"])
+                        added.append(
+                            self.frame.queue.add_sideb(item["url"], item["title"])
+                        )
                     else:
-                        self.frame.queue.add_musicdl(item["song_info"], item["title"])
+                        added.append(self.frame.queue.add_musicdl(
+                            item["song_info"], item["title"]
+                        ))
                 elif engine == ENGINE_BOOKS:
-                    self.frame.queue.add_book(item, item["title"])
+                    added.append(self.frame.queue.add_book(item, item["title"]))
                 elif engine == ENGINE_AUDIOBOOKS:
-                    self.frame.queue.add_audiobook(item, item["title"])
+                    added.append(
+                        self.frame.queue.add_audiobook(item, item["title"])
+                    )
                 elif engine == ENGINE_TORRENTS:
-                    self.frame.queue.add_torrent(item, item["title"])
+                    added.append(
+                        self.frame.queue.add_torrent(item, item["title"])
+                    )
                 elif engine == ENGINE_SOUNDCLOUD:
-                    self.frame.queue.add_ytdlp(
+                    added.append(self.frame.queue.add_ytdlp(
                         item["url"], item["title"], audio_only=True
-                    )
+                    ))
                 elif engine == ENGINE_BANDCAMP:
-                    self.frame.queue.add_ytdlp(
+                    added.append(self.frame.queue.add_ytdlp(
                         item["url"], item["title"], audio_only=True
-                    )
+                    ))
                 elif _is_archive_engine(engine):
-                    self.frame.queue.add_archive(item, item["title"])
+                    added.append(
+                        self.frame.queue.add_archive(item, item["title"])
+                    )
                 elif _is_adult_engine(engine):
-                    self.frame.queue.add_adult(item, item["title"])
+                    added.append(
+                        self.frame.queue.add_adult(item, item["title"])
+                    )
                 else:
-                    self.frame.queue.add_ytdlp(item["url"], item["title"])
-        if len(indices) == 1:
-            self.frame.announce(f"Queued: {self.results[indices[0]]['title']}")
-        else:
-            self.frame.announce(f"Queued {len(indices)} downloads.")
+                    added.append(
+                        self.frame.queue.add_ytdlp(item["url"], item["title"])
+                    )
+        self.frame.announce(addition_summary(
+            added, [self.results[index]["title"] for index in indices]
+        ))
