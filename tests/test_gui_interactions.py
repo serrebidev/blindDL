@@ -456,8 +456,8 @@ class GuiInteractionTests(unittest.TestCase):
             {"title": "One", "url": "https://example/one"},
             {"title": "Two", "url": "https://example/two"},
         ]
-        for row, item in enumerate(panel.results):
-            panel.results_list.InsertItem(row, item["title"])
+        panel.results_list.SetItemCount(len(panel.results))
+        for row in range(len(panel.results)):
             panel.results_list.Select(row)
 
         panel.on_download_selected(None)
@@ -560,8 +560,7 @@ class GuiInteractionTests(unittest.TestCase):
             {"title": "Two", "url": "https://www.eporner.com/video-two/"},
             {"title": "Three"},
         ]
-        for row, item in enumerate(panel.results):
-            panel.results_list.InsertItem(row, item["title"])
+        panel.results_list.SetItemCount(len(panel.results))
 
         clipboard = _Clipboard()
         with mock.patch.object(wx, "TheClipboard", clipboard):
@@ -583,7 +582,7 @@ class GuiInteractionTests(unittest.TestCase):
     def test_copy_url_reports_when_no_result_has_a_link(self):
         panel = SearchPanel(self.host, self.frame)
         panel.results = [{"title": "One"}]
-        panel.results_list.InsertItem(0, "One")
+        panel.results_list.SetItemCount(len(panel.results))
         panel.results_list.Select(0)
 
         panel.on_copy_url(None)
@@ -738,7 +737,7 @@ class GuiInteractionTests(unittest.TestCase):
             "kind": "adult",
         }
         panel.results = [item]
-        panel.results_list.InsertItem(0, item["title"])
+        panel.results_list.SetItemCount(len(panel.results))
         panel.results_list.Select(0)
 
         panel.on_download_selected(None)
@@ -1112,8 +1111,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.frame.queue.calls = []
         panel.result_engine = ENGINE_DEEZER
         panel.results = deezer_items
-        panel.results_list.DeleteAllItems()
-        panel.results_list.InsertItem(0, deezer_items[0]["title"])
+        panel.results_list.SetItemCount(len(panel.results))
         panel.results_list.Select(0)
         panel.on_download_selected(None)
         self.assertEqual(
@@ -1160,8 +1158,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.frame.queue.calls = []
         panel.result_engine = ENGINE_APPLE_MUSIC
         panel.results = apple_items
-        panel.results_list.DeleteAllItems()
-        panel.results_list.InsertItem(0, apple_items[0]["title"])
+        panel.results_list.SetItemCount(len(panel.results))
         panel.results_list.Select(0)
         panel.on_download_selected(None)
         self.assertEqual(
@@ -1315,8 +1312,7 @@ class GuiInteractionTests(unittest.TestCase):
             panel.result_engine = engine
             item = {"title": "One", "kind": kind, "identifier": "one"}
             panel.results = [item]
-            panel.results_list.DeleteAllItems()
-            panel.results_list.InsertItem(0, item["title"])
+            panel.results_list.SetItemCount(len(panel.results))
             panel.results_list.Select(0)
 
             panel.on_download_selected(None)
@@ -1385,7 +1381,7 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_BOOKS
         panel.results = [{"title": "One"}]
-        panel.results_list.InsertItem(0, "One")
+        panel.results_list.SetItemCount(len(panel.results))
         panel.results_list.Select(0)
 
         panel.on_preview_selected(None)
@@ -1587,8 +1583,7 @@ class GuiInteractionTests(unittest.TestCase):
             self.frame.queue.calls = []
             panel.result_engine = engine
             panel.results = [item]
-            panel.results_list.DeleteAllItems()
-            panel.results_list.InsertItem(0, item["title"])
+            panel.results_list.SetItemCount(len(panel.results))
             panel.results_list.Select(0)
 
             panel.on_download_selected(None)
@@ -1625,11 +1620,67 @@ class GuiInteractionTests(unittest.TestCase):
             "availability": "free slot",
             "file_size": "1.0 MiB",
         }
-        panel._insert_result_row(0, item, ENGINE_SOULSEEK_AUDIO)
+        panel.results = [item]
+        panel.result_engine = ENGINE_SOULSEEK_AUDIO
+        panel.results_list.SetItemCount(1)
         panel._apply_engine_columns(ENGINE_SOULSEEK_AUDIO)
 
         self.assertEqual(panel.results_list.GetColumn(3).GetText(), "Folder")
         self.assertEqual(panel.results_list.GetItemText(0, 3), "Music\\Album")
+        panel.Destroy()
+
+    def test_results_list_draws_rows_on_demand(self):
+        """A big search must not cost per-row work on the GUI thread.
+
+        An all-sites music search asks 57 sources for a page each, so filling
+        the list row by row once per answering site used to freeze the app for
+        the length of the search. The list is virtual now: it holds the rows
+        in ``results`` and asks for text only for what it draws.
+        """
+        panel = SearchPanel(self.host, self.frame)
+        self.assertTrue(panel.results_list.IsVirtual())
+
+        panel.result_engine = ENGINE_MUSIC
+        panel.results = [
+            {
+                "title": f"Track {i}",
+                "artist": "Artist",
+                "source": "Netease",
+                "file_size": "8 MB",
+                "format": "MP3",
+                "kind": "music",
+            }
+            for i in range(5000)
+        ]
+        panel._render_results(ENGINE_MUSIC)
+
+        # Publishing 5000 rows is a count, not 5000 insertions.
+        self.assertEqual(panel.results_list.GetItemCount(), 5000)
+        self.assertEqual(panel.results_list.GetItemText(4999, 0), "Track 4999")
+        self.assertEqual(panel.results_list.GetItemText(0, 2), "Artist")
+
+        # A new search empties the list rather than leaving a stale count.
+        panel.results = []
+        panel._render_results(ENGINE_MUSIC)
+        self.assertEqual(panel.results_list.GetItemCount(), 0)
+        panel.Destroy()
+
+    def test_results_list_keeps_selection_across_a_resort(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_MUSIC
+        first = {"title": "Zulu", "kind": "music"}
+        second = {"title": "Alpha", "kind": "music"}
+        panel.results = [first, second]
+        panel._render_results(ENGINE_MUSIC)
+        panel.results_list.Select(0)
+
+        # Re-render with the rows the other way round, as a sort would.
+        panel.results = [second, first]
+        panel._render_results(ENGINE_MUSIC, selected=[first], focused=first)
+
+        self.assertTrue(panel.results_list.IsSelected(1))
+        self.assertFalse(panel.results_list.IsSelected(0))
+        self.assertEqual(panel.results_list.GetFocusedItem(), 1)
         panel.Destroy()
 
     def test_user_browser_tree_filter_and_folder_download(self):

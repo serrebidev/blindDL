@@ -408,6 +408,21 @@ def _result_type(item):
     return ""
 
 
+def _pick(column, item, *fields):
+    """The plain item field one of columns 2 to 5 shows, or "" for none.
+
+    Each engine lays its four trailing columns out differently, and most of
+    them are a straight field lookup. Naming those four in order keeps the
+    per-engine layouts readable next to each other; a None means that column
+    is not a plain lookup and the caller handled it already.
+    """
+    index = column - 2
+    if not (0 <= index < len(fields)):
+        return ""
+    field = fields[index]
+    return str(item.get(field) or "") if field else ""
+
+
 def _year(item):
     try:
         return int(str(item.get("year") or "").strip()[:4])
@@ -560,6 +575,37 @@ def _sorted_results(items, mode, engine=None):
     return [item for _index, item in sorted(indexed, key=sort_key)]
 
 
+class _ResultsList(wx.ListCtrl):
+    """The results list, drawn on demand instead of built row by row.
+
+    An all-sites music search asks 57 sources for a page each, so the list
+    routinely holds thousands of rows. Filling those rows one SetItem call at
+    a time cost seconds per redraw, and because every site that answers
+    triggers another redraw of the whole list, a single search spent minutes
+    of GUI-thread time rebuilding rows nobody was looking at. The app was
+    unresponsive throughout, which for a screen reader means the results are
+    unreadable while they arrive.
+
+    A virtual list keeps the rows in ``self.results`` and asks for text only
+    for the handful of rows actually on screen, so a redraw costs the same
+    whether the search found ten results or ten thousand.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["style"] = kwargs.get("style", 0) | wx.LC_REPORT | wx.LC_VIRTUAL
+        super().__init__(*args, **kwargs)
+        # Set by the panel once it can answer for a cell.
+        self.cell_provider = None
+
+    def OnGetItemText(self, item, column):
+        if self.cell_provider is None:
+            return ""
+        try:
+            return self.cell_provider(item, column)
+        except Exception:  # noqa: BLE001 - a redraw must never raise at the user
+            return ""
+
+
 class SearchPanel(wx.Panel):
     def __init__(self, parent, frame):
         super().__init__(parent)
@@ -627,7 +673,8 @@ class SearchPanel(wx.Panel):
         self.search_btn = wx.Button(self, label="&Search")
         self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
 
-        self.results_list = wx.ListCtrl(self, style=wx.LC_REPORT)
+        self.results_list = _ResultsList(self)
+        self.results_list.cell_provider = self._result_cell
         self.results_list.SetName("Search results")
         self.results_list.SetHelpText(
             "Select results. Enter downloads; Control C copies the URL; "
@@ -903,7 +950,9 @@ class SearchPanel(wx.Panel):
         self.next_result_order = 0
         self.timer.Stop()
         self.render_timer.Stop()
-        self.results_list.DeleteAllItems()
+        # DeleteAllItems on a virtual list clears the rows without telling it
+        # the count changed, which leaves the old count behind.
+        self.results_list.SetItemCount(0)
         self._apply_engine_columns(engine)
 
         if _is_soulseek_engine(engine):
@@ -1253,60 +1302,65 @@ class SearchPanel(wx.Panel):
         self.results.append(item)
         return True
 
-    def _insert_result_row(self, row, item, engine):
-        self.results_list.InsertItem(row, item["title"])
-        self.results_list.SetItem(row, 1, _result_type(item))
+    def _result_cell(self, row, column):
+        """One cell of the results list, asked for as it is drawn.
+
+        wx calls this for visible rows only, so it has to stay cheap and it
+        has to tolerate being called while a search is still replacing the
+        rows underneath it.
+        """
+        if not (0 <= row < len(self.results)):
+            return ""
+        item = self.results[row]
+        engine = self.result_engine
+        if column == 0:
+            return str(item.get("title") or "")
+        if column == 1:
+            return _result_type(item)
         if _is_soulseek_engine(engine):
-            self.results_list.SetItem(row, 2, item.get("username", ""))
-            self.results_list.SetItem(row, 3, item.get("folder", ""))
-            self.results_list.SetItem(row, 4, item.get("availability", ""))
-            self.results_list.SetItem(row, 5, item.get("file_size", ""))
-        elif _is_book_engine(engine):
-            self.results_list.SetItem(row, 2, item.get("author", ""))
-            self.results_list.SetItem(row, 3, item.get("source", ""))
-            self.results_list.SetItem(row, 4, str(item.get("year") or ""))
-            self.results_list.SetItem(row, 5, item.get("file_size", ""))
-        elif engine == ENGINE_AUDIOBOOKS:
-            author = item.get("author", "")
-            narrator = item.get("narrator", "")
-            if narrator and narrator != author:
-                author = (
-                    f"{author}, read by {narrator}" if author else f"read by {narrator}"
-                )
-            self.results_list.SetItem(row, 2, author)
-            self.results_list.SetItem(row, 3, item.get("source", ""))
-            self.results_list.SetItem(
-                row, 4, ytdlp_backend.format_duration(item.get("duration_s"))
-            )
-            chapters = item.get("chapters") or 0
-            self.results_list.SetItem(row, 5, str(chapters) if chapters else "")
-        elif _is_torrent_engine(engine):
-            seeders = item.get("seeders") or 0
-            leechers = item.get("leechers") or 0
-            # Both halves of the swarm in one column: seeders alone say how
-            # fast it will go, leechers say whether anyone still wants it.
-            self.results_list.SetItem(row, 2, f"{seeders} seeding, {leechers} leeching")
-            self.results_list.SetItem(row, 3, item.get("source", ""))
-            self.results_list.SetItem(row, 4, item.get("age", ""))
-            self.results_list.SetItem(row, 5, item.get("file_size", ""))
-        elif _is_archive_engine(engine):
-            self.results_list.SetItem(row, 2, item.get("creator", ""))
-            self.results_list.SetItem(row, 3, item.get("source", ""))
-            self.results_list.SetItem(row, 4, str(item.get("year") or ""))
-            self.results_list.SetItem(row, 5, item.get("file_size", ""))
-        elif engine != ENGINE_YOUTUBE:
-            self.results_list.SetItem(row, 2, item.get("artist", ""))
-            self.results_list.SetItem(row, 3, item.get("source", ""))
-            self.results_list.SetItem(
-                row, 4, ytdlp_backend.format_duration(item.get("duration_s"))
-            )
-            self.results_list.SetItem(row, 5, item.get("file_size", ""))
-        else:
-            self.results_list.SetItem(row, 2, item.get("uploader", ""))
-            self.results_list.SetItem(row, 3, "YouTube")
-            self.results_list.SetItem(
-                row, 4, ytdlp_backend.format_duration(item.get("duration"))
-            )
+            return _pick(column, item, "username", "folder", "availability", "file_size")
+        if _is_book_engine(engine):
+            if column == 4:
+                return str(item.get("year") or "")
+            return _pick(column, item, "author", "source", None, "file_size")
+        if engine == ENGINE_AUDIOBOOKS:
+            if column == 2:
+                author = item.get("author", "")
+                narrator = item.get("narrator", "")
+                if narrator and narrator != author:
+                    return (
+                        f"{author}, read by {narrator}"
+                        if author
+                        else f"read by {narrator}"
+                    )
+                return author
+            if column == 4:
+                return ytdlp_backend.format_duration(item.get("duration_s"))
+            if column == 5:
+                chapters = item.get("chapters") or 0
+                return str(chapters) if chapters else ""
+            return _pick(column, item, None, "source", None, None)
+        if _is_torrent_engine(engine):
+            if column == 2:
+                # Both halves of the swarm in one column: seeders alone say how
+                # fast it will go, leechers say whether anyone still wants it.
+                seeders = item.get("seeders") or 0
+                leechers = item.get("leechers") or 0
+                return f"{seeders} seeding, {leechers} leeching"
+            return _pick(column, item, None, "source", "age", "file_size")
+        if _is_archive_engine(engine):
+            if column == 4:
+                return str(item.get("year") or "")
+            return _pick(column, item, "creator", "source", None, "file_size")
+        if engine != ENGINE_YOUTUBE:
+            if column == 4:
+                return ytdlp_backend.format_duration(item.get("duration_s"))
+            return _pick(column, item, "artist", "source", None, "file_size")
+        if column == 3:
+            return "YouTube"
+        if column == 4:
+            return ytdlp_backend.format_duration(item.get("duration"))
+        return _pick(column, item, "uploader", None, None, None)
 
     def _selected_result_objects(self):
         return [
@@ -1320,17 +1374,31 @@ class SearchPanel(wx.Panel):
         return self.results[index] if 0 <= index < len(self.results) else None
 
     def _render_results(self, engine, selected=(), focused=None):
+        """Show the current results, keeping the user where they were.
+
+        The rows themselves cost nothing to publish -- the list asks for the
+        text of the few it draws -- so the work here is restoring the
+        selection and the focused row, which are the things a search arriving
+        underneath the user would otherwise take away.
+        """
         selected_ids = {id(item) for item in selected}
         self._apply_engine_columns(engine)
         self.results_list.Freeze()
         try:
-            self.results_list.DeleteAllItems()
-            for row, item in enumerate(self.results):
-                self._insert_result_row(row, item, engine)
-                if id(item) in selected_ids:
-                    self.results_list.Select(row)
-                if item is focused:
-                    self.results_list.Focus(row)
+            # A virtual list keeps selection by row number, so rows that moved
+            # under a re-sort would stay selected at their old positions.
+            for index in self._selected_indices():
+                self.results_list.Select(index, False)
+            self.results_list.SetItemCount(len(self.results))
+            # Walking every row costs nothing to look at but is still a walk,
+            # and during a live search there is usually nothing to put back.
+            if selected_ids or focused is not None:
+                for row, item in enumerate(self.results):
+                    if id(item) in selected_ids:
+                        self.results_list.Select(row)
+                    if item is focused:
+                        self.results_list.Focus(row)
+            self.results_list.Refresh()
         finally:
             self.results_list.Thaw()
 
