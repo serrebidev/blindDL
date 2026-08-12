@@ -2,6 +2,8 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -22,12 +24,32 @@ class SingleInstanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             name = f"blindDL-test-{uuid.uuid4()}"
             first = wx.SingleInstanceChecker(name, folder)
-            second = wx.SingleInstanceChecker(name, folder)
             try:
                 self.assertFalse(first.IsAnotherRunning())
-                self.assertTrue(second.IsAnotherRunning())
+                probe = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import sys, wx; "
+                            "app = wx.App(False); "
+                            "checker = wx.SingleInstanceChecker(sys.argv[1], sys.argv[2]); "
+                            "raise SystemExit(0 if checker.IsAnotherRunning() else 1)"
+                        ),
+                        name,
+                        folder,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                self.assertEqual(
+                    probe.returncode,
+                    0,
+                    msg=f"second-process probe failed: {probe.stderr}",
+                )
             finally:
-                del second
                 del first
 
     def test_relaunch_signal_restores_the_existing_instance(self):
