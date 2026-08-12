@@ -183,6 +183,10 @@ DEFAULTS = {
     # logged in at music.apple.com. Empty = Apple Music downloads are
     # unavailable, though search and URL resolution still work.
     "apple_music_cookies": "",
+    # What Apple Music downloads are saved as: "m4a" keeps Apple's AAC, the
+    # "mp3_*" values re-encode it through LAME (V0 and V2 are VBR quality
+    # settings, mp3_320 a constant bitrate).
+    "apple_music_format": "m4a",
     # Embed synced lyrics into Side B (Deezer) downloads.
     "sideb_lyrics": True,
     # Closing the window hides blindDL in the system tray instead of exiting,

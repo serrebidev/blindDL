@@ -35,6 +35,22 @@ _ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _ITUNES_LOOKUP_URL = "https://itunes.apple.com/lookup"
 _AMP_API_URL = "https://amp-api.music.apple.com"
 
+# Output formats for Apple Music downloads. ``m4a`` keeps Apple's AAC
+# untouched; the MP3 options re-encode it through libmp3lame (present in the
+# ffmpeg blindDL ships). V0 and V2 are LAME's VBR quality settings (V0 is
+# roughly the same bitrate as the original 256 kbps AAC), and 320k is a
+# constant bitrate.
+APPLE_OUTPUT_FORMATS = {
+    "m4a": {"label": "M4A (AAC, original)", "ext": "m4a",
+            "ffmpeg_args": []},
+    "mp3_v0": {"label": "MP3 V0 (~245 kbps VBR)", "ext": "mp3",
+                "ffmpeg_args": ["-q:a", "0"]},
+    "mp3_v2": {"label": "MP3 V2 (~190 kbps VBR)", "ext": "mp3",
+                "ffmpeg_args": ["-q:a", "2"]},
+    "mp3_320": {"label": "MP3 320 kbps (CBR)", "ext": "mp3",
+                 "ffmpeg_args": ["-b:a", "320k"]},
+}
+
 # music.apple.com / geo.music.apple.com / embed.music.apple.com media
 # links: /{cc}/{type}/... where type is a known media type, so a bare
 # music.apple.com page never gets routed to this backend.
@@ -476,23 +492,43 @@ def _download_stream(stream_url, decryption_key, out_path, cancel_event=None):
             command += ["-decryption_key", decryption_key]
         command += ["-i", encrypted_path, "-c", "copy", "-movflags",
                     "+faststart", out_path]
-        try:
-            completed = subprocess.run(
-                command, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=1800,
-            )
-        except FileNotFoundError:
-            raise RuntimeError(
-                "ffmpeg was not found; blindDL needs it to decode Apple Music "
-                "streams.") from None
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Apple Music download timed out.") from None
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()
-            raise RuntimeError(
-                f"ffmpeg could not decode the Apple Music stream: {detail[-400:]}")
+        _run_ffmpeg(
+            command, "ffmpeg could not decode the Apple Music stream")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _run_ffmpeg(command, what):
+    """Run an ffmpeg command, turning failures into user-facing errors."""
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=1800,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg was not found; blindDL needs it for Apple Music "
+            "downloads.") from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{what} timed out.") from None
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(f"{what}: {detail[-400:]}")
+
+
+def _convert_m4a_to_mp3(m4a_path, mp3_path, output_format):
+    """Re-encode a tagged M4A to MP3, carrying tags and cover art.
+
+    ffmpeg copies the M4A's tags and attached picture into ID3 (verified:
+    TIT2/TPE1/TALB/TRCK/TCON/TCOM and an APIC frame all survive), so the
+    finished file needs no further tagging.
+    """
+    command = (["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", m4a_path, "-map_metadata", "0", "-id3v2_version", "3",
+                "-c:v", "copy", "-c:a", "libmp3lame"]
+               + list(output_format["ffmpeg_args"]) + [mp3_path])
+    _run_ffmpeg(command, "ffmpeg could not convert the Apple Music track "
+                         "to MP3")
 
 
 def _write_tags(out_path, item):
@@ -517,18 +553,28 @@ def _write_tags(out_path, item):
         tags.save()
     except Exception:  # noqa: BLE001 - a tagging failure must not lose audio
         pass
-    if item.lyrics is not None and item.lyrics.synced:
-        try:
-            with open(os.path.splitext(out_path)[0] + ".lrc", "w",
-                      encoding="utf-8", newline="\n") as handle:
-                handle.write(item.lyrics.synced)
-        except OSError:
-            pass
+
+
+def _write_lrc(out_path, item):
+    """Write the synced-lyrics sidecar next to the finished file."""
+    if item.lyrics is None or not item.lyrics.synced:
+        return
+    try:
+        with open(os.path.splitext(out_path)[0] + ".lrc", "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(item.lyrics.synced)
+    except OSError:
+        pass
 
 
 def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
-                   cancel_event=None):
-    """Download one song's HLS stream, decrypt it, and tag the M4A."""
+                   cancel_event=None, audio_format="m4a"):
+    """Download one song's HLS stream, decrypt it, tag it, and save it.
+
+    The stream always decrypts to an M4A first (that is what the Widevine
+    pipeline yields). With ``audio_format`` set to an MP3 variant the tagged
+    M4A is re-encoded through ffmpeg's LAME encoder and the M4A is removed.
+    """
     from musicdl.modules.utils import appleutils
 
     _check_cancelled(cancel_event)
@@ -556,12 +602,35 @@ def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
     track_no = getattr(tags, "track", None) if tags is not None else None
     if track_no:
         title = f"{int(track_no):02d} {title}"
-    out_path = os.path.join(target_dir, f"{_safe_name(title)}.m4a")
+    output_format = (APPLE_OUTPUT_FORMATS.get(audio_format)
+                     or APPLE_OUTPUT_FORMATS["m4a"])
+    out_path = os.path.join(
+        target_dir, f"{_safe_name(title)}.{output_format['ext']}")
     _check_cancelled(cancel_event)
-    _download_stream(stream.stream_url, decryption_key, out_path, cancel_event)
-    if not os.path.isfile(out_path) or os.path.getsize(out_path) <= 0:
-        raise RuntimeError("Apple Music produced an empty file.")
-    _write_tags(out_path, item)
+    if output_format["ext"] == "m4a":
+        _download_stream(stream.stream_url, decryption_key, out_path,
+                         cancel_event)
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) <= 0:
+            raise RuntimeError("Apple Music produced an empty file.")
+        _write_tags(out_path, item)
+        _write_lrc(out_path, item)
+        return
+    # MP3 output: decrypt and tag a temporary M4A, then re-encode it.
+    tmp_dir = tempfile.mkdtemp(prefix="blinddl-am-out-")
+    m4a_path = os.path.join(tmp_dir, "track.m4a")
+    try:
+        _download_stream(stream.stream_url, decryption_key, m4a_path,
+                         cancel_event)
+        if not os.path.isfile(m4a_path) or os.path.getsize(m4a_path) <= 0:
+            raise RuntimeError("Apple Music produced an empty file.")
+        _write_tags(m4a_path, item)
+        _check_cancelled(cancel_event)
+        _convert_m4a_to_mp3(m4a_path, out_path, output_format)
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) <= 0:
+            raise RuntimeError("Apple Music produced an empty MP3.")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    _write_lrc(out_path, item)
 
 
 def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
@@ -580,10 +649,12 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
     if media_type in _UNSUPPORTED_MEDIA_TYPES:
         raise RuntimeError(
             "blindDL supports Apple Music songs, albums, and playlists only.")
+    audio_format = (config or {}).get("apple_music_format", "m4a")
     if media_type == "song" or info.get("sub_id"):
         media_id = info["sub_id"] or info["media_id"]
         metadata = _catalog_song(api, media_id)
-        _download_song(api, itunes_api, metadata, None, out_dir, cancel_event)
+        _download_song(api, itunes_api, metadata, None, out_dir, cancel_event,
+                       audio_format=audio_format)
         return
     if media_type == "album":
         collection = _catalog_album(api, info["media_id"])
@@ -602,7 +673,7 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
         _check_cancelled(cancel_event)
         metadata = _catalog_song(api, _track_id(track))
         _download_song(api, itunes_api, metadata, collection, target_dir,
-                       cancel_event)
+                       cancel_event, audio_format=audio_format)
 
 
 def download_track(url, out_dir, config=None, progress_cb=None,

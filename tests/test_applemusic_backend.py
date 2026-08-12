@@ -284,6 +284,50 @@ class AppleMusicDownloadTests(unittest.TestCase):
             self.assertIn("-decryption_key", run.call_args.args[0])
             self.assertIn("ffmpeg", run.call_args.args[0])
 
+    def test_download_song_mp3_v0_converts(self):
+        api = mock.Mock()
+        api.getsong.return_value = {
+            "data": [{"id": "1", "attributes": {"name": "One"}}]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(applemusic_backend, "_authenticated_api",
+                                   return_value=(api, None)), \
+                 mock.patch("musicdl.modules.utils.appleutils."
+                            "AppleMusicClientDownloadSongUtils.getdownloaditem",
+                            return_value=self._fake_item()), \
+                 mock.patch.object(applemusic_backend.subprocess, "run") as run, \
+                 self._patch_download_tools(run):
+                applemusic_backend.download(
+                    "https://music.apple.com/us/song/1", tmp,
+                    {"apple_music_cookies": "/x",
+                     "apple_music_format": "mp3_v0"})
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "03 One.mp3")))
+            self.assertFalse(os.path.isfile(os.path.join(tmp, "03 One.m4a")))
+            mp3_command = run.call_args_list[-1].args[0]
+            self.assertTrue(mp3_command[-1].endswith(".mp3"))
+            self.assertIn("libmp3lame", mp3_command)
+            self.assertIn("-q:a", mp3_command)
+            self.assertEqual(len(run.call_args_list), 2)
+
+    def test_download_song_keeps_m4a_by_default(self):
+        api = mock.Mock()
+        api.getsong.return_value = {
+            "data": [{"id": "1", "attributes": {"name": "One"}}]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(applemusic_backend, "_authenticated_api",
+                                   return_value=(api, None)), \
+                 mock.patch("musicdl.modules.utils.appleutils."
+                            "AppleMusicClientDownloadSongUtils.getdownloaditem",
+                            return_value=self._fake_item()), \
+                 mock.patch.object(applemusic_backend.subprocess, "run") as run, \
+                 self._patch_download_tools(run):
+                applemusic_backend.download(
+                    "https://music.apple.com/us/song/1", tmp,
+                    {"apple_music_cookies": "/x"})
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "03 One.m4a")))
+            self.assertEqual(len(run.call_args_list), 1)
+
     def test_download_album_writes_subfolder(self):
         api = mock.Mock()
         api.client.get.return_value = SimpleNamespace(

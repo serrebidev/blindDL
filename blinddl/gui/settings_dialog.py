@@ -39,6 +39,15 @@ VIDEO_FORMAT_CHOICES = [
 # Kept for callers that only need the stored values.
 AUDIO_FORMATS = [value for _label, value in AUDIO_FORMAT_CHOICES]
 VIDEO_FORMATS = [value for _label, value in VIDEO_FORMAT_CHOICES]
+# Apple Music output formats. M4A is Apple's own AAC, which the download
+# produces directly; the MP3 options re-encode it afterwards with blindDL's
+# ffmpeg. V0 and V2 are LAME's VBR quality settings, 320k a constant bitrate.
+APPLE_FORMAT_CHOICES = [
+    ("M4A (AAC, original)", "m4a"),
+    ("MP3 V0 (~245 kbps)", "mp3_v0"),
+    ("MP3 V2 (~190 kbps)", "mp3_v2"),
+    ("MP3 320 kbps", "mp3_320"),
+]
 BROWSER_COOKIE_CHOICES = [
     ("None", ""),
     ("Chrome", "chrome"),
@@ -856,6 +865,19 @@ class SettingsDialog(wx.Dialog):
         am_row.Add(am_box, 1)
         sizer.Add(am_row, 0, wx.EXPAND | wx.ALL, 8)
 
+        am_format_label = wx.StaticText(page, label="Output &format:")
+        self.am_format_choice = self._choice(
+            page,
+            APPLE_FORMAT_CHOICES,
+            config.get("apple_music_format", "m4a"),
+            "Apple Music output format",
+        )
+        self.am_format_choice.SetHelpText(
+            "M4A keeps Apple's AAC untouched. MP3 re-encodes it through "
+            "LAME; V0 is roughly the same bitrate as the original."
+        )
+        _row(sizer, am_format_label, self.am_format_choice)
+
         sizer.Add(self._heading(page, "Anna's Archive"), 0, wx.TOP | wx.LEFT, 12)
         _row(sizer, annas_label, self.annas_text)
 
@@ -1040,6 +1062,9 @@ class SettingsDialog(wx.Dialog):
         )
         self.config["deezer_arl"] = self.arl_text.GetValue().strip()
         self.config["apple_music_cookies"] = self.am_cookies_picker.GetPath().strip()
+        self.config["apple_music_format"] = APPLE_FORMAT_CHOICES[
+            self.am_format_choice.GetSelection()
+        ][1]
         self.config["annas_archive_key"] = self.annas_text.GetValue().strip()
         self.config.save()
 
