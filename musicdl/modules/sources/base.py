@@ -164,15 +164,23 @@ class BaseMusicClient():
                 main_process_context.update(main_progress_id, total=cur_total + len(search_urls))
                 main_process_context.update(main_progress_id, description=f"Search From Sources >>> Completed ({int(main_process_context.tasks[main_progress_id].completed)}/{cur_total + len(search_urls)}) Search URLs")
         submitted_tasks = []; song_infos: dict[str, list[SongInfo]] = {}
-        with ThreadPoolExecutor(max_workers=num_threadings) as pool:
-            for search_url_idx, search_url in enumerate(search_urls): song_infos[str(search_url_idx)] = []; submitted_tasks.append(pool.submit(self._search, keyword, search_url, request_overrides, song_infos[str(search_url_idx)], main_process_context))
-            for future in as_completed(submitted_tasks):
-                future.result()
-                with main_progress_lock:
-                    main_process_context.advance(progress_id, 1); num_searched_urls = int(main_process_context.tasks[progress_id].completed)
-                    main_process_context.update(progress_id, description=f"{self.source}.search >>> Completed ({num_searched_urls}/{len(search_urls)}) Search URLs")
-                    main_progress_id is not None and main_process_context.advance(main_progress_id, 1)
-                    main_progress_id is not None and main_process_context.update(main_progress_id, description=f"Search From Sources >>> Completed ({int(main_process_context.tasks[main_progress_id].completed)}/{int(main_process_context.tasks[main_progress_id].total or 0)}) Search URLs")
+        def record_completed_search():
+            with main_progress_lock:
+                main_process_context.advance(progress_id, 1); num_searched_urls = int(main_process_context.tasks[progress_id].completed)
+                main_process_context.update(progress_id, description=f"{self.source}.search >>> Completed ({num_searched_urls}/{len(search_urls)}) Search URLs")
+                main_progress_id is not None and main_process_context.advance(main_progress_id, 1)
+                main_progress_id is not None and main_process_context.update(main_progress_id, description=f"Search From Sources >>> Completed ({int(main_process_context.tasks[main_progress_id].completed)}/{int(main_process_context.tasks[main_progress_id].total or 0)}) Search URLs")
+        if num_threadings == 1:
+            for search_url_idx, search_url in enumerate(search_urls):
+                song_infos[str(search_url_idx)] = []
+                self._search(keyword, search_url, request_overrides, song_infos[str(search_url_idx)], main_process_context)
+                record_completed_search()
+        else:
+            with ThreadPoolExecutor(max_workers=num_threadings) as pool:
+                for search_url_idx, search_url in enumerate(search_urls): song_infos[str(search_url_idx)] = []; submitted_tasks.append(pool.submit(self._search, keyword, search_url, request_overrides, song_infos[str(search_url_idx)], main_process_context))
+                for future in as_completed(submitted_tasks):
+                    future.result()
+                    record_completed_search()
         song_infos, work_dir, work_dir_to_song_info = self._removeduplicates(song_infos=list(chain.from_iterable(song_infos.values()))), self._constructuniqueworkdir(keyword=keyword), defaultdict(list)
         for song_info in song_infos:
             if not isinstance(song_info, SongInfo) or not song_info.with_valid_download_url: continue
