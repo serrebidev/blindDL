@@ -121,7 +121,11 @@ class MainFrame(wx.Frame):
         file_menu.Append(wx.ID_OPEN, "&Open downloads\tCtrl+O")
         file_menu.Append(wx.ID_PREFERENCES, "&Settings...\tCtrl+,")
         file_menu.AppendSeparator()
-        file_menu.Append(wx.ID_EXIT, "E&xit\tAlt+F4")
+        # Deliberately not labelled Alt+F4: wx would turn that into a menu
+        # accelerator, and the accelerator table is searched before Windows'
+        # own close handling. Alt+F4 would then quit outright instead of
+        # closing the window, which is the gesture that hides to the tray.
+        file_menu.Append(wx.ID_EXIT, "E&xit\tCtrl+Q")
 
         tools_menu = wx.Menu()
         self.ID_SOURCES = wx.NewIdRef()

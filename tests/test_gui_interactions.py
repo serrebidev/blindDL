@@ -385,6 +385,21 @@ class GuiInteractionTests(unittest.TestCase):
         call_later.assert_called_once_with(100, hide)
         hide.assert_called_once_with()
 
+    def test_exit_menu_leaves_alt_f4_to_the_window_close_path(self):
+        # A menu accelerator is matched before Windows' own close handling, so
+        # labelling Exit with Alt+F4 would quit outright instead of closing the
+        # window -- and closing is the gesture that hides in the tray.
+        holder = mock.MagicMock()
+
+        MainFrame._build_menus(holder)
+
+        menubar = holder.SetMenuBar.call_args[0][0]
+        item = menubar.FindItemById(wx.ID_EXIT)
+        self.assertNotIn("F4", item.GetItemLabel().upper())
+        accel = item.GetAccel()
+        self.assertEqual(accel.GetFlags(), wx.ACCEL_CTRL)
+        self.assertEqual(accel.GetKeyCode(), ord("Q"))
+
     def test_minimize_to_tray_finishes_after_native_iconize_event(self):
         finish = mock.Mock()
         holder = SimpleNamespace(

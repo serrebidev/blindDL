@@ -136,10 +136,11 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 - Ctrl+U — check for updates
 - Ctrl+Shift+C — check all subscriptions now
 - Ctrl+Shift+S — choose which sites are searched
+- Ctrl+Q — exit for real, even when closing is set to hide in the tray
 
 ## The system tray
 
-Closing the window and minimizing it both put BlindDL in the system tray. The high-contrast blue **B** icon shows a notification when the window hides; click it once, press Windows+B, or launch BlindDL again to restore the existing window. Windows may place new notification icons in its tray-overflow menu until you pin them. BlindDL never hides if Windows has not confirmed that its tray icon was installed. Queued downloads, uploads, seeding torrents, chat, and subscription checks keep running while it is there. File, Exit always exits for real, and the two hide behaviours can be switched off in Settings, Window.
+Closing the window and minimizing it both put BlindDL in the system tray. The high-contrast blue **B** icon shows a notification when the window hides; click it once, press Windows+B, or launch BlindDL again to restore the existing window. Windows may place new notification icons in its tray-overflow menu until you pin them. BlindDL never hides if Windows has not confirmed that its tray icon was installed. Queued downloads, uploads, seeding torrents, chat, and subscription checks keep running while it is there. Closing means every way Windows closes a window, including Alt+F4 and the system menu. File, Exit and Ctrl+Q always exit for real, as does Exit on the tray menu, and the two hide behaviours can be switched off in Settings, Window.
 
 Only one BlindDL instance runs per user. Starting it again does not create a duplicate download queue or duplicate Soulseek connection; it brings the already-running window back from the tray.
 
