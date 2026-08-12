@@ -251,6 +251,19 @@ class AppleMusicDownloadTests(unittest.TestCase):
 
         run.side_effect = _run
 
+    @staticmethod
+    def _fake_hls_download(self, filename, info_dict):
+        with open(filename, "wb") as handle:
+            handle.write(b"encrypted")
+        return True, ""
+
+    def _patch_download_tools(self, run):
+        """Context stack for the two real-world calls a download makes."""
+        self._fake_ffmpeg(run)
+        return mock.patch(
+            "yt_dlp.downloader.hls.HlsFD.download",
+            autospec=True, side_effect=self._fake_hls_download)
+
     def test_download_song_uses_in_process_pipeline(self):
         api = mock.Mock()
         api.getsong.return_value = {
@@ -262,8 +275,8 @@ class AppleMusicDownloadTests(unittest.TestCase):
                  mock.patch("musicdl.modules.utils.appleutils."
                             "AppleMusicClientDownloadSongUtils.getdownloaditem",
                             return_value=self._fake_item()) as get_item, \
-                 mock.patch.object(applemusic_backend.subprocess, "run") as run:
-                self._fake_ffmpeg(run)
+                 mock.patch.object(applemusic_backend.subprocess, "run") as run, \
+                 self._patch_download_tools(run):
                 applemusic_backend.download(
                     "https://music.apple.com/us/song/1", tmp,
                     {"apple_music_cookies": "/x"})
@@ -294,8 +307,8 @@ class AppleMusicDownloadTests(unittest.TestCase):
                             "AppleMusicClientDownloadSongUtils.getdownloaditem",
                             side_effect=[self._fake_item(),
                                          self._fake_item()]), \
-                 mock.patch.object(applemusic_backend.subprocess, "run") as run:
-                self._fake_ffmpeg(run)
+                 mock.patch.object(applemusic_backend.subprocess, "run") as run, \
+                 self._patch_download_tools(run):
                 applemusic_backend.download(
                     "https://music.apple.com/us/album/x/9", tmp,
                     {"apple_music_cookies": "/x"})

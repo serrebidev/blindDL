@@ -7,10 +7,12 @@
 Searching uses the iTunes Search API, which is public, credential-free, and
 serves the same catalogue Apple Music's own pages use. Downloading runs the
 Apple Music web pipeline entirely inside blindDL -- anonymous developer
-token, catalog metadata, HLS stream, Widevine L3 license exchange, and an
-ffmpeg AES-128 decrypt-and-remux to M4A -- the same technique the gamdl /
-AppleMusicDecrypt family of tools pioneered. No external downloader is
-needed; the only tool involved is the ffmpeg blindDL already bundles.
+token, catalog metadata, Widevine L3 license exchange, then a CENC
+decrypt-and-remux to M4A (yt-dlp's HLS downloader assembles the encrypted
+fragmented MP4 and ffmpeg's MOV demuxer decrypts it) -- the same technique
+the gamdl / AppleMusicDecrypt family of tools pioneered. No external
+downloader is needed; the only tools involved are the yt-dlp and ffmpeg
+blindDL already bundles.
 
 A full track still needs an Apple Music subscription. Export your browser
 cookies while logged in at music.apple.com (Settings, Accounts, Apple Music,
@@ -21,7 +23,9 @@ error instead.
 
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -433,38 +437,67 @@ def _check_cancelled(cancel_event):
         raise RuntimeError("Cancelled.")
 
 
-def _ffmpeg_decrypt_remux(stream_url, decryption_key, out_path):
-    """Download an Apple Music AES-128 HLS stream and remux it to M4A.
+def _download_stream(stream_url, decryption_key, out_path, cancel_event=None):
+    """Download, decrypt, and remux one Apple Music CENC stream to M4A.
 
-    The legacy AAC streams are AES-128 HLS whose key is a Widevine PSSH;
-    ffmpeg's -decryption_key decrypts the segments as it downloads them, so
-    a single ffmpeg invocation produces the finished M4A.
+    Apple's AAC stream is a fragmented MP4 served over HLS and encrypted
+    with CENC (EXT-X-KEY METHOD=ISO-23001-7), so there is no AES-128 key for
+    ffmpeg's HLS demuxer to apply. Instead yt-dlp's HLS downloader first
+    assembles the encrypted fragments (init segment and byteranges) into one
+    MP4, then ffmpeg's MOV demuxer decrypts it with -decryption_key and
+    remuxes it. Both tools ship with blindDL.
     """
-    command = ["ffmpeg", "-loglevel", "error", "-y"]
-    if decryption_key:
-        command += ["-decryption_key", decryption_key]
-    command += ["-i", stream_url, "-c", "copy", "-movflags", "+faststart",
-                out_path]
+    from yt_dlp import YoutubeDL
+    from yt_dlp.downloader.hls import HlsFD
+
+    tmp_dir = tempfile.mkdtemp(prefix="blinddl-am-")
+    encrypted_path = os.path.join(tmp_dir, "encrypted.mp4")
     try:
-        completed = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=1800,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "ffmpeg was not found; blindDL needs it to decode Apple Music "
-            "streams.") from None
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Apple Music download timed out.") from None
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise RuntimeError(
-            f"ffmpeg could not download the Apple Music stream: {detail[-400:]}")
+        _check_cancelled(cancel_event)
+        with YoutubeDL({
+            "quiet": True,
+            "no_warnings": True,
+            "overwrites": True,
+            "noprogress": True,
+            "nopart": True,
+            "allow_unplayable_formats": True,
+            "concurrent_fragment_downloads": 8,
+        }) as ydl:
+            downloader = HlsFD(ydl, ydl.params)
+            success, _ = downloader.download(
+                encrypted_path,
+                {"url": stream_url, "ext": "mp4", "protocol": "m3u8"},
+            )
+        if not success or not os.path.isfile(encrypted_path):
+            raise RuntimeError("Apple Music stream download failed.")
+        _check_cancelled(cancel_event)
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        if decryption_key:
+            command += ["-decryption_key", decryption_key]
+        command += ["-i", encrypted_path, "-c", "copy", "-movflags",
+                    "+faststart", out_path]
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=1800,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "ffmpeg was not found; blindDL needs it to decode Apple Music "
+                "streams.") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Apple Music download timed out.") from None
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(
+                f"ffmpeg could not decode the Apple Music stream: {detail[-400:]}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _write_tags(out_path, item):
     """Tag the finished M4A and embed cover art and synced lyrics."""
-    from mutagen.mp4 import MP4
+    from mutagen.mp4 import MP4, MP4Cover
 
     try:
         tags = MP4(out_path)
@@ -475,7 +508,10 @@ def _write_tags(out_path, item):
             try:
                 response = requests.get(cover_url, timeout=30)
                 response.raise_for_status()
-                tags["covr"] = [response.content]
+                tags["covr"] = [
+                    MP4Cover(response.content,
+                             imageformat=MP4Cover.FORMAT_JPEG)
+                ]
             except (requests.RequestException, OSError):
                 pass
         tags.save()
@@ -522,7 +558,7 @@ def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
         title = f"{int(track_no):02d} {title}"
     out_path = os.path.join(target_dir, f"{_safe_name(title)}.m4a")
     _check_cancelled(cancel_event)
-    _ffmpeg_decrypt_remux(stream.stream_url, decryption_key, out_path)
+    _download_stream(stream.stream_url, decryption_key, out_path, cancel_event)
     if not os.path.isfile(out_path) or os.path.getsize(out_path) <= 0:
         raise RuntimeError("Apple Music produced an empty file.")
     _write_tags(out_path, item)
