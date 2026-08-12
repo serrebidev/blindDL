@@ -19,6 +19,7 @@ import wx
 with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl import (
         adult_backend,
+        applemusic_backend,
         archive_backend,
         deezer_backend,
         musicdl_backend,
@@ -49,6 +50,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         BOOK_SORT_LABELS,
         COLUMN_HEADINGS,
         ENGINE_ADULT,
+        ENGINE_APPLE_MUSIC,
         ENGINE_ARCHIVE_AUDIO,
         ENGINE_ARCHIVE_VIDEO,
         ENGINE_AUDIOBOOKS,
@@ -135,6 +137,9 @@ class _Queue:
 
     def add_sideb(self, url, title):
         self.calls.append(("sideb", url, title))
+
+    def add_applemusic(self, url, title):
+        self.calls.append(("applemusic", url, title))
 
     def add_adult(self, payload, title):
         self.calls.append(("adult", payload, title))
@@ -1114,6 +1119,54 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(
             self.frame.queue.calls,
             [("sideb", deezer_items[0]["url"], deezer_items[0]["title"])],
+        )
+
+    def test_apple_music_choice_searches_and_downloads(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("ambient")
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_APPLE_MUSIC)
+        )
+        panel.on_engine_changed(wx.CommandEvent())
+
+        apple_items = [
+            {
+                "title": "One",
+                "kind": "applemusic",
+                "url": "https://music.apple.com/us/song/1",
+                "source": "Apple Music",
+            }
+        ]
+        token = panel.token = object()
+        stop = threading.Event()
+        with (
+            mock.patch.object(
+                applemusic_backend, "search", return_value=apple_items
+            ) as search,
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search(
+                "ambient",
+                ENGINE_APPLE_MUSIC,
+                token,
+                stop,
+                [],
+                search_order.ORDER_RELEVANCE,
+            )
+
+        self.assertEqual(search.call_args.args, ("ambient", self.frame.config))
+
+        # An Apple Music result downloads through its own queue path.
+        self.frame.queue.calls = []
+        panel.result_engine = ENGINE_APPLE_MUSIC
+        panel.results = apple_items
+        panel.results_list.DeleteAllItems()
+        panel.results_list.InsertItem(0, apple_items[0]["title"])
+        panel.results_list.Select(0)
+        panel.on_download_selected(None)
+        self.assertEqual(
+            self.frame.queue.calls,
+            [("applemusic", apple_items[0]["url"], apple_items[0]["title"])],
         )
 
     def test_music_archive_and_adult_searches_never_call_soulseek(self):

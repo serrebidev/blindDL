@@ -57,6 +57,9 @@ ALL_SOURCES = sorted(MusicClientBuilder.REGISTERED_MODULES.keys())
 
 # Per-search wall clock budget. Sites that answer later are dropped.
 SEARCH_TIMEOUT_S = 5.0
+# How many songs each source is asked for. Upstream adapters often cap their
+# own page size lower, but the ones that can answer do.
+SEARCH_SIZE_PER_SOURCE = 200
 # Hard socket timeout, so an abandoned search thread dies instead of
 # hanging on a dead host for the rest of the session.
 HTTP_TIMEOUT_S = 15
@@ -182,6 +185,10 @@ def _get_clients():
                             # Retrying a dead site three times only burns
                             # the search budget.
                             "max_retries": 1,
+                            # Ask each source for a full page rather than
+                            # musicdl's default handful.
+                            "search_size_per_source": SEARCH_SIZE_PER_SOURCE,
+                            "search_size_per_page": SEARCH_SIZE_PER_SOURCE,
                         }},
                     )
                 except Exception:  # noqa: BLE001 - source needs cookies/config

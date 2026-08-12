@@ -54,6 +54,10 @@ _PREFERRED_FORMATS = {
     "original": ["FLAC", "MP3_320"],
 }
 _DEFAULT_FORMATS = ["MP3_320"]
+# /search/track caps a request at 100 rows; two pages reach the 200 blindDL
+# lists per search.
+_SEARCH_LIMIT = 100
+_SEARCH_TARGET = 200
 
 _sessions = {}  # arl -> authenticated HTTP session and streaming credentials
 _sessions_lock = threading.Lock()
@@ -329,14 +333,32 @@ def supports_order(order):
 def search(query, config=None, order=ORDER_RELEVANCE):
     """Search Deezer tracks via the public API.  Returns normalized items.
 
-    The API takes an `order` parameter and quietly disregards it on track
-    search, so the ordering is done here on the rank each row carries.
+    The API caps a track search at 100 results per request, so two pages are
+    fetched to reach the 200 blindDL lists. The API takes an `order`
+    parameter and quietly disregards it on track search, so the ordering is
+    done here on the rank each row carries.
     """
+    items = []
+    seen = set()
     try:
-        data = _api_get("/search/track", {"q": query, "limit": 30})
+        for index in range(0, _SEARCH_TARGET, _SEARCH_LIMIT):
+            page = _api_get(
+                "/search/track",
+                {"q": query, "limit": _SEARCH_LIMIT, "index": index},
+            )
+            batch = page.get("data", [])
+            if not batch:
+                break
+            for track in batch:
+                item = _track_to_item(track)
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    items.append(item)
+            if len(batch) < _SEARCH_LIMIT:
+                break
     except Exception:
-        return []
-    items = [_track_to_item(t) for t in data.get("data", [])]
+        # A failed page stops the crawl; whatever arrived is still shown.
+        pass
     if search_order.normalize(order) == ORDER_POPULAR:
         items.sort(key=lambda item: -item["rank"])
     return items

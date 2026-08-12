@@ -77,6 +77,8 @@ MAX_NESTED_DEPTH = 3
 # Search results and hashtag feeds are ranked, endless, and re-shuffle
 # between visits, so only the top slice is worth listing.
 RANKED_FEED_LIMIT = 100
+# How many results a YouTube search asks for.
+SEARCH_COUNT = 200
 
 _CHANNEL_ID_RE = re.compile(r"UC[\w-]{22}")
 _PLAYLIST_ID_RE = re.compile(r"(?:PL|UU|LL|FL|OL|RD)[\w-]{10,}")
@@ -245,7 +247,7 @@ def extract_flat(url, cookies_from_browser=None, limit=None,
     return unique, title
 
 
-def search(query, count=20, order=ORDER_RELEVANCE):
+def search(query, count=SEARCH_COUNT, order=ORDER_RELEVANCE):
     """Search YouTube, sorted the way *order* asks.
 
     Best match uses yt-dlp's ytsearch extractor. The other two go to the

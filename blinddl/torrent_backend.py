@@ -120,8 +120,8 @@ ARCHIVE_DETAILS_URL = "https://archive.org/details"
 
 SEARCH_TIMEOUT_S = 8.0
 HTTP_TIMEOUT_S = 20
-SEARCH_ROWS = 40
-MAX_RESULTS_PER_SOURCE = 25
+SEARCH_ROWS = 200
+MAX_RESULTS_PER_SOURCE = 200
 MIN_MATCH_SCORE = 30.0
 
 # Open trackers added to a magnet built from a bare info hash. Without them a

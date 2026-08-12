@@ -57,7 +57,7 @@ LIBGEN_MIRRORS = (
 IMPERSONATE = "chrome"
 HTTP_TIMEOUT_S = 25
 DOWNLOAD_TIMEOUT_S = 300
-SEARCH_ROWS = 40
+SEARCH_ROWS = 200
 
 _TITLE_RE = re.compile(
     r'<a href="/md5/([0-9a-f]{32})"[^>]*text-lg[^>]*>(.*?)</a>', re.DOTALL)

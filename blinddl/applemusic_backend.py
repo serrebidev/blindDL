@@ -18,7 +18,10 @@ import os
 import re
 import subprocess
 
+import requests
+
 _SEARCH_SOURCE = "Apple Music"
+_ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _APPLE_URL_RE = re.compile(
     r"music\.apple\.com/(?:[a-z]{2}/)?(?:album|playlist|artist|song)/",
     re.IGNORECASE)
@@ -29,10 +32,43 @@ def is_apple_music_url(url):
 
 
 def search(query, config=None, order=None):
-    """Apple Music search is not available without the MusicKit API.
-    When gamdl is installed, users can paste Apple Music URLs directly.
+    """Search Apple Music through iTunes' public, credential-free API.
+
+    The catalogue behind music.apple.com is the one the iTunes Search API
+    serves, so a hit's trackViewUrl resolves to the same song there. It
+    returns up to 200 tracks, which is what the Search tab lists.
     """
-    return []
+    try:
+        response = requests.get(
+            _ITUNES_SEARCH_URL,
+            params={
+                "term": query,
+                "media": "music",
+                "entity": "song",
+                "limit": 200,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+    except (requests.RequestException, ValueError):
+        return []
+    items = []
+    for track in results:
+        url = track.get("trackViewUrl") or ""
+        if not url:
+            continue
+        items.append({
+            "id": f"applemusic:{track.get('trackId') or url}",
+            "kind": "applemusic",
+            "title": track.get("trackName") or "Unknown title",
+            "artist": track.get("artistName") or "",
+            "album": track.get("collectionName") or "",
+            "source": _SEARCH_SOURCE,
+            "duration_s": int(track.get("trackTimeMillis") or 0) // 1000,
+            "url": url,
+        })
+    return items
 
 
 def extract_flat(url, config=None):

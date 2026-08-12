@@ -66,6 +66,25 @@ class DeezerBackendTests(unittest.TestCase):
         self.assertFalse(deezer_backend.supports_order(
             search_order.ORDER_RECENT))
 
+    def test_search_paginates_to_200(self):
+        def page(_path, params):
+            index = params["index"]
+            return {"data": [
+                {"id": track_id, "title": f"T{track_id}", "rank": track_id}
+                for track_id in range(index + 1, index + 101)
+            ]}
+
+        with mock.patch.object(deezer_backend, "_api_get",
+                               side_effect=page) as api:
+            items = deezer_backend.search("example")
+
+        self.assertEqual(len(items), 200)
+        self.assertEqual(
+            [call.args for call in api.call_args_list],
+            [("/search/track", {"q": "example", "limit": 100, "index": 0}),
+             ("/search/track", {"q": "example", "limit": 100, "index": 100})],
+        )
+
     def test_download_uses_plural_tokens_and_actual_media_format(self):
         session = {
             "api_token": "csrf",

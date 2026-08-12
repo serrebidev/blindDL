@@ -62,8 +62,8 @@ AUDIOBOOK_SUBFOLDER = "Audiobooks"
 SEARCH_TIMEOUT_S = 5.0
 HTTP_TIMEOUT_S = 20
 DOWNLOAD_TIMEOUT_S = 300
-SEARCH_ROWS = 30
-MAX_RESULTS_PER_SOURCE = 25
+SEARCH_ROWS = 200
+MAX_RESULTS_PER_SOURCE = 200
 # audiobooker scores 0-1; below this a hit is a different book entirely.
 MIN_SCORE = 0.45
 # blindDL's own 0-100 lexical floor, applied to every source alike.

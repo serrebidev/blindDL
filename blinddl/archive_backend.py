@@ -93,8 +93,8 @@ HTTP_TIMEOUT_S = 20
 # host quickly, then be patient with a live one that is simply slow.
 METADATA_TIMEOUT_S = (5, 45)
 DOWNLOAD_TIMEOUT_S = 600
-SEARCH_ROWS = 40
-MAX_RESULTS_PER_SOURCE = 25
+SEARCH_ROWS = 200
+MAX_RESULTS_PER_SOURCE = 200
 MIN_MATCH_SCORE = 30.0
 
 # Playable formats, best first. The Archive publishes the same recording

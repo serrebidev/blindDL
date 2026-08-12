@@ -146,7 +146,7 @@ PROVIDERS = {
                 "sorting_gay": "1",
                 "sorting_order": "most-popular",
                 "sorting_low_quality": "1",
-                "per_page": 20,
+                "per_page": 200,
                 "pages": 1,
                 "load_html": False,
                 "load_api": False,
@@ -164,7 +164,7 @@ PROVIDERS = {
         ),
         Provider(
             "missav", "MissAV", "missav_api", ("missav.ws",),
-            "search", {"video_count": 20, "load_html": True},
+            "search", {"video_count": 200, "load_html": True},
             search_categories=(CONTENT_STRAIGHT,),
         ),
         Provider(
@@ -287,7 +287,7 @@ BOYFRIEND_KEY = "boyfriendtv"
 BOYFRIEND_LABEL = "BoyfriendTV"
 BOYFRIEND_DOMAINS = ("boyfriendtv.com",)
 MAX_CONCURRENT_SEARCHES = 4
-MAX_RESULTS_PER_SITE = 30
+MAX_RESULTS_PER_SITE = 200
 _search_slots = threading.BoundedSemaphore(MAX_CONCURRENT_SEARCHES)
 _aebn_init_lock = threading.Lock()
 _provider_logging_lock = threading.Lock()

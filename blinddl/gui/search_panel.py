@@ -14,6 +14,7 @@ import wx
 from .. import (
     adult_backend,
     archive_backend,
+    applemusic_backend,
     audiobook_backend,
     bandcamp_backend,
     book_backend,
@@ -1067,12 +1068,14 @@ class SearchPanel(wx.Panel):
                 items = []
             elif engine == ENGINE_SOUNDCLOUD:
                 items, _title = ytdlp_backend.extract_flat(
-                    f"scsearch30:{query}", order=order
+                    f"scsearch200:{query}", order=order
                 )
             elif engine == ENGINE_BANDCAMP:
                 items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
-                items = []  # Apple Music search needs MusicKit API
+                items = applemusic_backend.search(
+                    query, self.frame.config, order=order
+                )
             elif engine == ENGINE_DEEZER:
                 items = deezer_backend.search(query, self.frame.config, order=order)
             elif _is_adult_engine(engine):
@@ -1773,6 +1776,7 @@ class SearchPanel(wx.Panel):
         audio_only = self.result_engine in (
             ENGINE_MUSIC,
             ENGINE_DEEZER,
+            ENGINE_APPLE_MUSIC,
             ENGINE_SOUNDCLOUD,
             ENGINE_BANDCAMP,
             ENGINE_AUDIOBOOKS,
@@ -1876,6 +1880,11 @@ class SearchPanel(wx.Panel):
                 elif _is_adult_engine(engine):
                     added.append(
                         self.frame.queue.add_adult(item, item["title"])
+                    )
+                elif engine == ENGINE_APPLE_MUSIC:
+                    added.append(
+                        self.frame.queue.add_applemusic(
+                            item["url"], item["title"])
                     )
                 else:
                     added.append(

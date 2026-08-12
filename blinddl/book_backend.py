@@ -66,9 +66,9 @@ SEARCH_TIMEOUT_S = 5.0
 # on a slow host for the rest of the session.
 HTTP_TIMEOUT_S = 20
 # Results requested per source before filtering and ranking.
-SEARCH_ROWS = 40
-# Ranked results kept per source. Enough to choose from, short enough to read.
-MAX_RESULTS_PER_SOURCE = 25
+SEARCH_ROWS = 200
+# Ranked results kept per source. A broad list so a search returns plenty.
+MAX_RESULTS_PER_SOURCE = 200
 # Below this similarity a hit is noise rather than a different edition.
 MIN_SCORE = 35.0
 
