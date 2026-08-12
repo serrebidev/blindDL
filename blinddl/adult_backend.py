@@ -286,9 +286,7 @@ def supports_order(key, order):
 BOYFRIEND_KEY = "boyfriendtv"
 BOYFRIEND_LABEL = "BoyfriendTV"
 BOYFRIEND_DOMAINS = ("boyfriendtv.com",)
-MAX_CONCURRENT_SEARCHES = 4
 MAX_RESULTS_PER_SITE = 200
-_search_slots = threading.BoundedSemaphore(MAX_CONCURRENT_SEARCHES)
 _aebn_init_lock = threading.Lock()
 _provider_logging_lock = threading.Lock()
 _provider_logging_depth = 0
@@ -871,7 +869,10 @@ def _unwrap(result):
 def _first_attr(obj, *names):
     for name in names:
         try:
-            value = getattr(obj, name)
+            value = (
+                obj.get(name) if isinstance(obj, dict)
+                else getattr(obj, name)
+            )
         except Exception:  # noqa: BLE001 - third-party lazy properties can fail
             continue
         if inspect.isawaitable(value):
@@ -923,7 +924,8 @@ def _normalize(provider, media):
     if isinstance(artist, (list, tuple, set)):
         artist = ", ".join(str(value) for value in artist if value)
     duration = _first_attr(
-        media, "duration", "length_seconds", "video_duration", "length",
+        media, "duration", "length_seconds", "length_sec", "video_duration",
+        "length",
     )
     media_id = _first_attr(media, "video_id", "id", "key") or url
     content_values = []
@@ -1041,8 +1043,80 @@ def _search_parameters(provider, query, category, order=ORDER_RELEVANCE):
     return categorized_query, kwargs
 
 
+def _supported_search_kwargs(method, kwargs):
+    """Adapt settings across the old and current unofficial API releases."""
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD
+           for parameter in parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in parameters}
+
+
+def _iterator_config(method):
+    """Bound nested work while all top-level providers run concurrently."""
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return None
+    if "iterator_config" not in parameters:
+        return None
+    try:
+        from base_api.modules.config import IteratorConfig
+    except ImportError:
+        return None
+    return IteratorConfig(
+        max_page_concurrency=1,
+        max_item_concurrency=1,
+        order="original",
+    )
+
+
+def _search_eporner(query, category, order):
+    """Search EPorner's public JSON API.
+
+    Its wrapper still calls the pre-2026 base-api iterator signature and
+    currently fails before making a request. The JSON endpoint is the same
+    endpoint that wrapper targets and already contains the metadata needed by
+    the results list.
+    """
+    provider = PROVIDERS["eporner"]
+    categorized_query, kwargs = _search_parameters(
+        provider, query, category, order)
+    response = requests.get(
+        "https://www.eporner.com/api/v2/video/search/",
+        params={
+            "query": categorized_query,
+            "per_page": kwargs["per_page"],
+            "page": 1,
+            "thumbsize": "medium",
+            "order": kwargs["sorting_order"],
+            "gay": kwargs["sorting_gay"],
+            "lq": kwargs["sorting_low_quality"],
+            "format": "json",
+        },
+        headers={"User-Agent": _UA},
+        timeout=30,
+    )
+    response.raise_for_status()
+    items = []
+    for media in response.json().get("videos", ()):
+        item = _normalize(provider, media)
+        if item:
+            item["adult_category"] = category
+            items.append(item)
+        if len(items) >= MAX_RESULTS_PER_SITE:
+            break
+    return items
+
+
 async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
                           order=ORDER_RELEVANCE):
+    if provider.key == "eporner":
+        return await asyncio.to_thread(
+            _search_eporner, query, category, order)
     if provider.key == "thisvid":
         return await asyncio.to_thread(_search_thisvid, query, category)
     if provider.key == "mymusclevideo":
@@ -1055,6 +1129,10 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
     method = getattr(client, provider.search_method)
     categorized_query, kwargs = _search_parameters(
         provider, query, category, order)
+    kwargs = _supported_search_kwargs(method, kwargs)
+    iterator_config = _iterator_config(method)
+    if iterator_config is not None:
+        kwargs["iterator_config"] = iterator_config
     results = method(categorized_query, **kwargs)
     if inspect.isawaitable(results):
         results = await results
@@ -1080,14 +1158,14 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
     return items
 
 
-def search(query, timeout_s=10.0, on_site=None, stop=None, sources=None,
+def search(query, timeout_s=30.0, on_site=None, stop=None, sources=None,
            category=CONTENT_STRAIGHT, order=ORDER_RELEVANCE):
     """Search selected API providers concurrently.
 
     Returns ``(items, answered, asked)`` with the same contract as
     :func:`musicdl_backend.search`.  Slow sites may report later through
-    ``on_site``; a shared gate prevents repeated searches from multiplying
-    active network work.
+    ``on_site``. Every selected provider starts immediately; nested work inside
+    current API wrappers is kept to one page and one item at a time.
 
     ``order`` is one of :mod:`search_order`'s constants.  A provider whose
     own search cannot sort that way returns its relevance ranking, and these
@@ -1107,20 +1185,19 @@ def search(query, timeout_s=10.0, on_site=None, stop=None, sources=None,
 
     def search_one(key):
         provider = PROVIDERS[key]
-        with _search_slots:
-            if stop is not None and stop.is_set():
-                return
-            try:
-                with _silence_provider_logging():
-                    items = asyncio.run(
-                        _collect_search(provider, query, stop, category,
-                                        order))
-                items = [
-                    item for item in items
-                    if _matches_content_category(item, category)
-                ]
-            except Exception:  # noqa: BLE001 - one provider cannot kill the rest
-                items = []
+        if stop is not None and stop.is_set():
+            return
+        try:
+            with _silence_provider_logging():
+                items = asyncio.run(
+                    _collect_search(provider, query, stop, category,
+                                    order))
+            items = [
+                item for item in items
+                if _matches_content_category(item, category)
+            ]
+        except Exception:  # noqa: BLE001 - one provider cannot kill the rest
+            items = []
         with found_lock:
             found[key] = items
         if on_site is not None and (stop is None or not stop.is_set()):

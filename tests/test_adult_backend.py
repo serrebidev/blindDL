@@ -2,6 +2,9 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
+import asyncio
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -10,11 +13,15 @@ from blinddl import adult_backend, search_order
 
 
 class _Response:
-    def __init__(self, text):
+    def __init__(self, text, payload=None):
         self.text = text
+        self.payload = payload
 
     def raise_for_status(self):
         return None
+
+    def json(self):
+        return self.payload
 
 
 class AdultProviderTests(unittest.TestCase):
@@ -64,6 +71,49 @@ class AdultProviderTests(unittest.TestCase):
             else:
                 self.assertEqual(query, f"massage {category}")
             self.assertEqual(kwargs["sorting_gay"], expected_filter)
+
+    def test_eporner_native_search_normalizes_public_api_results(self):
+        payload = {"videos": [{
+            "url": "https://www.eporner.com/video-example/",
+            "title": "Example",
+            "keywords": "amateur",
+            "length_sec": 42,
+        }]}
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response("", payload)) as get:
+            items = adult_backend._search_eporner(
+                "amateur", adult_backend.CONTENT_STRAIGHT,
+                search_order.ORDER_RELEVANCE)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "Example")
+        self.assertEqual(items[0]["duration_s"], 42)
+        self.assertEqual(items[0]["adult_category"], "straight")
+        self.assertEqual(get.call_args.kwargs["params"]["gay"], "0")
+
+    def test_current_provider_signature_drops_obsolete_options(self):
+        calls = []
+
+        class Client:
+            async def search_videos(
+                    self, query, pages=1, iterator_config=None):
+                calls.append((query, pages, iterator_config))
+                if False:
+                    yield None
+
+        provider = adult_backend.PROVIDERS["pornhub"]
+        with mock.patch.object(
+                adult_backend, "_import_provider",
+                return_value=(types.SimpleNamespace(), Client())):
+            items = asyncio.run(adult_backend._collect_search(
+                provider, "amateur", None,
+                adult_backend.CONTENT_STRAIGHT))
+
+        self.assertEqual(items, [])
+        self.assertEqual(calls[0][0], "amateur straight")
+        self.assertEqual(calls[0][1], 1)
+        self.assertIsNotNone(calls[0][2])
 
     def test_xnxx_uses_native_mode_for_every_content_category(self):
         provider = adult_backend.PROVIDERS["xnxx"]
@@ -495,6 +545,45 @@ class AdultProviderTests(unittest.TestCase):
 
         collect.assert_not_called()
         self.assertEqual(asked, [])
+
+    def test_search_starts_every_selected_provider_at_once(self):
+        sources = [
+            "eporner", "hqporner", "missav", "pornhub",
+            "porntrex", "redtube", "thisvid", "tube8",
+        ]
+        state = {"active": 0, "maximum": 0}
+        lock = threading.Lock()
+        release = threading.Event()
+
+        async def collect(*args, **kwargs):
+            with lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+            try:
+                await asyncio.to_thread(release.wait, 2)
+                return []
+            finally:
+                with lock:
+                    state["active"] -= 1
+
+        try:
+            with mock.patch.object(
+                    adult_backend, "_collect_search", side_effect=collect):
+                adult_backend.search(
+                    "amateur", timeout_s=0.2, sources=sources,
+                    category=adult_backend.CONTENT_STRAIGHT)
+        finally:
+            release.set()
+
+        deadline = time.monotonic() + 2
+        while (any(thread.name.startswith("adult-search-")
+                   for thread in threading.enumerate()) and
+               time.monotonic() < deadline):
+            time.sleep(0.01)
+
+        self.assertEqual(state["maximum"], len(sources))
+        self.assertFalse(any(thread.name.startswith("adult-search-")
+                             for thread in threading.enumerate()))
 
     def test_thisvid_url_inspection_uses_bundled_ytdlp(self):
         extracted = [{
