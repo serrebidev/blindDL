@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact upstream musicdl vendor snapshot; see musicdl/VENDORED.md"
+paths = [
+  '''^musicdl/''',
+]
+
+[[allowlists]]
+description = "Generated and ignored local artifacts"
+paths = [
+  '''^(?:build|dist|release)/''',
+  '''(?:^|/)__pycache__/''',
+]

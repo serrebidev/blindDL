@@ -18,7 +18,8 @@ import os
 import threading
 
 import requests
-from Crypto.Cipher import Blowfish
+# Deezer itself defines Blowfish as the cipher for this stream format.
+from Crypto.Cipher import Blowfish  # nosec B413
 
 from . import search_order
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
@@ -123,7 +124,11 @@ def _track_id(url):
 
 
 def _blowfish_key(track_id):
-    digest = hashlib.md5(str(track_id).encode()).hexdigest()
+    # Deezer's stream format specifies this derivation; it is not a password
+    # or integrity hash.
+    digest = hashlib.md5(
+        str(track_id).encode(), usedforsecurity=False
+    ).hexdigest()
     return bytes(ord(digest[i]) ^ ord(digest[i + 16]) ^ _KEY_SECRET[i]
                  for i in range(16))
 
@@ -140,7 +145,9 @@ def _decrypt_stream(response, track_id, dest_path, progress_cb, cancel_event):
                 os.remove(dest_path)
                 raise DownloadCancelled()
             if len(chunk) == _CHUNK and index % 3 == 0:
-                cipher = Blowfish.new(key, Blowfish.MODE_CBC, _IV)
+                cipher = Blowfish.new(  # nosec B304
+                    key, Blowfish.MODE_CBC, _IV
+                )
                 chunk = cipher.decrypt(chunk)
             out.write(chunk)
             downloaded += len(chunk)

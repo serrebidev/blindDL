@@ -31,7 +31,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify Python syntax
-        run: python -m compileall -q main.py blinddl scripts tools tests
+        run: python -m compileall -q main.py blinddl musicdl sideb scripts tools tests
       - name: Verify SPDX headers
         run: |
           missing="$(find blinddl scripts tools tests -name '*.py' -type f -print0 | xargs -0 grep -L 'SPDX-License-Identifier: MIT' || true)"

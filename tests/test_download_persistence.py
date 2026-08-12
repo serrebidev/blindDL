@@ -59,6 +59,24 @@ class DownloadPersistenceTests(unittest.TestCase):
         self.assertEqual(restored.items[0].payload["picture"], b"small")
         self.assertEqual(restored.items[0].id, active.id)
 
+    def test_batch_additions_persists_once_and_notifies_every_item(self):
+        with tempfile.TemporaryDirectory() as folder:
+            notified = []
+            queue = DownloadQueue(
+                self.config(),
+                notified.append,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            with mock.patch.object(queue, "_save_state") as save:
+                with queue.batch_additions():
+                    for number in range(100):
+                        queue.add_ytdlp(f"https://example/{number}", str(number))
+
+        save.assert_called_once_with()
+        self.assertEqual(len(notified), 100)
+        self.assertEqual(queue.counts(), (0, 100, 0, 0))
+
     def test_musicdl_song_info_round_trips_without_pickle(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder) / "downloads.json"

@@ -835,9 +835,14 @@ class SettingsDialog(wx.Dialog):
             browsers_to_try.remove(configured)
             browsers_to_try.insert(0, configured)
 
-        out = tempfile.mktemp(suffix=".txt", prefix="am_cookies_")
+        descriptor, out = tempfile.mkstemp(suffix=".txt", prefix="am_cookies_")
+        os.close(descriptor)
         errors = []
         for browser in browsers_to_try:
+            # Do not mistake a previous browser's partial export for this
+            # browser's successful result.
+            with open(out, "wb"):
+                pass
             try:
                 opts = {
                     "cookiesfrombrowser": (browser,),
@@ -858,6 +863,11 @@ class SettingsDialog(wx.Dialog):
                 self.frame.announce(f"Apple Music cookies exported from {browser}.")
                 return
             errors.append(f"{browser}: exported empty file")
+
+        try:
+            os.remove(out)
+        except OSError:
+            pass
 
         wx.MessageBox(
             "Could not export Apple Music cookies from any browser:\n\n"

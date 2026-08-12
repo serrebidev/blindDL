@@ -8,6 +8,8 @@ import threading
 import unittest
 from unittest import mock
 
+from defusedxml.common import EntitiesForbidden
+
 from blinddl import annas_backend, book_backend, search_order
 
 
@@ -210,6 +212,15 @@ class StandardEbooksTests(unittest.TestCase):
         self.assertEqual(items[0]["size_bytes"], 1107183)
         self.assertEqual(items[0]["year"], "2018")
 
+    def test_remote_feed_entities_are_rejected(self):
+        malicious_feed = b"""<?xml version="1.0"?>
+        <!DOCTYPE feed [<!ENTITY payload "untrusted">]>
+        <feed><title>&payload;</title></feed>"""
+        with mock.patch.object(book_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(content=malicious_feed)
+            with self.assertRaises(EntitiesForbidden):
+                book_backend.search_standard_ebooks("test")
+
 
 class AnnasArchiveTests(unittest.TestCase):
     ROW = (
@@ -282,13 +293,13 @@ class AnnasArchiveTests(unittest.TestCase):
     def test_libgen_keyed_link_is_pulled_out_of_the_ads_page(self):
         md5 = "f8e1b8738bc552abe59a5b99e316b19b"
         page = (f'<a href="setlang.php?md5={md5}&lang=ru">ru</a>'
-                f'<a href="get.php?md5={md5}&key=W8LRDYOR4ZPXS7OZ">GET</a>')
+                f'<a href="get.php?md5={md5}&key=TESTKEY">GET</a>')
         with mock.patch.object(annas_backend, "_get",
                                return_value=_Response(text=page)):
             url = annas_backend.libgen_download_url(md5)
 
         self.assertEqual(
-            url, f"https://libgen.li/get.php?md5={md5}&key=W8LRDYOR4ZPXS7OZ")
+            url, f"https://libgen.li/get.php?md5={md5}&key=TESTKEY")
 
 
 class DownloadTests(unittest.TestCase):

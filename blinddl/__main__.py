@@ -51,8 +51,12 @@ def _self_test(output_path: str) -> int:
     check("wx_media", lambda: __import__(
         "wx.media", fromlist=["MediaCtrl"]).__name__)
     check("yt_dlp", lambda: __import__("yt_dlp.version", fromlist=["__version__"]).__version__)
+    check("yt_dlp_ejs", lambda: __import__("yt_dlp_ejs").__name__)
+    check("websockets", lambda: __import__("websockets").__version__)
+    check("tzdata", lambda: __import__("tzdata").__version__)
     check("sideb", lambda: __import__("sideb.app.main", fromlist=["Application"]).__name__)
     check("crypto", lambda: __import__("Crypto.Cipher.Blowfish", fromlist=["new"]).__name__)
+    check("cryptography", lambda: __import__("cryptography").__version__)
     check("libtorrent", lambda: __import__("libtorrent").__version__)
     check("audiobooker", lambda: __import__("audiobooker").__name__)
     check("curl_cffi", lambda: __import__("curl_cffi").__version__)

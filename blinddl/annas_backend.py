@@ -231,7 +231,7 @@ def libgen_download_url(md5, timeout=HTTP_TIMEOUT_S):
     for mirror in LIBGEN_MIRRORS:
         try:
             response = _get(f"{mirror}/ads.php", params={"md5": md5},
-                            timeout=timeout, verify=False)
+                            timeout=timeout)
         except Exception:  # noqa: BLE001 - try the next mirror
             continue
         if response.status_code != 200:
@@ -263,5 +263,5 @@ def resolve_download(md5, member_key=""):
 
 def open_stream(url, timeout=DOWNLOAD_TIMEOUT_S):
     """Start a streamed GET for a resolved download URL."""
-    return _get(url, timeout=timeout, verify=False, allow_redirects=True,
+    return _get(url, timeout=timeout, allow_redirects=True,
                 stream=True)

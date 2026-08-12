@@ -11,6 +11,7 @@ libtorrent's own units.
 """
 
 import unittest
+import threading
 from unittest import mock
 
 from blinddl import torrent_engine
@@ -214,6 +215,18 @@ class RatioTests(unittest.TestCase):
         status = mock.Mock(all_time_upload=2000, all_time_download=1000,
                            total_wanted=1000)
         self.assertEqual(torrent_engine._ratio(status), 2.0)
+
+
+class UploadSnapshotTests(unittest.TestCase):
+    def test_uploads_uses_the_maintenance_cache_without_calling_libtorrent(self):
+        engine = object.__new__(torrent_engine.TorrentEngine)
+        engine._lock = threading.RLock()
+        engine._uploads_cache = [{"key": "abc", "title": "Release"}]
+
+        rows = engine.uploads()
+
+        self.assertEqual(rows, [{"key": "abc", "title": "Release"}])
+        self.assertIsNot(rows[0], engine._uploads_cache[0])
 
 
 class AvailabilityTests(unittest.TestCase):

@@ -4,6 +4,8 @@
 
 """Packaged builds must never depend on user-installed developer tools."""
 
+import stat
+import zipfile
 from unittest import mock
 
 import pytest
@@ -138,3 +140,31 @@ def test_download_with_a_bad_checksum_is_deleted(tmp_path):
             updater.download_app_update(update)
 
     assert not list(tmp_path.rglob("*.part"))
+
+
+def test_update_transport_rejects_non_https_urls():
+    with pytest.raises(updater.UpdateError, match="non-HTTPS"):
+        updater._open_url("file:///tmp/blinddl-update.zip")
+
+
+def test_portable_update_rejects_parent_directory_paths(tmp_path):
+    archive = tmp_path / "traversal.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("../outside.exe", b"unsafe")
+
+    with pytest.raises(updater.UpdateError, match="unsafe path"):
+        updater._safe_extract_zip(archive, tmp_path / "destination")
+
+    assert not (tmp_path / "outside.exe").exists()
+
+
+def test_portable_update_rejects_symbolic_links(tmp_path):
+    archive = tmp_path / "link.zip"
+    link = zipfile.ZipInfo("blindDL/link")
+    link.create_system = 3
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(link, "../outside.exe")
+
+    with pytest.raises(updater.UpdateError, match="unsafe link"):
+        updater._safe_extract_zip(archive, tmp_path / "destination")

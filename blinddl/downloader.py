@@ -11,6 +11,7 @@ only by the user's max_concurrent setting.
 """
 
 import base64
+from contextlib import contextmanager
 import enum
 import json
 import os
@@ -104,12 +105,24 @@ class DownloadQueue:
         self._wanted_torrent_workers = 0
         self._shutting_down = False
         self._save_lock = threading.Lock()
+        self._batch_depth = 0
+        self._batched_items = []
+        self._known_statuses = {}
+        self._status_counts = {
+            STATUS_DOWNLOADING: 0,
+            STATUS_QUEUED: 0,
+            STATUS_DONE: 0,
+            STATUS_ERROR: 0,
+            STATUS_CANCELLED: 0,
+        }
         self._state_path = (
             os.path.join(app_data_dir(), "downloads.json")
             if state_path is None
             else os.fspath(state_path) if state_path else None
         )
         self._load_state()
+        with self._cond:
+            self._rebuild_counts_locked()
         if start_workers:
             self.start()
 
@@ -169,11 +182,45 @@ class DownloadQueue:
     def add(self, item):
         with self._cond:
             self.items.append(item)
+            if self._batch_depth:
+                self._batched_items.append(item)
+                return
             # Two pools wait on this condition and only one of them can take
             # a given item, so every waiter has to look.
             self._cond.notify_all()
         self._save_state()
         self._notify(item)
+
+    @contextmanager
+    def batch_additions(self):
+        """Persist and wake workers once for a group of queue additions.
+
+        GUI actions can add hundreds of files at once. Holding the queue's
+        re-entrant condition across the group keeps workers from observing a
+        half-built batch, while the outermost context performs just one JSON
+        serialization and fsync.
+        """
+        items = []
+        outermost = False
+        self._cond.acquire()
+        try:
+            outermost = self._batch_depth == 0
+            self._batch_depth += 1
+            try:
+                yield
+            finally:
+                self._batch_depth -= 1
+                if outermost:
+                    items = self._batched_items
+                    self._batched_items = []
+                    if items:
+                        self._cond.notify_all()
+        finally:
+            self._cond.release()
+            if outermost and items:
+                self._save_state()
+                for item in items:
+                    self._notify(item)
 
     def add_ytdlp(self, url, title, audio_only=None):
         if audio_only is None:
@@ -253,6 +300,7 @@ class DownloadQueue:
                 item for item in self.items
                 if item.status not in FINISHED_STATUSES or item.seeding
             ]
+            self._rebuild_counts_locked()
         self._save_state()
 
     def mark_torrent_stopped(self, key, title=""):
@@ -297,12 +345,32 @@ class DownloadQueue:
 
     def counts(self):
         with self._cond:
-            snapshot = list(self.items)
-        active = sum(1 for i in snapshot if i.status == STATUS_DOWNLOADING)
-        queued = sum(1 for i in snapshot if i.status == STATUS_QUEUED)
-        done = sum(1 for i in snapshot if i.status == STATUS_DONE)
-        failed = sum(1 for i in snapshot if i.status in (STATUS_ERROR, STATUS_CANCELLED))
-        return active, queued, done, failed
+            return (
+                self._status_counts[STATUS_DOWNLOADING],
+                self._status_counts[STATUS_QUEUED],
+                self._status_counts[STATUS_DONE],
+                self._status_counts[STATUS_ERROR]
+                + self._status_counts[STATUS_CANCELLED],
+            )
+
+    def _rebuild_counts_locked(self):
+        self._known_statuses.clear()
+        for status in self._status_counts:
+            self._status_counts[status] = 0
+        for item in self.items:
+            self._known_statuses[item.id] = item.status
+            if item.status in self._status_counts:
+                self._status_counts[item.status] += 1
+
+    def _record_status_locked(self, item):
+        previous = self._known_statuses.get(item.id)
+        if previous == item.status:
+            return
+        if previous in self._status_counts:
+            self._status_counts[previous] -= 1
+        self._known_statuses[item.id] = item.status
+        if item.status in self._status_counts:
+            self._status_counts[item.status] += 1
 
     def _find(self, item_id):
         with self._cond:
@@ -481,6 +549,8 @@ class DownloadQueue:
             if now - item._last_notify < 0.5 and item.status == STATUS_DOWNLOADING:
                 return
             item._last_notify = now
+        with self._cond:
+            self._record_status_locked(item)
         if self.notify is not None:
             self.notify(item)
 

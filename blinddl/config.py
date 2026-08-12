@@ -215,10 +215,31 @@ class Config:
                 saved = json.load(f)
         except (OSError, json.JSONDecodeError):
             return
+        if not isinstance(saved, dict):
+            return
         for key, value in saved.items():
-            if key in self.data:
-                self.data[key] = value
-        self._migrate(int(saved.get("config_version", 0) or 0))
+            if key not in self.data:
+                continue
+            default = self.data[key]
+            if isinstance(default, bool):
+                if not isinstance(value, bool):
+                    continue
+            elif isinstance(default, int):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                value = int(value)
+            elif isinstance(default, float):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                value = float(value)
+            elif not isinstance(value, type(default)):
+                continue
+            self.data[key] = value
+        try:
+            from_version = int(saved.get("config_version", 0) or 0)
+        except (TypeError, ValueError):
+            from_version = 0
+        self._migrate(from_version)
 
     def _migrate(self, from_version):
         """Carry changed defaults into a config written by an older blindDL.

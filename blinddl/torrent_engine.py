@@ -214,7 +214,10 @@ def _fetch_latest_qbittorrent():
         "User-Agent": "blindDL",
     })
     try:
-        with urlopen(request, timeout=VERSION_FETCH_TIMEOUT_S) as response:
+        # The URL is a module constant using HTTPS, never user-controlled.
+        with urlopen(  # nosec B310
+            request, timeout=VERSION_FETCH_TIMEOUT_S
+        ) as response:
             payload = json.load(response)
     except Exception:  # noqa: BLE001 - any network/parse failure is the same
         return None
@@ -416,6 +419,7 @@ class TorrentEngine:
         self._lt = lt
         self._lock = threading.RLock()
         self._torrents = {}
+        self._uploads_cache = []
         self._settings = session_settings(config)
         self.session = lt.session(dict(self._settings))
         self._stop = threading.Event()
@@ -517,6 +521,9 @@ class TorrentEngine:
         lt = self._lt
         with self._lock:
             self._torrents.pop(torrent.key, None)
+            self._uploads_cache = [
+                row for row in self._uploads_cache if row["key"] != torrent.key
+            ]
             torrent.stopping = True
         try:
             if delete_files:
@@ -555,17 +562,28 @@ class TorrentEngine:
         return rows
 
     def uploads(self):
-        """Structured snapshots for the Uploads tab."""
+        """Cached snapshots for the Uploads tab, with no libtorrent call."""
+        with self._lock:
+            return [dict(row) for row in self._uploads_cache]
+
+    def _seed_statuses(self):
+        """Read native statuses on the engine's maintenance thread."""
         with self._lock:
             torrents = list(self._torrents.values())
-        rows = []
+        statuses = []
         for torrent in torrents:
-            if not torrent.finished_at:
+            if torrent.stopping or not torrent.finished_at:
                 continue
             try:
                 status = torrent.handle.status()
             except RuntimeError:
                 continue
+            statuses.append((torrent, status))
+        return statuses
+
+    def _cache_uploads(self, statuses):
+        rows = []
+        for torrent, status in statuses:
             ratio = _ratio(status)
             peers = max(0, int(getattr(status, "num_peers", 0) or 0))
             rows.append(
@@ -585,7 +603,8 @@ class TorrentEngine:
                     "completed_at": None,
                 }
             )
-        return rows
+        with self._lock:
+            self._uploads_cache = rows
 
     # -- background upkeep -------------------------------------------------
 
@@ -593,7 +612,9 @@ class TorrentEngine:
         while not self._stop.is_set():
             try:
                 self._drain_alerts()
-                self._enforce_seed_limits()
+                statuses = self._seed_statuses()
+                self._cache_uploads(statuses)
+                self._enforce_seed_limits(statuses)
                 self._maybe_save_resume()
             except Exception:  # noqa: BLE001 - a background thread must live
                 pass
@@ -605,20 +626,15 @@ class TorrentEngine:
             if isinstance(alert, lt.save_resume_data_alert):
                 self._write_resume(alert)
 
-    def _enforce_seed_limits(self):
+    def _enforce_seed_limits(self, statuses=None):
         """Drop torrents that have met the user's ratio or time limit."""
         with self._lock:
-            torrents = list(self._torrents.values())
             ratio_limit = self._seed_ratio
             minute_limit = self._seed_minutes
+        if statuses is None:
+            statuses = self._seed_statuses()
         now = time.time()
-        for torrent in torrents:
-            if torrent.stopping or not torrent.finished_at:
-                continue
-            try:
-                status = torrent.handle.status()
-            except RuntimeError:
-                continue
+        for torrent, status in statuses:
             if ratio_limit > 0 and _ratio(status) >= ratio_limit:
                 self.remove(torrent)
             elif (minute_limit > 0 and
@@ -717,6 +733,7 @@ class TorrentEngine:
             time.sleep(0.1)
         with self._lock:
             self._torrents.clear()
+            self._uploads_cache = []
 
 
 def _needs_resume(torrent):

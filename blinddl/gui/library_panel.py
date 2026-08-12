@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import threading
 
 import wx
 
@@ -120,6 +121,10 @@ class LibraryPanel(wx.Panel):
         super().__init__(parent)
         self.frame = frame
         self.items = []
+        self._alive = True
+        self._refreshing = False
+        self._pending_refresh = None
+        self._announce_refresh = False
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
@@ -153,20 +158,62 @@ class LibraryPanel(wx.Panel):
         self.refresh(announce=False)
 
     def refresh(self, announce=True):
+        if not self._alive:
+            return
         selected_path = None
         selected = self.list.GetFirstSelected()
         if 0 <= selected < len(self.items):
             selected_path = self.items[selected]["path"]
-        self.items = discover_media(self.frame.config["download_dir"])
-        self.list.DeleteAllItems()
+        self._announce_refresh = self._announce_refresh or announce
+        # Keep only the newest request while a walk is running. A burst of
+        # completed downloads therefore causes one follow-up scan, not one
+        # recursive walk per file.
+        self._pending_refresh = (
+            self.frame.config["download_dir"],
+            selected_path,
+        )
+        self._start_refresh()
+
+    def _start_refresh(self):
+        if not self._alive or self._refreshing or self._pending_refresh is None:
+            return
+        root, selected_path = self._pending_refresh
+        self._pending_refresh = None
+        self._refreshing = True
+        threading.Thread(
+            target=self._discover,
+            args=(root, selected_path),
+            daemon=True,
+            name="blinddl-library-scan",
+        ).start()
+
+    def _discover(self, root, selected_path):
+        items = discover_media(root)
+        wx.CallAfter(self._refresh_finished, items, selected_path)
+
+    def _refresh_finished(self, items, selected_path):
+        if not self._alive:
+            return
+        self._refreshing = False
+        if self._pending_refresh is not None:
+            self._start_refresh()
+            return
+        announce = self._announce_refresh
+        self._announce_refresh = False
+        self.items = items
+        self.list.Freeze()
         selected_row = -1
-        for row, item in enumerate(self.items):
-            self.list.InsertItem(row, item["title"])
-            self.list.SetItem(row, 1, item["kind"])
-            self.list.SetItem(row, 2, item["folder"])
-            self.list.SetItem(row, 3, _format_size(item["size"]))
-            if item["path"] == selected_path:
-                selected_row = row
+        try:
+            self.list.DeleteAllItems()
+            for row, item in enumerate(self.items):
+                self.list.InsertItem(row, item["title"])
+                self.list.SetItem(row, 1, item["kind"])
+                self.list.SetItem(row, 2, item["folder"])
+                self.list.SetItem(row, 3, _format_size(item["size"]))
+                if item["path"] == selected_path:
+                    selected_row = row
+        finally:
+            self.list.Thaw()
         if selected_row >= 0:
             self.list.Select(selected_row)
             self.list.Focus(selected_row)
@@ -228,4 +275,6 @@ class LibraryPanel(wx.Panel):
             open_folder(os.path.dirname(item["path"]))
 
     def shutdown(self):
+        self._alive = False
+        self._pending_refresh = None
         self.player.shutdown()

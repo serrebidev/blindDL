@@ -352,17 +352,18 @@ class UserBrowserDialog(wx.Dialog):
 
     def _queue_files(self, files, folder=""):
         queued = 0
-        for original in files:
-            if original.get("locked"):
-                continue
-            item = dict(original)
-            if folder:
-                relative = ntpath.relpath(item["remote_path"], folder)
-                item["target_relative_path"] = ntpath.join(
-                    ntpath.basename(folder.rstrip("\\")), relative
-                )
-            self.frame.queue.add_soulseek(item, item["title"])
-            queued += 1
+        with self.frame.queue.batch_additions():
+            for original in files:
+                if original.get("locked"):
+                    continue
+                item = dict(original)
+                if folder:
+                    relative = ntpath.relpath(item["remote_path"], folder)
+                    item["target_relative_path"] = ntpath.join(
+                        ntpath.basename(folder.rstrip("\\")), relative
+                    )
+                self.frame.queue.add_soulseek(item, item["title"])
+                queued += 1
         if queued:
             self.frame.announce(f"Queued {queued} Soulseek file{'s' if queued != 1 else ''}.")
         else:

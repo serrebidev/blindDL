@@ -34,7 +34,7 @@ import os
 import re
 import threading
 import time
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlencode

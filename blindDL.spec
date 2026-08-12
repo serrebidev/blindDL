@@ -145,7 +145,6 @@ hiddenimports.append("libtorrent")
 for distribution in (
     "wxPython",
     "yt-dlp",
-    "musicdl",
     "sideb",
     "requests",
     "mutagen",

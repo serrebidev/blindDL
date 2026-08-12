@@ -15,6 +15,7 @@ class DownloadsPanel(wx.Panel):
         super().__init__(parent)
         self.frame = frame
         self._rows = {}  # item.id -> row index
+        self._values = {}  # item.id -> last values written to the native list
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -39,23 +40,34 @@ class DownloadsPanel(wx.Panel):
             row = self.list.GetItemCount()
             self.list.InsertItem(row, item.title)
             self._rows[item.id] = row
-        self.list.SetItem(row, 0, item.title)
-        self.list.SetItem(row, 1, item.status)
         if (item.status == STATUS_DOWNLOADING and
                 item.kind in ("musicdl", "adult", "soulseek") and
                 not item.percent):
-            self.list.SetItem(row, 2, "in progress")
+            progress = "in progress"
         elif item.percent:
-            self.list.SetItem(row, 2, f"{item.percent:.0f}%")
+            progress = f"{item.percent:.0f}%"
         else:
-            self.list.SetItem(row, 2, "")
-        self.list.SetItem(row, 3, item.speed)
-        self.list.SetItem(row, 4, item.eta)
-        self.list.SetItem(row, 5, item.error)
+            progress = ""
+        values = (
+            item.title,
+            item.status,
+            progress,
+            item.speed,
+            item.eta,
+            item.error,
+        )
+        previous = self._values.get(item.id)
+        # InsertItem already wrote a new row's title.
+        start = 1 if previous is None else 0
+        for column in range(start, len(values)):
+            if previous is None or previous[column] != values[column]:
+                self.list.SetItem(row, column, values[column])
+        self._values[item.id] = values
 
     def refresh_all(self):
         self.list.DeleteAllItems()
         self._rows.clear()
+        self._values.clear()
         for item in self.frame.queue.items:
             self.update_item(item)
 

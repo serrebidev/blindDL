@@ -1367,7 +1367,7 @@ def _download_aebn(payload, out_dir, progress_cb=None, cancel_event=None):
     # sys.excepthook in Downloader.__init__. A quiet constructor keeps the GUI
     # accessible and avoids global process changes. The lock makes that brief
     # module-level substitution safe with concurrent downloads.
-    def quiet_logger(name, log_level):
+    def quiet_logger(name, _log_level):
         logger = logging.Logger(f"blinddl.aebn.{name}", logging.CRITICAL)
         logger.addHandler(logging.NullHandler())
         return logger

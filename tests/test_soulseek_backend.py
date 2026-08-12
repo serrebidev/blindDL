@@ -132,9 +132,12 @@ class SoulseekBackendTests(unittest.TestCase):
         self.assertEqual(item["availability"], "free slot, 3 waiting, 2.0 MB/s average")
 
     def test_downloader_reports_soulseek_progress(self):
-        queue = object.__new__(DownloadQueue)
-        queue.config = self.config("downloads")
-        queue.notify = mock.Mock()
+        queue = DownloadQueue(
+            self.config("downloads"),
+            mock.Mock(),
+            state_path="",
+            start_workers=False,
+        )
         item = DownloadItem(
             "Track.flac",
             "soulseek",

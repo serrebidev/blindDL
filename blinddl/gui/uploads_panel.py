@@ -58,7 +58,11 @@ class UploadsPanel(wx.Panel):
         self.timer.Stop()
 
     def handle_soulseek_event(self, event):
-        if self._alive and event.get("type") == "uploads":
+        if (
+            self._alive
+            and self.IsShownOnScreen()
+            and event.get("type") == "uploads"
+        ):
             self.refresh(event.get("uploads", []))
 
     def on_timer(self, event=None):
@@ -94,18 +98,30 @@ class UploadsPanel(wx.Panel):
             return
         self._signature = signature
         self._rows = rows
-        self.list.DeleteAllItems()
-        for upload in rows:
-            row = self.list.InsertItem(self.list.GetItemCount(), upload.get("title", ""))
-            self.list.SetItem(row, 1, upload.get("service", ""))
-            self.list.SetItem(row, 2, upload.get("peer", ""))
-            self.list.SetItem(row, 3, upload.get("status", ""))
-            percent = upload.get("percent")
-            self.list.SetItem(row, 4, f"{float(percent):.0f}%" if percent is not None else "")
-            speed = float(upload.get("speed") or 0)
-            self.list.SetItem(row, 5, f"{_size(speed)}/s" if speed else "")
-            ratio = upload.get("ratio")
-            self.list.SetItem(row, 6, f"{float(ratio):.2f}" if ratio is not None else "")
+        self.list.Freeze()
+        try:
+            self.list.DeleteAllItems()
+            for upload in rows:
+                row = self.list.InsertItem(
+                    self.list.GetItemCount(), upload.get("title", "")
+                )
+                self.list.SetItem(row, 1, upload.get("service", ""))
+                self.list.SetItem(row, 2, upload.get("peer", ""))
+                self.list.SetItem(row, 3, upload.get("status", ""))
+                percent = upload.get("percent")
+                self.list.SetItem(
+                    row,
+                    4,
+                    f"{float(percent):.0f}%" if percent is not None else "",
+                )
+                speed = float(upload.get("speed") or 0)
+                self.list.SetItem(row, 5, f"{_size(speed)}/s" if speed else "")
+                ratio = upload.get("ratio")
+                self.list.SetItem(
+                    row, 6, f"{float(ratio):.2f}" if ratio is not None else ""
+                )
+        finally:
+            self.list.Thaw()
 
     def _selected(self):
         selected = []

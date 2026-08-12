@@ -6,7 +6,8 @@ and their transitive dependencies:
 
 - wxPython — wxWindows Library Licence
 - yt-dlp — The Unlicense
-- musicdl — PolyForm Noncommercial License 1.0.0
+- musicdl — PolyForm Noncommercial License 1.0.0 (vendored in `musicdl/`;
+  see `musicdl/VENDORED.md`)
 - Side B — MIT License (vendored in `sideb/`; see `sideb/VENDORED.md`)
 - Requests — Apache License 2.0
 - Mutagen — GNU General Public License v2 or later
@@ -20,6 +21,11 @@ and their transitive dependencies:
 - mediavocab — Apache License 2.0
 - feedparser — BSD 2-Clause License
 - Beautiful Soup — MIT License
+
+defusedxml is distributed under the Python Software Foundation License and is
+used to parse untrusted remote XML feeds safely.
+The IANA timezone database is distributed through the Python `tzdata` package
+under the Apache License 2.0.
 
 Book, audiobook and Internet Archive searches use each site's own public API:
 archive.org, openlibrary.org, gutendex.com, standardebooks.org, and Anna's

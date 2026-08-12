@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+from contextlib import nullcontext
 import logging
 import os
 import tempfile
@@ -34,7 +35,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
-    from blinddl.gui.library_panel import discover_media
+    from blinddl.gui.library_panel import LibraryPanel, discover_media
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
     from blinddl.gui.messages_panel import MessagesPanel
     from blinddl.gui import media_player
@@ -93,6 +94,8 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     )
     from blinddl.gui.uploads_panel import UploadsPanel
     from blinddl.gui.tray import TrayIcon, app_icon
+    from blinddl.gui.update_dialog import UpdateDialog
+    from blinddl.gui.url_panel import UrlPanel
 
 
 class _Clipboard:
@@ -143,6 +146,9 @@ class _Queue:
 
     def add_soulseek(self, payload, title):
         self.calls.append(("soulseek", payload, title))
+
+    def batch_additions(self):
+        return nullcontext()
 
     def _find(self, item_id):
         return next((item for item in self.items if item.id == item_id), None)
@@ -260,6 +266,83 @@ class GuiInteractionTests(unittest.TestCase):
             self.assertTrue(tray.is_available())
         finally:
             tray.dispose()
+
+    def test_url_enter_does_not_start_a_second_inspection(self):
+        panel = UrlPanel(self.host, self.frame)
+        panel.url_text.SetValue("https://example.test/media")
+        panel.download_btn.Disable()
+
+        with mock.patch("blinddl.gui.url_panel.threading.Thread") as thread:
+            panel.on_download(None)
+
+        thread.assert_not_called()
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_apple_music_fallback_error_is_labelled_correctly(self):
+        panel = UrlPanel(self.host, self.frame)
+        self.frame.config["cookies_from_browser"] = None
+        errors = []
+
+        with (
+            mock.patch(
+                "blinddl.gui.url_panel.wx.CallAfter",
+                side_effect=lambda callback, *args: callback(*args),
+            ),
+            mock.patch(
+                "blinddl.gui.url_panel.adult_backend.is_supported_url",
+                return_value=False,
+            ),
+            mock.patch(
+                "blinddl.gui.url_panel.sideb_backend.is_deezer_url",
+                return_value=False,
+            ),
+            mock.patch(
+                "blinddl.gui.url_panel.applemusic_backend.is_apple_music_url",
+                return_value=True,
+            ),
+            mock.patch(
+                "blinddl.gui.url_panel.applemusic_backend.extract_flat",
+                side_effect=RuntimeError("cookies expired"),
+            ),
+            mock.patch(
+                "blinddl.gui.url_panel.ytdlp_backend.extract_flat",
+                side_effect=RuntimeError("unsupported URL"),
+            ),
+            mock.patch.object(panel, "_inspect_failed", side_effect=errors.append),
+        ):
+            panel._inspect("https://music.apple.com/album/test", True)
+
+        self.assertEqual(
+            errors,
+            ["Apple Music: cookies expired\nyt-dlp: unsupported URL"],
+        )
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_busy_update_dialog_vetoes_title_bar_close(self):
+        with mock.patch("blinddl.gui.update_dialog.threading.Thread"):
+            dialog = UpdateDialog(self.host)
+        event = mock.Mock()
+        event.CanVeto.return_value = True
+
+        dialog._on_close(event)
+
+        event.Veto.assert_called_once_with()
+        self.assertTrue(dialog._alive)
+        dialog._busy = False
+        dialog.Destroy()
+
+    def test_destroyed_update_dialog_ignores_queued_log_writes(self):
+        with mock.patch("blinddl.gui.update_dialog.threading.Thread"):
+            dialog = UpdateDialog(self.host)
+        dialog._alive = False
+
+        with mock.patch.object(dialog.log_text, "AppendText") as append:
+            dialog._append_log("late message\n")
+
+        append.assert_not_called()
+        dialog.Destroy()
 
     def test_window_is_never_hidden_without_an_installed_tray_icon(self):
         tray = SimpleNamespace(is_available=lambda: False)
@@ -443,6 +526,63 @@ class GuiInteractionTests(unittest.TestCase):
                     str(root / "plugins"),
                 )
 
+    def test_media_timer_skips_unchanged_accessible_values(self):
+        panel = SimpleNamespace(
+            _loaded=True,
+            _length=lambda: 10_000,
+            _tell=lambda: 1_000,
+            _updating_position=False,
+            time_text=mock.Mock(),
+            position=mock.Mock(),
+        )
+        panel.time_text.GetLabel.return_value = "0:01 / 0:10"
+        panel.position.GetValue.return_value = 100
+        panel.position.HasFocus.return_value = False
+        panel._set_time = lambda current, length: media_player.MediaPlayerPanel._set_time(
+            panel, current, length
+        )
+
+        media_player.MediaPlayerPanel._on_timer(panel, None)
+
+        panel.time_text.SetLabel.assert_not_called()
+        panel.position.SetValue.assert_not_called()
+
+    def test_media_timer_does_not_move_a_focused_seek_slider(self):
+        panel = SimpleNamespace(
+            _loaded=True,
+            _length=lambda: 10_000,
+            _tell=lambda: 5_000,
+            _updating_position=False,
+            time_text=mock.Mock(),
+            position=mock.Mock(),
+        )
+        panel.time_text.GetLabel.return_value = "0:04 / 0:10"
+        panel.position.HasFocus.return_value = True
+        panel._set_time = lambda current, length: media_player.MediaPlayerPanel._set_time(
+            panel, current, length
+        )
+
+        media_player.MediaPlayerPanel._on_timer(panel, None)
+
+        panel.time_text.SetLabel.assert_called_once_with("0:05 / 0:10")
+        panel.position.SetValue.assert_not_called()
+
+    def test_media_players_share_one_vlc_runtime(self):
+        runtime = object()
+        fake_vlc = SimpleNamespace(Instance=mock.Mock(return_value=runtime))
+        with (
+            mock.patch.object(media_player, "vlc", fake_vlc),
+            mock.patch.object(media_player, "_shared_vlc_instance", None),
+        ):
+            first = media_player._get_vlc_instance()
+            second = media_player._get_vlc_instance()
+
+        self.assertIs(first, runtime)
+        self.assertIs(second, runtime)
+        fake_vlc.Instance.assert_called_once_with(
+            "--quiet", "--no-video-title-show", "--no-snapshot-preview"
+        )
+
     def test_completed_download_only_rescans_visible_library(self):
         frame = SimpleNamespace(
             _closing=False,
@@ -479,6 +619,29 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in items], ["Audio", "Video"])
         self.assertEqual(items[1]["folder"], "Videos")
 
+    def test_library_refresh_runs_off_thread_and_coalesces_requests(self):
+        file_list = mock.Mock()
+        file_list.GetFirstSelected.return_value = -1
+        panel = SimpleNamespace(
+            _alive=True,
+            _refreshing=False,
+            _pending_refresh=None,
+            _announce_refresh=False,
+            items=[],
+            list=file_list,
+            frame=SimpleNamespace(config={"download_dir": "C:\\Media"}),
+            _discover=mock.Mock(),
+        )
+        panel._start_refresh = lambda: LibraryPanel._start_refresh(panel)
+        with mock.patch("blinddl.gui.library_panel.threading.Thread") as worker:
+            LibraryPanel.refresh(panel, announce=False)
+            LibraryPanel.refresh(panel, announce=False)
+
+        worker.assert_called_once()
+        worker.return_value.start.assert_called_once_with()
+        self.assertTrue(panel._refreshing)
+        self.assertEqual(panel._pending_refresh, ("C:\\Media", None))
+
     def test_search_queues_adult_api_result(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ADULT
@@ -511,23 +674,51 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(panel.search_btn.IsEnabled())
 
     def test_a_late_result_announces_the_site_it_came_from(self):
-        # _insert_deduped announced a name that only ever existed as a local
-        # in _item_quality, so a result arriving after the search deadline
-        # raised NameError instead of reaching the screen reader.
         panel = SearchPanel(self.host, self.frame)
+        panel.token = token = object()
         panel.done = True
-        panel.results = []
+        panel.asked = ["Bandcamp"]
 
-        panel._insert_deduped(
-            {
+        panel._add_site(
+            token,
+            ENGINE_MUSIC,
+            "Bandcamp",
+            [{
                 "title": "Late Arrival",
                 "artist": "Someone",
                 "source": "Bandcamp",
                 "kind": "music",
-            }
+            }],
         )
 
         self.assertIn("Bandcamp", self.frame.messages[-1])
+
+    def test_search_dedup_uses_one_key_lookup_per_unique_result(self):
+        panel = SearchPanel(self.host, self.frame)
+        original = panel._dedup_key
+        with mock.patch.object(panel, "_dedup_key", wraps=original) as dedup:
+            for number in range(500):
+                panel._insert_deduped(
+                    {"title": f"Track {number}", "artist": "Artist"}
+                )
+
+        self.assertEqual(dedup.call_count, 500)
+
+    def test_provider_results_are_coalesced_before_rendering(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.token = token = object()
+        with mock.patch.object(panel, "_render_results") as render:
+            panel._add_site(
+                token, ENGINE_MUSIC, "One", [{"title": "One", "artist": "A"}]
+            )
+            panel._add_site(
+                token, ENGINE_MUSIC, "Two", [{"title": "Two", "artist": "B"}]
+            )
+            render.assert_not_called()
+
+            panel._flush_results()
+
+        render.assert_called_once()
 
     def test_adult_combo_choices_follow_master_setting(self):
         self.frame.config["adult_sites_enabled"] = False
@@ -680,6 +871,26 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(panel.results_list.IsSelected(1))
         self.assertEqual(panel.results_list.GetFocusedItem(), 1)
         self.assertEqual(self.frame.messages[-1], "Sorted 2 results by Name.")
+
+    def test_search_sort_reindexes_late_duplicate_replacement(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_MUSIC
+        panel._insert_deduped(
+            {"title": "Zulu", "artist": "Artist", "format": "MP3"}
+        )
+        panel._insert_deduped(
+            {"title": "Alpha", "artist": "Artist", "format": "MP3"}
+        )
+        panel._render_results(ENGINE_MUSIC)
+        panel.sort_choice.SetSelection(SORT_NAME)
+        panel.on_sort_changed(None)
+
+        panel._insert_deduped(
+            {"title": "Zulu", "artist": "Artist", "format": "FLAC"}
+        )
+
+        self.assertEqual([item["title"] for item in panel.results], ["Alpha", "Zulu"])
+        self.assertEqual(panel.results[1]["format"], "FLAC")
 
     def test_each_adult_combo_choice_routes_its_category(self):
         panel = SearchPanel(self.host, self.frame)
@@ -993,6 +1204,21 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(config.saved)
         dialog.Destroy()
 
+    def test_failed_cookie_export_removes_secure_temporary_file(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+        descriptor, path = tempfile.mkstemp(suffix=".txt")
+
+        with (
+            mock.patch("tempfile.mkstemp", return_value=(descriptor, path)),
+            mock.patch("yt_dlp.YoutubeDL", side_effect=RuntimeError("locked")),
+            mock.patch.object(wx, "MessageBox"),
+        ):
+            dialog._on_am_copy_cookies(None)
+
+        self.assertFalse(os.path.exists(path))
+        dialog.Destroy()
+
     def test_soulseek_settings_save_credentials_sharing_and_extra_folders(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)
@@ -1259,6 +1485,21 @@ class GuiInteractionTests(unittest.TestCase):
         panel.shutdown()
         panel.Destroy()
 
+    def test_hidden_uploads_panel_ignores_progress_pushes(self):
+        with mock.patch(
+            "blinddl.gui.uploads_panel.torrent_engine.uploads", return_value=[]
+        ):
+            panel = UploadsPanel(self.host, self.frame)
+        with (
+            mock.patch.object(panel, "IsShownOnScreen", return_value=False),
+            mock.patch.object(panel, "refresh") as refresh,
+        ):
+            panel.handle_soulseek_event({"type": "uploads", "uploads": [{}]})
+
+        refresh.assert_not_called()
+        panel.shutdown()
+        panel.Destroy()
+
     def test_sources_dialog_lists_general_adult_providers_together(self):
         config = _SettingsConfig()
         config["adult_sites_enabled"] = True
@@ -1289,6 +1530,21 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(panel.stop.is_set())
         self.assertFalse(panel.timer.IsRunning())
         self.assertEqual(panel.results, [])
+
+    def test_download_progress_only_writes_changed_cells(self):
+        item = DownloadItem("Track", "ytdlp", "https://example/track")
+        native_list = mock.Mock()
+        native_list.GetItemCount.return_value = 0
+        panel = SimpleNamespace(list=native_list, _rows={}, _values={})
+
+        DownloadsPanel.update_item(panel, item)
+        native_list.SetItem.reset_mock()
+        DownloadsPanel.update_item(panel, item)
+
+        native_list.SetItem.assert_not_called()
+        item.percent = 25
+        DownloadsPanel.update_item(panel, item)
+        native_list.SetItem.assert_called_once_with(0, 2, "25%")
 
     def test_downloads_cancel_multiple_and_clear_finished(self):
         panel = DownloadsPanel(self.host, self.frame)

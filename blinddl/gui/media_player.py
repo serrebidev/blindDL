@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 from urllib.parse import urlparse
 
 import wx
@@ -51,6 +52,24 @@ try:
 except (ImportError, NotImplementedError, OSError, SystemExit):
     # Native libVLC is optional at runtime; wx.media remains available.
     vlc = None
+
+
+_shared_vlc_instance = None
+_shared_vlc_lock = threading.Lock()
+PLAYBACK_TIMER_MS = 1000
+
+
+def _get_vlc_instance():
+    """Create one libVLC runtime shared by every player surface."""
+    global _shared_vlc_instance
+    if vlc is None:
+        return None
+    with _shared_vlc_lock:
+        if _shared_vlc_instance is None:
+            _shared_vlc_instance = vlc.Instance(
+                "--quiet", "--no-video-title-show", "--no-snapshot-preview"
+            )
+        return _shared_vlc_instance
 
 
 def _clock(milliseconds):
@@ -140,8 +159,7 @@ class MediaPlayerPanel(wx.Panel):
     def _create_media_surface(self):
         if vlc is not None:
             try:
-                self._vlc_instance = vlc.Instance(
-                    "--quiet", "--no-video-title-show", "--no-snapshot-preview")
+                self._vlc_instance = _get_vlc_instance()
                 self._vlc_player = self._vlc_instance.media_player_new()
                 self._vlc_events = self._vlc_player.event_manager()
                 self._vlc_events.event_attach(
@@ -153,8 +171,6 @@ class MediaPlayerPanel(wx.Panel):
             except Exception:  # noqa: BLE001 - fall back when libVLC is absent
                 if self._vlc_player is not None:
                     self._vlc_player.release()
-                if self._vlc_instance is not None:
-                    self._vlc_instance.release()
                 self._vlc_player = None
                 self._vlc_instance = None
                 self._vlc_events = None
@@ -224,7 +240,7 @@ class MediaPlayerPanel(wx.Panel):
         self._enable_controls(True)
         self.now_playing.SetLabel(f"Now playing: {self._title}")
         self.play_btn.SetLabel("&Pause")
-        self.timer.Start(250)
+        self.timer.Start(PLAYBACK_TIMER_MS)
         self.frame.announce(f"Playing: {self._title}")
 
     def _on_finished(self, event):
@@ -263,7 +279,7 @@ class MediaPlayerPanel(wx.Panel):
             self.frame.announce("Paused.")
         elif self._play():
             self.play_btn.SetLabel("&Pause")
-            self.timer.Start(250)
+            self.timer.Start(PLAYBACK_TIMER_MS)
             self.frame.announce(f"Playing: {self._title}")
 
     def on_stop(self, event):
@@ -338,7 +354,9 @@ class MediaPlayerPanel(wx.Panel):
             self.media.SetVolume(value / 100.0)
 
     def _set_time(self, current, length):
-        self.time_text.SetLabel(f"{_clock(current)} / {_clock(length)}")
+        label = f"{_clock(current)} / {_clock(length)}"
+        if label != self.time_text.GetLabel():
+            self.time_text.SetLabel(label)
 
     def _on_timer(self, event):
         if not self._loaded:
@@ -346,10 +364,16 @@ class MediaPlayerPanel(wx.Panel):
         length = self._length()
         current = self._tell()
         self._set_time(current, length)
-        if length > 0 and current >= 0:
+        # Do not send unsolicited accessibility value-change events while a
+        # screen-reader user is positioned on the seek control. Their own
+        # arrow-key changes still go through on_seek immediately.
+        if length > 0 and current >= 0 and not self.position.HasFocus():
+            value = min(1000, int(current * 1000 / length))
+            if value == self.position.GetValue():
+                return
             self._updating_position = True
             try:
-                self.position.SetValue(min(1000, int(current * 1000 / length)))
+                self.position.SetValue(value)
             finally:
                 self._updating_position = False
 
@@ -365,7 +389,6 @@ class MediaPlayerPanel(wx.Panel):
             self._vlc_events.event_detach(
                 vlc.EventType.MediaPlayerEncounteredError)
             self._vlc_player.release()
-            self._vlc_instance.release()
             self._vlc_player = None
             self._vlc_instance = None
 

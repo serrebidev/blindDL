@@ -5,6 +5,7 @@
 """Search tab: music, books, audiobooks, Archive media, adult sites, yt-dlp."""
 
 import ntpath
+import re
 import threading
 import time
 
@@ -543,6 +544,7 @@ class SearchPanel(wx.Panel):
         super().__init__(parent)
         self.frame = frame
         self.results = []
+        self._result_index = {}
         self.result_engine = 0
         self.token = None  # identifies the current search
         self.stop = None  # set to silence a superseded search's late sites
@@ -562,6 +564,11 @@ class SearchPanel(wx.Panel):
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
+        # Many providers finish together. Coalesce their GUI work so the
+        # native list and accessibility tree are rebuilt at most ten times a
+        # second instead of once per provider.
+        self.render_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._flush_results, self.render_timer)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -735,6 +742,7 @@ class SearchPanel(wx.Panel):
         if self.stop is not None:
             self.stop.set()
         self.timer.Stop()
+        self.render_timer.Stop()
         self.player.shutdown()
 
     # -- search -----------------------------------------------------------
@@ -863,6 +871,7 @@ class SearchPanel(wx.Panel):
             self.stop.set()
         self.stop = threading.Event()
         self.results = []
+        self._result_index = {}
         self.result_engine = engine
         self.shown_sources = set()
         self.asked = []
@@ -870,6 +879,7 @@ class SearchPanel(wx.Panel):
         self.started_at = time.time()
         self.next_result_order = 0
         self.timer.Stop()
+        self.render_timer.Stop()
         self.results_list.DeleteAllItems()
         self._apply_engine_columns(engine)
 
@@ -1111,14 +1121,36 @@ class SearchPanel(wx.Panel):
         self.shown_sources.add(source)
         if not items:
             return
+        changed = False
+        for item in items:
+            changed = self._insert_deduped(item) or changed
+        if not changed:
+            return
+        self.render_timer.StartOnce(100)
+        if self.done:
+            # A late site reports once, not once for every result it returned.
+            self.frame.announce(
+                f"{self._result_count()}, latest from {source}. "
+                f"{self._pending_phrase()}"
+            )
+            if not self._pending():
+                self.timer.Stop()
+
+    def _flush_results(self, event=None):
+        if self.closing:
+            return
+        self.render_timer.Stop()
         selected = self._selected_result_objects()
         focused = self._focused_result_object()
-        for item in items:
-            self._insert_deduped(item)
         self.results = _sorted_results(
-            self.results, self.sort_choice.GetSelection(), engine
+            self.results, self.sort_choice.GetSelection(), self.result_engine
         )
-        self._render_results(engine, selected=selected, focused=focused)
+        self._result_index = {
+            self._dedup_key(item): index for index, item in enumerate(self.results)
+        }
+        self._render_results(
+            self.result_engine, selected=selected, focused=focused
+        )
 
     @staticmethod
     def _dedup_key(item):
@@ -1133,8 +1165,6 @@ class SearchPanel(wx.Panel):
         title = str(item.get("title") or "").strip().lower()
         artist = str(item.get("artist") or "").strip().lower()
         # Remove punctuation and extra whitespace for fuzzy matching.
-        import re
-
         title = re.sub(r"[^\w\s]", "", title)
         artist = re.sub(r"[^\w\s]", "", artist)
         title = " ".join(title.split())
@@ -1171,27 +1201,30 @@ class SearchPanel(wx.Panel):
         """Insert *item*, replacing a duplicate if this one is higher quality."""
         key = self._dedup_key(item)
         if not key:
-            return
-        for i, existing in enumerate(self.results):
-            if self._dedup_key(existing) == key:
-                if self._item_quality(item) > self._item_quality(existing):
-                    # Replace the lower-quality entry, keeping the newer
-                    # position in the result list.
-                    item["_search_order"] = existing.get("_search_order", 0)
-                    self.results[i] = item
-                return
+            return False
+        # Tests and integrations occasionally seed ``results`` directly.
+        # Rebuild once when that happens; ordinary provider inserts keep this
+        # index current in constant time.
+        if len(self._result_index) != len(self.results):
+            self._result_index = {
+                self._dedup_key(existing): index
+                for index, existing in enumerate(self.results)
+            }
+        existing_index = self._result_index.get(key)
+        if existing_index is not None:
+            existing = self.results[existing_index]
+            if self._item_quality(item) > self._item_quality(existing):
+                # Replace the lower-quality entry without changing its
+                # provider arrival order.
+                item["_search_order"] = existing.get("_search_order", 0)
+                self.results[existing_index] = item
+                return True
+            return False
         item["_search_order"] = self.next_result_order
         self.next_result_order += 1
+        self._result_index[key] = len(self.results)
         self.results.append(item)
-        if self.done:
-            # A late site: say so on the status bar, but leave focus alone.
-            source = str(item.get("source", "") or "")
-            self.frame.announce(
-                f"{self._result_count()}, latest from {source}. "
-                f"{self._pending_phrase()}"
-            )
-            if not self._pending():
-                self.timer.Stop()
+        return True
 
     def _insert_result_row(self, row, item, engine):
         self.results_list.InsertItem(row, item["title"])
@@ -1262,19 +1295,27 @@ class SearchPanel(wx.Panel):
     def _render_results(self, engine, selected=(), focused=None):
         selected_ids = {id(item) for item in selected}
         self._apply_engine_columns(engine)
-        self.results_list.DeleteAllItems()
-        for row, item in enumerate(self.results):
-            self._insert_result_row(row, item, engine)
-            if id(item) in selected_ids:
-                self.results_list.Select(row)
-            if item is focused:
-                self.results_list.Focus(row)
+        self.results_list.Freeze()
+        try:
+            self.results_list.DeleteAllItems()
+            for row, item in enumerate(self.results):
+                self._insert_result_row(row, item, engine)
+                if id(item) in selected_ids:
+                    self.results_list.Select(row)
+                if item is focused:
+                    self.results_list.Focus(row)
+        finally:
+            self.results_list.Thaw()
 
     def on_sort_changed(self, event):
+        self.render_timer.Stop()
         selected = self._selected_result_objects()
         focused = self._focused_result_object()
         mode = self.sort_choice.GetSelection()
         self.results = _sorted_results(self.results, mode, self.result_engine)
+        self._result_index = {
+            self._dedup_key(item): index for index, item in enumerate(self.results)
+        }
         self._render_results(self.result_engine, selected=selected, focused=focused)
         labels = _sort_labels(self.result_engine)
         label = labels[mode] if 0 <= mode < len(labels) else "selected order"
@@ -1323,6 +1364,7 @@ class SearchPanel(wx.Panel):
         self._add_site(token, engine, source, items)
         self.asked = list(asked)
         self.done = True
+        self._flush_results()
         pending = self._pending()
         order_phrase = _order_phrase(
             self.current_order, self.order_unable, self.order_source_count
@@ -1419,10 +1461,11 @@ class SearchPanel(wx.Panel):
         if not chosen:
             self.frame.announce("Nothing selected.")
             return
-        for entry in chosen:
-            payload = dict(entry)
-            payload["collection_title"] = item["title"]
-            self.frame.queue.add_archive(payload, entry["title"])
+        with self.frame.queue.batch_additions():
+            for entry in chosen:
+                payload = dict(entry)
+                payload["collection_title"] = item["title"]
+                self.frame.queue.add_archive(payload, entry["title"])
         if len(chosen) == 1:
             self.frame.announce(f"Queued: {chosen[0]['title']}")
         else:
@@ -1455,40 +1498,41 @@ class SearchPanel(wx.Panel):
         if not urls:
             self.frame.announce("No URL for that result.")
             return
+        self._try_copy_urls(urls, missing)
+
+    def _try_copy_urls(self, urls, missing, attempt=0):
+        """Retry a busy Windows clipboard without blocking the GUI thread."""
+        if self.closing:
+            return
+        silence = wx.LogNull()
+        try:
+            opened = wx.TheClipboard.Open()
+        finally:
+            del silence
         copied = False
-        for attempt in range(20):
-            # Clipboard managers and screen readers can hold OpenClipboard for
-            # a few milliseconds. Suppress the transient wx error and retry
-            # for up to half a second instead of making Ctrl+C randomly fail.
-            silence = wx.LogNull()
+        if opened:
             try:
-                opened = wx.TheClipboard.Open()
+                set_ok = bool(
+                    wx.TheClipboard.SetData(wx.TextDataObject("\n".join(urls)))
+                )
+                if set_ok:
+                    # Keep the URL on the clipboard after blindDL exits.
+                    copied = bool(wx.TheClipboard.Flush())
             finally:
-                del silence
-            if opened:
-                try:
-                    set_ok = bool(
-                        wx.TheClipboard.SetData(wx.TextDataObject("\n".join(urls)))
-                    )
-                    if set_ok:
-                        # Keep the URL on the clipboard after blindDL exits.
-                        copied = bool(wx.TheClipboard.Flush())
-                finally:
-                    wx.TheClipboard.Close()
-                if copied:
-                    break
-            if attempt < 19:
-                time.sleep(0.025)
-        if not copied:
+                wx.TheClipboard.Close()
+        if copied:
+            noun = "URL" if len(urls) == 1 else "URLs"
+            message = f"Copied {len(urls)} {noun}."
+            if missing:
+                message += f" {missing} had no URL."
+            self.frame.announce(message)
+            return
+        if attempt < 19:
+            wx.CallLater(25, self._try_copy_urls, urls, missing, attempt + 1)
+        else:
             self.frame.announce(
                 "The clipboard is busy. Wait a moment and press Control+C again."
             )
-            return
-        noun = "URL" if len(urls) == 1 else "URLs"
-        message = f"Copied {len(urls)} {noun}."
-        if missing:
-            message += f" {missing} had no URL."
-        self.frame.announce(message)
 
     def _target_context_item(self, event):
         """Make a right-clicked row the target while preserving a group click."""
@@ -1639,13 +1683,14 @@ class SearchPanel(wx.Panel):
         ).start()
 
     def _queue_soulseek_folder(self, folder, files):
-        for original in files:
-            item = dict(original)
-            relative = ntpath.relpath(item["remote_path"], folder)
-            item["target_relative_path"] = ntpath.join(
-                ntpath.basename(folder.rstrip("\\")), relative
-            )
-            self.frame.queue.add_soulseek(item, item["title"])
+        with self.frame.queue.batch_additions():
+            for original in files:
+                item = dict(original)
+                relative = ntpath.relpath(item["remote_path"], folder)
+                item["target_relative_path"] = ntpath.join(
+                    ntpath.basename(folder.rstrip("\\")), relative
+                )
+                self.frame.queue.add_soulseek(item, item["title"])
         if files:
             self.frame.announce(f"Queued {len(files)} files from {folder}.")
         else:
@@ -1752,31 +1797,36 @@ class SearchPanel(wx.Panel):
             # episodes to take before filling the queue with hundreds.
             self._queue_archive_item(self.results[indices[0]])
             return
-        for index in indices:
-            item = self.results[index]
-            if item.get("kind") == "soulseek":
-                self.frame.queue.add_soulseek(item, item["title"])
-            elif engine == ENGINE_MUSIC:
-                if item.get("kind") in ("sideb", "deezer"):
-                    self.frame.queue.add_sideb(item["url"], item["title"])
+        with self.frame.queue.batch_additions():
+            for index in indices:
+                item = self.results[index]
+                if item.get("kind") == "soulseek":
+                    self.frame.queue.add_soulseek(item, item["title"])
+                elif engine == ENGINE_MUSIC:
+                    if item.get("kind") in ("sideb", "deezer"):
+                        self.frame.queue.add_sideb(item["url"], item["title"])
+                    else:
+                        self.frame.queue.add_musicdl(item["song_info"], item["title"])
+                elif engine == ENGINE_BOOKS:
+                    self.frame.queue.add_book(item, item["title"])
+                elif engine == ENGINE_AUDIOBOOKS:
+                    self.frame.queue.add_audiobook(item, item["title"])
+                elif engine == ENGINE_TORRENTS:
+                    self.frame.queue.add_torrent(item, item["title"])
+                elif engine == ENGINE_SOUNDCLOUD:
+                    self.frame.queue.add_ytdlp(
+                        item["url"], item["title"], audio_only=True
+                    )
+                elif engine == ENGINE_BANDCAMP:
+                    self.frame.queue.add_ytdlp(
+                        item["url"], item["title"], audio_only=True
+                    )
+                elif _is_archive_engine(engine):
+                    self.frame.queue.add_archive(item, item["title"])
+                elif _is_adult_engine(engine):
+                    self.frame.queue.add_adult(item, item["title"])
                 else:
-                    self.frame.queue.add_musicdl(item["song_info"], item["title"])
-            elif engine == ENGINE_BOOKS:
-                self.frame.queue.add_book(item, item["title"])
-            elif engine == ENGINE_AUDIOBOOKS:
-                self.frame.queue.add_audiobook(item, item["title"])
-            elif engine == ENGINE_TORRENTS:
-                self.frame.queue.add_torrent(item, item["title"])
-            elif engine == ENGINE_SOUNDCLOUD:
-                self.frame.queue.add_ytdlp(item["url"], item["title"], audio_only=True)
-            elif engine == ENGINE_BANDCAMP:
-                self.frame.queue.add_ytdlp(item["url"], item["title"], audio_only=True)
-            elif _is_archive_engine(engine):
-                self.frame.queue.add_archive(item, item["title"])
-            elif _is_adult_engine(engine):
-                self.frame.queue.add_adult(item, item["title"])
-            else:
-                self.frame.queue.add_ytdlp(item["url"], item["title"])
+                    self.frame.queue.add_ytdlp(item["url"], item["title"])
         if len(indices) == 1:
             self.frame.announce(f"Queued: {self.results[indices[0]]['title']}")
         else:

@@ -160,7 +160,9 @@ def _onlyfans_headers(url, auth, rules):
     message = "\n".join((
         str(rules["static_param"]), timestamp, target, "0",
     )).encode("utf-8")
-    digest = hashlib.sha1(message).hexdigest()
+    # OnlyFans defines SHA-1 as part of its request-signing wire protocol;
+    # this is not used to protect local credentials or stored data.
+    digest = hashlib.sha1(message, usedforsecurity=False).hexdigest()
     checksum = (
         sum(ord(digest[int(index)]) for index in rules["checksum_indexes"])
         + int(rules["checksum_constant"])

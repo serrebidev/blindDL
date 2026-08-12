@@ -9,6 +9,7 @@ periodically re-lists each subscription URL via yt-dlp flat extraction and
 queues anything not in the stored seen-ids list.
 """
 
+import copy
 import json
 import os
 import threading
@@ -30,6 +31,7 @@ class SubscriptionStore:
         self.path = os.path.join(app_data_dir(), "subscriptions.json")
         self.subs = []
         self._lock = threading.Lock()
+        self._check_lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = False
         self._thread = None
@@ -40,18 +42,56 @@ class SubscriptionStore:
     def load(self):
         try:
             with open(self.path, encoding="utf-8") as f:
-                self.subs = json.load(f)
+                saved = json.load(f)
         except (OSError, json.JSONDecodeError):
             self.subs = []
+            return
+        if not isinstance(saved, list):
+            self.subs = []
+            return
+        self.subs = []
+        for item in saved:
+            if not isinstance(item, dict):
+                continue
+            sub_id = str(item.get("id") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if not sub_id or not url:
+                continue
+            row = dict(item)
+            row["id"] = sub_id
+            row["url"] = url
+            row["title"] = str(item.get("title") or url)
+            row["enabled"] = bool(item.get("enabled", True))
+            if not isinstance(row.get("seen_ids"), list):
+                row["seen_ids"] = []
+            else:
+                row["seen_ids"] = [
+                    str(value)
+                    for value in row["seen_ids"]
+                    if isinstance(value, (str, int, float))
+                    and not isinstance(value, bool)
+                ]
+            self.subs.append(row)
 
     def save(self):
         with self._lock:
-            subs = list(self.subs)
+            subs = copy.deepcopy(self.subs)
+        temporary = self.path + ".tmp"
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
+            with open(temporary, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(subs, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary, self.path)
         except OSError:
-            pass
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
 
     # -- CRUD -------------------------------------------------------------
 
@@ -117,6 +157,10 @@ class SubscriptionStore:
 
         Returns (new_count, error_message).
         """
+        with self._check_lock:
+            return self._check_one(sub_id, audio_only)
+
+    def _check_one(self, sub_id, audio_only=None):
         sub = self.get(sub_id)
         if sub is None:
             return 0, "Subscription not found."
@@ -140,17 +184,19 @@ class SubscriptionStore:
         seen = set(seen_ids)
         new_ids = []
         new_count = 0
-        for item in items:
-            if item["id"] in seen:
-                continue
-            if item.get("kind") == "sideb":
-                self.queue.add_sideb(item["url"], item["title"])
-            else:
-                self.queue.add_ytdlp(item["url"], item["title"],
-                                     audio_only=audio_only)
-            seen.add(item["id"])
-            new_ids.append(item["id"])
-            new_count += 1
+        with self.queue.batch_additions():
+            for item in items:
+                if item["id"] in seen:
+                    continue
+                if item.get("kind") == "sideb":
+                    self.queue.add_sideb(item["url"], item["title"])
+                else:
+                    self.queue.add_ytdlp(
+                        item["url"], item["title"], audio_only=audio_only
+                    )
+                seen.add(item["id"])
+                new_ids.append(item["id"])
+                new_count += 1
         if search_order.normalize(
                 sub.get("order", search_order.ORDER_RELEVANCE)
         ) == search_order.ORDER_RECENT:

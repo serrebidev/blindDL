@@ -104,7 +104,7 @@ class UrlPanel(wx.Panel):
         )
 
     def on_download(self, event):
-        if self.closing:
+        if self.closing or not self.download_btn.IsEnabled():
             return
         url = self.url_text.GetValue().strip()
         if not url:
@@ -132,7 +132,7 @@ class UrlPanel(wx.Panel):
                 return
             except Exception as exc:  # noqa: BLE001 - yt-dlp may still cope
                 adult_error = str(exc)
-        sideb_error = None
+        native_error = None
         if sideb_backend.is_deezer_url(url):
             # Public API first, then fall back to sideb for richer metadata.
             try:
@@ -150,7 +150,7 @@ class UrlPanel(wx.Panel):
                              "sideb")
                 return
             except Exception as exc:  # noqa: BLE001 - yt-dlp may still cope
-                sideb_error = str(exc)
+                native_error = f"Side B: {exc}"
         if applemusic_backend.is_apple_music_url(url):
             try:
                 items, title = applemusic_backend.extract_flat(
@@ -159,15 +159,15 @@ class UrlPanel(wx.Panel):
                              "applemusic")
                 return
             except Exception as exc:
-                sideb_error = str(exc)
+                native_error = f"Apple Music: {exc}"
         try:
             items, title = ytdlp_backend.extract_flat(
                 url, cookies_from_browser=
                 self.frame.config["cookies_from_browser"])
         except Exception as exc:  # noqa: BLE001 - shown to the user
             error = str(exc)
-            if sideb_error:
-                error = f"Side B: {sideb_error}\nyt-dlp: {error}"
+            if native_error:
+                error = f"{native_error}\nyt-dlp: {error}"
             if adult_error:
                 error = f"Adult API: {adult_error}\nyt-dlp: {error}"
             wx.CallAfter(self._inspect_failed, error)
@@ -203,16 +203,18 @@ class UrlPanel(wx.Panel):
                 self.frame.announce("No items selected.")
                 self.url_text.SetFocus()
                 return
-        for item in items:
-            if engine == "applemusic":
-                self.frame.queue.add_applemusic(item["url"], item["title"])
-            elif engine in ("sideb", "deezer"):
-                self.frame.queue.add_sideb(item["url"], item["title"])
-            elif engine == "adult":
-                self.frame.queue.add_adult(item, item["title"])
-            else:
-                self.frame.queue.add_ytdlp(item["url"], item["title"],
-                                           audio_only=audio_only)
+        with self.frame.queue.batch_additions():
+            for item in items:
+                if engine == "applemusic":
+                    self.frame.queue.add_applemusic(item["url"], item["title"])
+                elif engine in ("sideb", "deezer"):
+                    self.frame.queue.add_sideb(item["url"], item["title"])
+                elif engine == "adult":
+                    self.frame.queue.add_adult(item, item["title"])
+                else:
+                    self.frame.queue.add_ytdlp(
+                        item["url"], item["title"], audio_only=audio_only
+                    )
         self.frame.announce(
             f"Queued {len(items)} from {title}."
             if len(items) > 1 else f"Queued: {items[0]['title']}")

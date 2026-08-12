@@ -336,11 +336,12 @@ class SubsPanel(wx.Panel):
         self.frame.subs.add(
             url, title, [i["id"] for i in items], order=order)
         if download_existing:
-            for item in items:
-                if item.get("kind") == "sideb":
-                    self.frame.queue.add_sideb(item["url"], item["title"])
-                else:
-                    self.frame.queue.add_ytdlp(item["url"], item["title"])
+            with self.frame.queue.batch_additions():
+                for item in items:
+                    if item.get("kind") == "sideb":
+                        self.frame.queue.add_sideb(item["url"], item["title"])
+                    else:
+                        self.frame.queue.add_ytdlp(item["url"], item["title"])
             noun = "item" if len(items) == 1 else "items"
             self.frame.announce(
                 f"Subscribed: {title}. Queued {len(items)} {noun}.")

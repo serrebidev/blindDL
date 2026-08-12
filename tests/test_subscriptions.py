@@ -2,7 +2,12 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
+from contextlib import nullcontext
+import json
 import tempfile
+import threading
+import time
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -19,6 +24,9 @@ class _Queue:
 
     def add_sideb(self, url, title):
         self.sideb.append((url, title))
+
+    def batch_additions(self):
+        return nullcontext()
 
 
 def _item(item_id):
@@ -142,6 +150,70 @@ class SubscriptionStoreTests(unittest.TestCase):
         self.assertEqual(error, "no such playlist")
         self.assertEqual(self.store.get(sub["id"])["seen_ids"], ["a"])
         self.assertEqual(self.queue.ytdlp, [])
+
+    def test_wrong_shaped_saved_state_is_ignored(self):
+        path = Path(self.dir.name) / "subscriptions.json"
+        with path.open("w", encoding="utf-8") as stream:
+            json.dump({"not": "a list"}, stream)
+
+        restored = subscriptions.SubscriptionStore(
+            {"cookies_from_browser": None, "sub_check_hours": 6}, self.queue
+        )
+
+        self.assertEqual(restored.snapshot(), [])
+
+    def test_malformed_saved_rows_are_filtered_and_normalized(self):
+        path = Path(self.dir.name) / "subscriptions.json"
+        with path.open("w", encoding="utf-8") as stream:
+            json.dump(
+                [
+                    None,
+                    {"id": "", "url": "https://invalid"},
+                    {"id": "valid", "url": "https://example", "seen_ids": {}},
+                ],
+                stream,
+            )
+
+        restored = subscriptions.SubscriptionStore(
+            {"cookies_from_browser": None, "sub_check_hours": 6}, self.queue
+        )
+
+        self.assertEqual(len(restored.snapshot()), 1)
+        self.assertEqual(restored.get("valid")["seen_ids"], [])
+        self.assertEqual(restored.get("valid")["title"], "https://example")
+
+    def test_overlapping_checks_do_not_queue_the_same_item_twice(self):
+        sub = self.store.add("https://www.youtube.com/@x", "X", [])
+        entered = threading.Event()
+        release = threading.Event()
+
+        def extract(*args, **kwargs):
+            entered.set()
+            release.wait(5)
+            return [_item("a")], "X"
+
+        results = []
+        with mock.patch.object(
+            subscriptions.ytdlp_backend, "extract_flat", side_effect=extract
+        ):
+            first = threading.Thread(
+                target=lambda: results.append(self.store.check_one(sub["id"]))
+            )
+            second = threading.Thread(
+                target=lambda: results.append(self.store.check_one(sub["id"]))
+            )
+            first.start()
+            self.assertTrue(entered.wait(2))
+            second.start()
+            time.sleep(0.05)
+            release.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(self.queue.ytdlp), 1)
+        self.assertEqual(sorted(results), [(0, ""), (1, "")])
 
 
 if __name__ == "__main__":

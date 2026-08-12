@@ -16,6 +16,8 @@ class UpdateDialog(wx.Dialog):
     def __init__(self, parent, on_changed=None):
         super().__init__(parent, title="Check for updates", size=(600, 400))
         self.on_changed = on_changed
+        self._alive = True
+        self._busy = True
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.log_text = wx.TextCtrl(
@@ -25,7 +27,7 @@ class UpdateDialog(wx.Dialog):
         self.install_btn.Bind(wx.EVT_BUTTON, self._on_install)
         self.install_btn.Hide()
         self.close_btn = wx.Button(self, wx.ID_CLOSE, "&Close")
-        self.close_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+        self.close_btn.Bind(wx.EVT_BUTTON, self._on_close_button)
         self.close_btn.Disable()
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
@@ -34,12 +36,18 @@ class UpdateDialog(wx.Dialog):
         sizer.Add(self.log_text, 1, wx.EXPAND | wx.ALL, 8)
         sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizer(sizer)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
 
         self.update = None
         threading.Thread(target=self._run, daemon=True).start()
 
     def _log(self, line):
-        wx.CallAfter(self.log_text.AppendText, line + "\n")
+        wx.CallAfter(self._append_log, line + "\n")
+
+    def _append_log(self, line):
+        if self._alive and not self.IsBeingDeleted():
+            self.log_text.AppendText(line)
 
     def _run(self):
         try:
@@ -54,6 +62,9 @@ class UpdateDialog(wx.Dialog):
         wx.CallAfter(self._finished, changed)
 
     def _finished(self, changed):
+        if not self._alive:
+            return
+        self._busy = False
         if self.update is not None:
             self.install_btn.Show()
             self.install_btn.Enable()
@@ -65,8 +76,9 @@ class UpdateDialog(wx.Dialog):
             self.on_changed()
 
     def _on_install(self, event):
-        if self.update is None:
+        if not self._alive or self.update is None:
             return
+        self._busy = True
         self.install_btn.Disable()
         self.close_btn.Disable()
         threading.Thread(
@@ -85,13 +97,37 @@ class UpdateDialog(wx.Dialog):
         wx.CallAfter(self._install_started, exit_to_update)
 
     def _install_failed(self):
+        if not self._alive:
+            return
+        self._busy = False
         self.install_btn.Enable()
         self.close_btn.Enable()
         self.install_btn.SetFocus()
 
     def _install_started(self, exit_to_update):
+        if not self._alive:
+            return
+        self._busy = False
         if exit_to_update:
             self.EndModal(wx.ID_OK)
             return
         self.close_btn.Enable()
         self.close_btn.SetFocus()
+
+    def _on_close_button(self, event=None):
+        if not self._busy:
+            self.EndModal(wx.ID_CLOSE)
+
+    def _on_close(self, event):
+        if self._busy and event.CanVeto():
+            event.Veto()
+            return
+        if self.IsModal():
+            self.EndModal(wx.ID_CLOSE)
+        else:
+            event.Skip()
+
+    def _on_destroy(self, event):
+        if event.GetEventObject() is self:
+            self._alive = False
+        event.Skip()

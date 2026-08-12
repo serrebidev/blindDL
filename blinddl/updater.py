@@ -5,7 +5,7 @@
 """Keeps blindDL's runtime dependencies up to date.
 
 Covers everything the app relies on:
-- Python packages (pip): yt-dlp, musicdl, wxPython, python-vlc, ytmusicapi,
+- Python packages (pip): yt-dlp, wxPython, python-vlc, ytmusicapi,
   and the rest of requirements.txt. Side B is not among them -- it is
   vendored in ./sideb and travels with blindDL's own releases.
 - Deno: the JavaScript runtime yt-dlp needs for YouTube extraction.
@@ -23,6 +23,7 @@ import json
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -31,6 +32,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from . import __version__
@@ -38,7 +40,8 @@ from .config import app_data_dir
 
 # ytmusicapi is here because Side B is vendored: it breaks whenever YouTube
 # Music changes, and there is no upstream release to pull the fix from.
-PIP_PACKAGES = ["musicdl", "wxPython", "python-vlc", "ytmusicapi"]
+# musicdl and Side B are vendored and update with blindDL itself.
+PIP_PACKAGES = ["wxPython", "python-vlc", "ytmusicapi", "cryptography"]
 # Upgraded only when already present, like the git packages below: libtorrent
 # is the optional in-app torrent engine, and a user who has never turned it
 # on should not have it installed behind their back.
@@ -198,12 +201,14 @@ def _select_update(release):
 
 
 def _open_url(url, timeout=30):
+    if urlparse(str(url)).scheme.casefold() != "https":
+        raise UpdateError("The update server returned a non-HTTPS URL.")
     request = Request(url, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": UPDATE_USER_AGENT,
     })
     try:
-        return urlopen(request, timeout=timeout)
+        return urlopen(request, timeout=timeout)  # nosec B310
     except (HTTPError, URLError, OSError) as exc:
         raise UpdateError(f"Could not reach the update server: {exc}") from exc
 
@@ -273,7 +278,17 @@ def _safe_extract_zip(archive, destination):
             target = (destination / member.filename).resolve()
             if root != target and root not in target.parents:
                 raise UpdateError("The portable update contains an unsafe path.")
-        package.extractall(destination)
+            file_type = (member.external_attr >> 16) & 0o170000
+            if file_type == stat.S_IFLNK:
+                raise UpdateError("The portable update contains an unsafe link.")
+        for member in package.infolist():
+            target = (destination / member.filename).resolve()
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with package.open(member) as source, open(target, "wb") as output:
+                shutil.copyfileobj(source, output)
 
 
 def _portable_windows_update(package_path, version):
