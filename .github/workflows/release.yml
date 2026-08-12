@@ -39,9 +39,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
+      - name: Install Deno
+        run: python scripts/install_deno.py
       - name: Install build tools
         shell: bash
         run: |
@@ -122,6 +121,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Install Deno
+        run: python scripts/install_deno.py
       - name: Install native tools
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -130,7 +131,7 @@ jobs:
           if brew tap | grep -qx 'aws/tap'; then
             brew untap aws/tap
           fi
-          brew install deno ffmpeg
+          brew install ffmpeg
           # As on Windows, the build refuses to package without libVLC, so a
           # flaky cask download is caught here rather than three steps later.
           for attempt in 1 2 3; do
@@ -190,9 +191,8 @@ jobs:
             binutils patchelf dpkg-dev ffmpeg libvlc5 vlc-plugin-base \
             libgtk-3-0t64 libnotify4 xvfb xauth
       - uses: actions/checkout@v7
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
+      - name: Install Deno
+        run: python3 scripts/install_deno.py
       - name: Install Python dependencies
         run: |
           python3 -m venv --system-site-packages .venv
