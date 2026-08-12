@@ -43,7 +43,22 @@ jobs:
         with:
           deno-version: v2.x
       - name: Install build tools
-        run: choco install ffmpeg innosetup vlc --no-progress -y
+        shell: bash
+        run: |
+          # The Chocolatey feed intermittently answers 504, and choco can still
+          # exit 0 with a package missing. That only surfaces much later, as
+          # the spec refusing to package without libVLC, so prove it is here.
+          have_vlc() {
+            python -c "import os, sys; sys.exit(0 if os.path.isfile(os.path.join(os.environ['ProgramFiles'], 'VideoLAN', 'VLC', 'libvlc.dll')) else 1)"
+          }
+          for attempt in 1 2 3; do
+            choco install ffmpeg innosetup vlc --no-progress -y || true
+            if have_vlc; then exit 0; fi
+            echo "VLC is missing after attempt $attempt; retrying."
+            sleep 30
+          done
+          echo "VLC did not install; a release cannot be built without it."
+          exit 1
       - name: Install Python dependencies
         shell: bash
         run: |
@@ -97,7 +112,17 @@ jobs:
             brew untap aws/tap
           fi
           brew install deno ffmpeg
-          brew install --cask vlc
+          # As on Windows, the build refuses to package without libVLC, so a
+          # flaky cask download is caught here rather than three steps later.
+          for attempt in 1 2 3; do
+            brew install --cask vlc || true
+            if [ -f /Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib ]; then
+              break
+            fi
+            echo "VLC is missing after attempt $attempt; retrying."
+            sleep 30
+          done
+          test -f /Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib
       - name: Install Python dependencies
         run: |
           install() {
