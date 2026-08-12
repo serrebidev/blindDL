@@ -62,6 +62,8 @@ class SettingsDialog(wx.Dialog):
     def __init__(self, parent, config):
         super().__init__(parent, title="Settings")
         self.config = config
+        # The main window, so handlers can announce results on its status bar.
+        self.frame = parent
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.notebook = wx.Notebook(self)
@@ -89,6 +91,14 @@ class SettingsDialog(wx.Dialog):
         values = [value for _label, value in choices]
         control.SetSelection(values.index(current) if current in values else 0)
         return control
+
+    def _heading(self, parent, label):
+        heading = wx.StaticText(parent, label=label)
+        heading.SetName(label)
+        font = heading.GetFont()
+        font.SetWeight(wx.FONTWEIGHT_BOLD)
+        heading.SetFont(font)
+        return heading
 
     def _downloads_page(self):
         page = wx.Panel(self.notebook)
@@ -708,6 +718,14 @@ class SettingsDialog(wx.Dialog):
             "Off puts the minimized window on the taskbar as usual."
         )
 
+        self.start_maximized_check = wx.CheckBox(
+            page, label="&Start the window maximized"
+        )
+        self.start_maximized_check.SetValue(bool(config["start_maximized"]))
+        self.start_maximized_check.SetHelpText(
+            "Opens blindDL with the window filling the screen."
+        )
+
         update_label = (
             "&Check for BlindDL updates automatically"
             if getattr(sys, "frozen", False)
@@ -730,6 +748,7 @@ class SettingsDialog(wx.Dialog):
 
         sizer.Add(self.tray_check, 0, wx.ALL, 8)
         sizer.Add(self.tray_minimize_check, 0, wx.ALL, 8)
+        sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
         _row(sizer, cookies_label, self.cookies_choice)
         page.SetSizer(sizer)
@@ -749,6 +768,16 @@ class SettingsDialog(wx.Dialog):
             page, value=config["deezer_arl"], style=wx.TE_PASSWORD
         )
         self.arl_text.SetName("Deezer ARL cookie")
+        self.arl_text.SetHelpText(
+            "Paste the arl cookie value copied from your Deezer login here. "
+            "It is a code you paste, not a file to browse for."
+        )
+        self.arl_paste_btn = wx.Button(page, label="&Paste")
+        self.arl_paste_btn.SetName("Paste Deezer ARL")
+        self.arl_paste_btn.SetHelpText(
+            "Pastes the Deezer arl cookie value from the clipboard."
+        )
+        self.arl_paste_btn.Bind(wx.EVT_BUTTON, self._on_arl_paste)
 
         am_label = wx.StaticText(page, label="Apple Music cookies &file:")
         am_box = wx.BoxSizer(wx.HORIZONTAL)
@@ -811,13 +840,26 @@ class SettingsDialog(wx.Dialog):
         self.adult_sites_check.Bind(wx.EVT_CHECKBOX, enable_adult_auth)
         enable_adult_auth()
 
+        sizer.Add(self._heading(page, "Deezer"), 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.lyrics_check, 0, wx.ALL, 8)
-        _row(sizer, arl_label, self.arl_text)
+        arl_row = wx.BoxSizer(wx.HORIZONTAL)
+        arl_row.Add(arl_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        arl_box = wx.BoxSizer(wx.HORIZONTAL)
+        arl_box.Add(self.arl_text, 1, wx.RIGHT, 6)
+        arl_box.Add(self.arl_paste_btn, 0)
+        arl_row.Add(arl_box, 1)
+        sizer.Add(arl_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        sizer.Add(self._heading(page, "Apple Music"), 0, wx.TOP | wx.LEFT, 12)
         am_row = wx.BoxSizer(wx.HORIZONTAL)
         am_row.Add(am_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         am_row.Add(am_box, 1)
         sizer.Add(am_row, 0, wx.EXPAND | wx.ALL, 8)
+
+        sizer.Add(self._heading(page, "Anna's Archive"), 0, wx.TOP | wx.LEFT, 12)
         _row(sizer, annas_label, self.annas_text)
+
+        sizer.Add(self._heading(page, "Adult sites"), 0, wx.TOP | wx.LEFT, 12)
         sizer.Add(self.adult_sites_check, 0, wx.ALL, 8)
         sizer.Add(onlyfans_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.onlyfans_auth_picker, 0, wx.EXPAND | wx.ALL, 8)
@@ -825,6 +867,25 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.justforfans_auth_picker, 0, wx.EXPAND | wx.ALL, 8)
         page.SetSizer(sizer)
         return page
+
+    def _on_arl_paste(self, event):
+        """Paste the clipboard text into the Deezer ARL field."""
+        announce = getattr(self.frame, "announce", None)
+        if not wx.TheClipboard.Open():
+            if announce is not None:
+                announce("Could not open the clipboard.")
+            return
+        try:
+            data = wx.TextDataObject()
+            ok = wx.TheClipboard.GetData(data)
+        finally:
+            wx.TheClipboard.Close()
+        if ok:
+            self.arl_text.SetValue(data.GetText().strip())
+            if announce is not None:
+                announce("Pasted the Deezer ARL cookie.")
+        elif announce is not None:
+            announce("The clipboard has no text to paste.")
 
     def _on_am_copy_cookies(self, event):
         import os
@@ -965,6 +1026,7 @@ class SettingsDialog(wx.Dialog):
 
         self.config["minimize_to_tray"] = self.tray_check.GetValue()
         self.config["tray_on_minimize"] = self.tray_minimize_check.GetValue()
+        self.config["start_maximized"] = self.start_maximized_check.GetValue()
         self.config["auto_update"] = self.update_check.GetValue()
         self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
             self.cookies_choice.GetSelection()

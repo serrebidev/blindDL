@@ -50,6 +50,7 @@ ENGINE_SOULSEEK_AUDIO = 15
 ENGINE_SOULSEEK_VIDEO = 16
 ENGINE_SOULSEEK_BOOKS = 17
 ENGINE_SOULSEEK_TORRENTS = 18
+ENGINE_DEEZER = 19
 # Kept as an import-compatible name for callers that treated adult search as
 # the first adult choice before content categories were separated.
 ENGINE_ADULT = ENGINE_STRAIGHT
@@ -73,11 +74,29 @@ ENGINE_LABELS = [
     "Soulseek movies and video",
     "Soulseek books and documents",
     "Soulseek torrent files",
+    "Deezer",
 ]
-# The engines shown before the adult categories, which stay hidden until the
-# user switches them on in Settings.
-GENERAL_ENGINE_COUNT = 10
-GENERAL_ENGINES = tuple(range(GENERAL_ENGINE_COUNT))
+# The engines shown before the adult categories (and the Soulseek file-type
+# sections), in display order. Deezer sits straight after "Music sites" as
+# the single-service choice that mirrors it; its search needs no sign-in, so
+# it is always shown.
+GENERAL_ENGINES = (
+    ENGINE_MUSIC,
+    ENGINE_DEEZER,
+    ENGINE_YOUTUBE,
+    ENGINE_SOUNDCLOUD,
+    ENGINE_BANDCAMP,
+    ENGINE_APPLE_MUSIC,
+    ENGINE_BOOKS,
+    ENGINE_AUDIOBOOKS,
+    ENGINE_ARCHIVE_AUDIO,
+    ENGINE_ARCHIVE_VIDEO,
+    ENGINE_TORRENTS,
+)
+# How many engines are always shown. The ids are not contiguous because the
+# adult and Soulseek choices keep their historical numbers, so callers must
+# count the tuple rather than assume ENGINE_0..N.
+GENERAL_ENGINE_COUNT = len(GENERAL_ENGINES)
 ARCHIVE_ENGINE_CATEGORIES = {
     ENGINE_ARCHIVE_AUDIO: archive_backend.AUDIO_CATEGORIES,
     ENGINE_ARCHIVE_VIDEO: archive_backend.VIDEO_CATEGORIES,
@@ -282,7 +301,7 @@ def _order_capable_sources(engine, sources, order, config):
             return adult_backend.supports_order(source, order)
         if engine == ENGINE_YOUTUBE:
             return ytdlp_backend.supports_order(order)
-        if engine == ENGINE_MUSIC:
+        if engine in (ENGINE_MUSIC, ENGINE_DEEZER):
             # musicdl drives four dozen site search forms and not one of
             # them exposes a sort. Deezer is the exception, and only for
             # popularity, which it publishes as a rank per track.
@@ -847,6 +866,8 @@ class SearchPanel(wx.Panel):
             order_sources = ["Bandcamp"]
         elif engine == ENGINE_APPLE_MUSIC:
             order_sources = ["Apple Music"]
+        elif engine == ENGINE_DEEZER:
+            order_sources = [deezer_backend._SEARCH_SOURCE]
         elif _is_soulseek_engine(engine):
             order_sources = [soulseek_backend.SOURCE]
         else:
@@ -1052,6 +1073,8 @@ class SearchPanel(wx.Panel):
                 items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
                 items = []  # Apple Music search needs MusicKit API
+            elif engine == ENGINE_DEEZER:
+                items = deezer_backend.search(query, self.frame.config, order=order)
             elif _is_adult_engine(engine):
 
                 def on_adult_site(source, items):
@@ -1592,7 +1615,13 @@ class SearchPanel(wx.Panel):
         open_browser.Enable(
             has_selection
             and self.result_engine
-            in (ENGINE_MUSIC, ENGINE_YOUTUBE, ENGINE_SOUNDCLOUD, ENGINE_TORRENTS)
+            in (
+                ENGINE_MUSIC,
+                ENGINE_DEEZER,
+                ENGINE_YOUTUBE,
+                ENGINE_SOUNDCLOUD,
+                ENGINE_TORRENTS,
+            )
         )
         clear.Enable(has_selection)
         select_all.Enable(
@@ -1743,6 +1772,7 @@ class SearchPanel(wx.Panel):
             return
         audio_only = self.result_engine in (
             ENGINE_MUSIC,
+            ENGINE_DEEZER,
             ENGINE_SOUNDCLOUD,
             ENGINE_BANDCAMP,
             ENGINE_AUDIOBOOKS,
@@ -1817,6 +1847,10 @@ class SearchPanel(wx.Panel):
                         added.append(self.frame.queue.add_musicdl(
                             item["song_info"], item["title"]
                         ))
+                elif engine == ENGINE_DEEZER:
+                    added.append(
+                        self.frame.queue.add_sideb(item["url"], item["title"])
+                    )
                 elif engine == ENGINE_BOOKS:
                     added.append(self.frame.queue.add_book(item, item["title"]))
                 elif engine == ENGINE_AUDIOBOOKS:

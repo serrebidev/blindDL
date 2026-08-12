@@ -191,6 +191,8 @@ DEFAULTS = {
     # Minimizing the window puts it in the tray as well, rather than on the
     # taskbar. Both are on by default and either can be switched off.
     "tray_on_minimize": True,
+    # Open the main window maximized on launch.
+    "start_maximized": False,
     # How often subscriptions are checked for new items, in hours.
     "sub_check_hours": 6,
     # Automatically check runtime components. Frozen builds update them only

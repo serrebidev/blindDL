@@ -56,6 +56,8 @@ class MainFrame(wx.Frame):
         self._quitting = False
         self.tray = None
         self.config = Config()
+        if self.config["start_maximized"]:
+            self.Maximize(True)
         # Restored rows must exist before the panels are built, but workers
         # wait until those panels can safely receive their first update.
         self.queue = DownloadQueue(

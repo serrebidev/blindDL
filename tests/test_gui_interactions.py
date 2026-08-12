@@ -20,6 +20,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl import (
         adult_backend,
         archive_backend,
+        deezer_backend,
         musicdl_backend,
         preview,
         search_order,
@@ -52,6 +53,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         ENGINE_ARCHIVE_VIDEO,
         ENGINE_AUDIOBOOKS,
         ENGINE_BOOKS,
+        ENGINE_DEEZER,
         ENGINE_LABELS,
         ENGINE_MUSIC,
         ENGINE_SOULSEEK_AUDIO,
@@ -64,6 +66,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         ENGINE_TRANS,
         ENGINE_YOUTUBE,
         GENERAL_ENGINE_COUNT,
+        GENERAL_ENGINES,
         SORT_ARTIST,
         SORT_LABELS,
         SORT_LONGEST,
@@ -74,6 +77,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SOULSEEK_COLUMN_HEADINGS,
         SOULSEEK_SORT_LABELS,
         SearchPanel,
+        _order_capable_sources,
         _order_phrase,
         _sort_for_order,
         _soulseek_media_kind,
@@ -740,7 +744,9 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SearchPanel(self.host, self.frame)
         self.frame.config["adult_sites_enabled"] = False
         panel.query_text.SetValue("example")
-        panel.engine_choice.SetSelection(ENGINE_ADULT)
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_ADULT)
+        )
 
         panel.on_search(None)
 
@@ -801,12 +807,13 @@ class GuiInteractionTests(unittest.TestCase):
         self.frame.config["adult_sites_enabled"] = False
         panel = SearchPanel(self.host, self.frame)
 
+        general = [ENGINE_LABELS[index] for index in GENERAL_ENGINES]
         self.assertEqual(
             [
                 panel.engine_choice.GetString(index)
                 for index in range(panel.engine_choice.GetCount())
             ],
-            ENGINE_LABELS[:GENERAL_ENGINE_COUNT],
+            general,
         )
 
         self.frame.config["adult_sites_enabled"] = True
@@ -816,10 +823,13 @@ class GuiInteractionTests(unittest.TestCase):
                 panel.engine_choice.GetString(index)
                 for index in range(panel.engine_choice.GetCount())
             ],
-            ENGINE_LABELS[:15],
+            general
+            + [ENGINE_LABELS[index] for index in ADULT_ENGINE_CATEGORIES],
         )
 
-        panel.engine_choice.SetSelection(ENGINE_TRANS)
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_TRANS)
+        )
         self.frame.config["adult_sites_enabled"] = False
         panel.refresh_engine_choices()
         self.assertEqual(panel.engine_choice.GetCount(), GENERAL_ENGINE_COUNT)
@@ -832,7 +842,7 @@ class GuiInteractionTests(unittest.TestCase):
                 panel.engine_choice.GetString(index)
                 for index in range(panel.engine_choice.GetCount())
             ],
-            [ENGINE_LABELS[index] for index in range(GENERAL_ENGINE_COUNT)]
+            general
             + [
                 ENGINE_LABELS[ENGINE_SOULSEEK_AUDIO],
                 ENGINE_LABELS[ENGINE_SOULSEEK_VIDEO],
@@ -1044,6 +1054,68 @@ class GuiInteractionTests(unittest.TestCase):
             ["Small", "Large"],
         )
 
+    def test_deezer_choice_searches_and_downloads_only_deezer(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("ambient")
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_DEEZER)
+        )
+        panel.on_engine_changed(wx.CommandEvent())
+
+        self.assertEqual(panel.engine_choice.GetString(0), "Music sites")
+        self.assertEqual(panel.engine_choice.GetString(1), "Deezer")
+
+        deezer_items = [
+            {
+                "title": "One",
+                "kind": "deezer",
+                "url": "https://www.deezer.com/track/1",
+                "source": "Deezer",
+            }
+        ]
+        token = panel.token = object()
+        stop = threading.Event()
+        with (
+            mock.patch.object(
+                deezer_backend, "search", return_value=deezer_items
+            ) as search,
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search(
+                "ambient",
+                ENGINE_DEEZER,
+                token,
+                stop,
+                [],
+                search_order.ORDER_RELEVANCE,
+            )
+
+        self.assertEqual(search.call_args.args, ("ambient", self.frame.config))
+
+        # Deezer has no release date, so "most recent" reports it unable.
+        self.assertEqual(
+            _order_capable_sources(
+                ENGINE_DEEZER,
+                ["Deezer"],
+                search_order.ORDER_RECENT,
+                self.frame.config,
+            ),
+            ([], ["Deezer"]),
+        )
+
+        # A Deezer result downloads through the Deezer-capable queue path.
+        self.frame.queue.calls = []
+        panel.result_engine = ENGINE_DEEZER
+        panel.results = deezer_items
+        panel.results_list.DeleteAllItems()
+        panel.results_list.InsertItem(0, deezer_items[0]["title"])
+        panel.results_list.Select(0)
+        panel.on_download_selected(None)
+        self.assertEqual(
+            self.frame.queue.calls,
+            [("sideb", deezer_items[0]["url"], deezer_items[0]["title"])],
+        )
+
     def test_music_archive_and_adult_searches_never_call_soulseek(self):
         self.frame.config["soulseek_enabled"] = True
         panel = SearchPanel(self.host, self.frame)
@@ -1095,7 +1167,9 @@ class GuiInteractionTests(unittest.TestCase):
 
     def test_book_engine_relabels_columns_and_sort_choices(self):
         panel = SearchPanel(self.host, self.frame)
-        panel.engine_choice.SetSelection(ENGINE_BOOKS)
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_BOOKS)
+        )
         panel.on_engine_changed(wx.CommandEvent())
 
         self.assertEqual(
@@ -1117,7 +1191,9 @@ class GuiInteractionTests(unittest.TestCase):
             list(BOOK_COLUMN_HEADINGS),
         )
 
-        panel.engine_choice.SetSelection(ENGINE_MUSIC)
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_MUSIC)
+        )
         panel.on_engine_changed(wx.CommandEvent())
         panel._apply_engine_columns(ENGINE_MUSIC)
         self.assertEqual(
@@ -1144,7 +1220,9 @@ class GuiInteractionTests(unittest.TestCase):
                 ],
                 list(headings),
             )
-        panel.engine_choice.SetSelection(ENGINE_ARCHIVE_VIDEO)
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_ARCHIVE_VIDEO)
+        )
         panel.on_engine_changed(wx.CommandEvent())
         self.assertEqual(
             [
@@ -1279,6 +1357,26 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(config["onlyfans_auth_file"], "onlyfans.json")
         self.assertEqual(config["justforfans_auth_file"], "justforfans.json")
         self.assertTrue(config.saved)
+        dialog.Destroy()
+
+    def test_start_maximized_checkbox_saves(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertFalse(dialog.start_maximized_check.GetValue())
+        dialog.start_maximized_check.SetValue(True)
+        dialog.apply()
+
+        self.assertTrue(config["start_maximized"])
+        self.assertTrue(config.saved)
+        dialog.Destroy()
+
+    def test_accounts_page_has_arl_paste_button(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertEqual(dialog.arl_paste_btn.GetLabel(), "&Paste")
+        self.assertEqual(dialog.arl_text.GetName(), "Deezer ARL cookie")
         dialog.Destroy()
 
     def test_failed_cookie_export_removes_secure_temporary_file(self):
