@@ -45,10 +45,22 @@ jobs:
       - name: Install build tools
         run: choco install ffmpeg innosetup vlc --no-progress -y
       - name: Install Python dependencies
+        shell: bash
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt
-          python -m pip install --upgrade --pre yt-dlp
+          # Several requirements are git URLs, and hosted runners sometimes
+          # fail one clone with a TLS error. Retry so a single bad fetch
+          # cannot fail the whole release.
+          install() {
+            python -m pip install --upgrade pip setuptools wheel &&
+            python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt &&
+            python -m pip install --upgrade --pre yt-dlp
+          }
+          for attempt in 1 2 3; do
+            if install; then exit 0; fi
+            echo "Dependency install failed on attempt $attempt; retrying."
+            sleep 20
+          done
+          exit 1
       - name: Run tests
         run: python -m pytest -q
       - name: Build packages
@@ -88,9 +100,17 @@ jobs:
           brew install --cask vlc
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt
-          python -m pip install --upgrade --pre yt-dlp
+          install() {
+            python -m pip install --upgrade pip setuptools wheel &&
+            python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt &&
+            python -m pip install --upgrade --pre yt-dlp
+          }
+          for attempt in 1 2 3; do
+            if install; then exit 0; fi
+            echo "Dependency install failed on attempt $attempt; retrying."
+            sleep 20
+          done
+          exit 1
       - name: Run tests
         run: python -m pytest -q
       - name: Build packages
@@ -132,9 +152,17 @@ jobs:
       - name: Install Python dependencies
         run: |
           python3 -m venv --system-site-packages .venv
-          .venv/bin/python -m pip install --upgrade pip setuptools wheel
-          .venv/bin/python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt
-          .venv/bin/python -m pip install --upgrade --pre yt-dlp
+          install() {
+            .venv/bin/python -m pip install --upgrade pip setuptools wheel &&
+            .venv/bin/python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt &&
+            .venv/bin/python -m pip install --upgrade --pre yt-dlp
+          }
+          for attempt in 1 2 3; do
+            if install; then exit 0; fi
+            echo "Dependency install failed on attempt $attempt; retrying."
+            sleep 20
+          done
+          exit 1
       - name: Run tests
         run: xvfb-run -a .venv/bin/python -m pytest -q
       - name: Build packages
