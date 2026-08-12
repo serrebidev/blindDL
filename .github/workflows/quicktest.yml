@@ -33,5 +33,7 @@ jobs:
           python3 -m venv --system-site-packages .venv
           .venv/bin/python -m pip install --upgrade pip setuptools wheel
           .venv/bin/python -m pip install pytest -r requirements.txt
+      - name: Isolate the crashing pattern
+        run: xvfb-run -a .venv/bin/python scratch_repro.py
       - name: Run tests
         run: xvfb-run -a .venv/bin/python -m pytest -q tests/test_gui_interactions.py
