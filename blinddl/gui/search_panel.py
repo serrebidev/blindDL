@@ -636,6 +636,11 @@ class SearchPanel(wx.Panel):
         # second instead of once per provider.
         self.render_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._flush_results, self.render_timer)
+        # Both timers are owned by this panel, and wxGTK deletes a window some
+        # time after Destroy() rather than at once. A tick that lands in that
+        # gap runs against a window that is already gone, which segfaults
+        # instead of raising -- so stop them the moment the panel goes away.
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -1211,6 +1216,20 @@ class SearchPanel(wx.Panel):
             )
             if not self._pending():
                 self.timer.Stop()
+
+    def _on_destroy(self, event):
+        """Silence anything still due to run against this panel.
+
+        wxGTK and wxOSX delete a window some time after Destroy() returns, so
+        a timer tick or a queued CallAfter can land on a half-deleted control.
+        On those platforms that is a segfault rather than an exception, so
+        nothing may be allowed to run past this point.
+        """
+        if event.GetEventObject() is self:
+            self.closing = True
+            self.render_timer.Stop()
+            self.timer.Stop()
+        event.Skip()
 
     def _flush_results(self, event=None):
         if self.closing:
