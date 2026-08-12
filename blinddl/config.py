@@ -159,6 +159,9 @@ DEFAULTS = {
     # Users granted a free-slot preference are ranked with friends by
     # aioslsk's uploader, but stay independent from the visible friend list.
     "soulseek_priority_users": [],
+    # Peers who share nothing themselves are refused uploads. Friends and
+    # free-slot priority users are always allowed, whatever they share.
+    "soulseek_block_leechers": True,
     # Anna's Archive membership key. Empty means downloads are resolved
     # through the public LibGen mirrors instead of the fast partner servers.
     "annas_archive_key": "",

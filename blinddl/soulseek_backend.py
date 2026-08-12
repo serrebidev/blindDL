@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import dbm
+import functools
 import json
 import logging
 import ntpath
@@ -55,6 +56,10 @@ try:
         TransferRemovedEvent,
         UserStatusUpdateEvent,
     )
+    from aioslsk.protocol.messages import (
+        PeerTransferQueueFailed,
+        PeerTransferReply,
+    )
     from aioslsk.protocol.primitives import AttributeKey
     from aioslsk.settings import (
         CredentialsSettings,
@@ -64,6 +69,8 @@ try:
     from aioslsk.shares.cache import SharesShelveCache
     from aioslsk.shares.model import SharedDirectory
     from aioslsk.transfer.cache import TransferShelveCache
+    from aioslsk.transfer.manager import TransferManager
+    from aioslsk.transfer.model import FailReason, TransferDirection
     from aioslsk.transfer.state import TransferState
 except ImportError as exc:  # pragma: no cover - dependency is included in releases
     _IMPORT_ERROR = exc
@@ -119,6 +126,132 @@ def _install_aioslsk_cross_drive_fix() -> None:
     SharedDirectory.is_parent_of = _shared_directory_is_parent_of
     SharedDirectory.is_child_of = _shared_directory_is_child_of
     SharedDirectory.get_items_for_directory = _shared_directory_items_for
+
+
+# -- refusing uploads to users who share nothing ------------------------------
+
+# How long a peer's shared-file count is trusted before it is looked up again.
+# Long enough that a peer requesting a whole folder is only checked once, short
+# enough that somebody who starts sharing is let in during the same session.
+_LEECHER_CACHE_SECONDS = 600.0
+
+# Set from the current settings every time the client is configured.
+_leecher_guard: dict[str, Any] = {"enabled": True, "allowed": frozenset()}
+
+# username (casefolded) -> (checked at, shared file count)
+_leecher_counts: dict[str, tuple[float, int]] = {}
+
+
+def _set_leecher_guard(snapshot: dict[str, Any]) -> None:
+    """Track who may upload without sharing: friends and priority users."""
+    allowed = {str(name).casefold() for name in snapshot.get("friends", [])}
+    allowed |= {str(name).casefold() for name in snapshot.get("priority_users", [])}
+    _leecher_guard["enabled"] = bool(snapshot.get("block_leechers", True))
+    _leecher_guard["allowed"] = frozenset(allowed)
+
+
+async def _shared_file_count(username: str) -> int | None:
+    """Ask the server how many files a peer shares, or None if unknown."""
+    key = username.casefold()
+    cached = _leecher_counts.get(key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _LEECHER_CACHE_SECONDS:
+        return cached[1]
+    client = _SERVICE._client
+    if client is None:
+        return None
+    try:
+        stats = await asyncio.wait_for(
+            client(GetUserStatsCommand(username), response=True), timeout=15
+        )
+    except Exception:  # noqa: BLE001 - a lookup failure must not block uploads
+        logger.debug("could not read Soulseek stats for %s", username, exc_info=True)
+        return None
+    count = int(getattr(stats, "shared_file_count", 0) or 0)
+    _leecher_counts[key] = (now, count)
+    return count
+
+
+async def _refuses_upload(connection) -> bool:
+    """True when this peer shares nothing and is not on the allowed list."""
+    username = getattr(connection, "username", "") or ""
+    if not username or not _leecher_guard["enabled"]:
+        return False
+    if username.casefold() in _leecher_guard["allowed"]:
+        return False
+    count = await _shared_file_count(username)
+    # An unanswered lookup leaves the upload alone: a server hiccup must not
+    # start refusing peers who do share.
+    return count == 0
+
+
+# functools.wraps carries aioslsk's _registered_message marker onto the
+# wrapper, which is how its handlers are found when a manager is built.
+
+
+def _guarded_queue_handler(original):
+    """Refuse a queue request from a leecher before aioslsk queues it."""
+
+    @functools.wraps(original)
+    async def guarded_queue(self, message, connection):
+        if await _refuses_upload(connection):
+            connection.queue_message(
+                PeerTransferQueueFailed.Request(
+                    filename=message.filename,
+                    reason=FailReason.FILE_NOT_SHARED,
+                )
+            )
+            return None
+        return await original(self, message, connection)
+
+    guarded_queue._blinddl_guarded = True
+    return guarded_queue
+
+
+def _guarded_request_handler(original):
+    """Refuse a direct upload request from a leecher.
+
+    Peers may skip the queue request entirely, and the same message asks us to
+    send a file or to receive one, so only uploads are judged here.
+    """
+
+    @functools.wraps(original)
+    async def guarded_request(self, message, connection):
+        if message.direction == TransferDirection.UPLOAD.value and await (
+            _refuses_upload(connection)
+        ):
+            connection.queue_message(
+                PeerTransferReply.Request(
+                    ticket=message.ticket,
+                    allowed=False,
+                    reason=FailReason.FILE_NOT_SHARED,
+                )
+            )
+            return None
+        return await original(self, message, connection)
+
+    guarded_request._blinddl_guarded = True
+    return guarded_request
+
+
+def _install_leecher_guard() -> None:
+    """Refuse upload requests from peers who share no files of their own.
+
+    aioslsk decides both at the queue request and at the transfer request, so
+    both are wrapped. Its own refusal message is reused, which peers already
+    understand as "you are not getting this file".
+    """
+    if not available():
+        return
+    if getattr(TransferManager._on_peer_transfer_queue, "_blinddl_guarded", False):
+        return
+    TransferManager._on_peer_transfer_queue = _guarded_queue_handler(
+        TransferManager._on_peer_transfer_queue
+    )
+    TransferManager._on_peer_transfer_request = _guarded_request_handler(
+        TransferManager._on_peer_transfer_request
+    )
+
 
 AUDIO_EXTENSIONS = frozenset(
     {
@@ -205,6 +338,7 @@ def available() -> bool:
 
 
 _install_aioslsk_cross_drive_fix()
+_install_leecher_guard()
 
 
 def _cache_dir(name: str = "soulseek") -> str:
@@ -422,6 +556,7 @@ def _config_snapshot(config) -> dict[str, Any]:
         "upload_kib": int(config.get("soulseek_max_upload_kib", 0)),
         "download_kib": int(config.get("soulseek_max_download_kib", 0)),
         "max_results": int(config.get("soulseek_max_results", 500)),
+        "block_leechers": bool(config.get("soulseek_block_leechers", True)),
         "rooms": rooms,
         "private_rooms": private_rooms,
         "friends": friends,
@@ -433,7 +568,16 @@ def _signature(snapshot: dict[str, Any]) -> tuple:
     return tuple(
         (key, tuple(value) if isinstance(value, list) else value)
         for key, value in sorted(snapshot.items())
-        if key not in {"friends", "priority_users", "rooms", "private_rooms"}
+        # These are applied to a live client, so changing one must not force a
+        # reconnect that would interrupt transfers.
+        if key
+        not in {
+            "friends",
+            "priority_users",
+            "rooms",
+            "private_rooms",
+            "block_leechers",
+        }
     )
 
 
@@ -946,6 +1090,9 @@ class _Service:
 
     async def _configure(self, snapshot: dict[str, Any]):
         signature = _signature(snapshot)
+        # Applied outside the client: the guard refuses upload requests before
+        # aioslsk queues them, whether or not the client is rebuilt below.
+        _set_leecher_guard(snapshot)
         async with self._async_lock:
             if not snapshot["enabled"]:
                 await self._stop_client()

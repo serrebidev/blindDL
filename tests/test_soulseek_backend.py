@@ -22,10 +22,20 @@ from aioslsk.protocol.primitives import (
 )
 from aioslsk.search.model import SearchResult
 from aioslsk.shares.manager import SharesManager
+from aioslsk.transfer.model import FailReason, TransferDirection
 
 from blinddl.config import DEFAULTS
 from blinddl.downloader import DownloadItem, DownloadQueue
 from blinddl import soulseek_backend
+
+
+def _guarded_handler(name, original):
+    """Wrap a stand-in for the aioslsk handler blindDL guards."""
+    factories = {
+        "_on_peer_transfer_queue": soulseek_backend._guarded_queue_handler,
+        "_on_peer_transfer_request": soulseek_backend._guarded_request_handler,
+    }
+    return factories[name](original)
 
 
 def _file(path, extension, size=1024, duration=0):
@@ -260,6 +270,184 @@ class SoulseekBackendTests(unittest.TestCase):
             self.assertRaises(soulseek_backend.SoulseekDownloadCancelled),
         ):
             queue._run_soulseek(item)
+
+
+class SoulseekLeecherGuardTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._guard = dict(soulseek_backend._leecher_guard)
+        soulseek_backend._leecher_counts.clear()
+
+    def tearDown(self):
+        soulseek_backend._leecher_guard.update(self._guard)
+        soulseek_backend._leecher_counts.clear()
+
+    def guard(self, enabled=True, allowed=()):
+        soulseek_backend._leecher_guard["enabled"] = enabled
+        soulseek_backend._leecher_guard["allowed"] = frozenset(allowed)
+
+    def counted(self, count):
+        return mock.patch.object(
+            soulseek_backend,
+            "_shared_file_count",
+            mock.AsyncMock(return_value=count),
+        )
+
+    def test_refusing_leechers_is_on_by_default(self):
+        self.assertTrue(DEFAULTS["soulseek_block_leechers"])
+
+    def test_toggling_the_guard_does_not_force_a_reconnect(self):
+        config = copy.deepcopy(DEFAULTS)
+        config.update({"soulseek_enabled": True, "download_dir": "."})
+        allowing = soulseek_backend._config_snapshot(config)
+        config["soulseek_block_leechers"] = False
+        refusing = soulseek_backend._config_snapshot(config)
+
+        self.assertNotEqual(allowing["block_leechers"], refusing["block_leechers"])
+        self.assertEqual(
+            soulseek_backend._signature(allowing),
+            soulseek_backend._signature(refusing),
+        )
+
+    def test_friends_and_priority_users_are_always_allowed(self):
+        soulseek_backend._set_leecher_guard(
+            {
+                "block_leechers": True,
+                "friends": ["Alice"],
+                "priority_users": ["Bob"],
+            }
+        )
+
+        self.assertTrue(soulseek_backend._leecher_guard["enabled"])
+        self.assertEqual(
+            soulseek_backend._leecher_guard["allowed"], frozenset({"alice", "bob"})
+        )
+
+    async def test_a_peer_sharing_nothing_is_refused(self):
+        self.guard()
+        with self.counted(0):
+            refused = await soulseek_backend._refuses_upload(
+                SimpleNamespace(username="freeloader")
+            )
+        self.assertTrue(refused)
+
+    async def test_a_peer_who_shares_is_allowed(self):
+        self.guard()
+        with self.counted(12):
+            refused = await soulseek_backend._refuses_upload(
+                SimpleNamespace(username="sharer")
+            )
+        self.assertFalse(refused)
+
+    async def test_a_friend_who_shares_nothing_is_still_allowed(self):
+        self.guard(allowed={"alice"})
+        with self.counted(0) as lookup:
+            refused = await soulseek_backend._refuses_upload(
+                SimpleNamespace(username="Alice")
+            )
+        self.assertFalse(refused)
+        lookup.assert_not_awaited()
+
+    async def test_the_guard_is_skipped_when_switched_off(self):
+        self.guard(enabled=False)
+        with self.counted(0) as lookup:
+            refused = await soulseek_backend._refuses_upload(
+                SimpleNamespace(username="freeloader")
+            )
+        self.assertFalse(refused)
+        lookup.assert_not_awaited()
+
+    async def test_an_unanswered_lookup_leaves_the_upload_alone(self):
+        # A server hiccup must not start refusing peers who do share.
+        self.guard()
+        with self.counted(None):
+            refused = await soulseek_backend._refuses_upload(
+                SimpleNamespace(username="unknown")
+            )
+        self.assertFalse(refused)
+
+    async def test_a_counted_peer_is_not_looked_up_again(self):
+        self.guard()
+        service = SimpleNamespace(
+            _client=mock.AsyncMock(return_value=SimpleNamespace(shared_file_count=0))
+        )
+
+        with mock.patch.object(soulseek_backend, "_SERVICE", service):
+            first = await soulseek_backend._shared_file_count("freeloader")
+            second = await soulseek_backend._shared_file_count("FreeLoader")
+
+        # One request covers a peer asking for a whole folder, and the name is
+        # matched however the peer capitalises it.
+        self.assertEqual((first, second), (0, 0))
+        service._client.assert_awaited_once()
+
+    async def test_a_refused_queue_request_never_reaches_aioslsk(self):
+        original = mock.AsyncMock()
+        manager = SimpleNamespace()
+        connection = SimpleNamespace(username="freeloader", queue_message=mock.Mock())
+        message = SimpleNamespace(filename="Album/Track.flac")
+        guarded = _guarded_handler("_on_peer_transfer_queue", original)
+
+        self.guard()
+        with self.counted(0):
+            await guarded(manager, message, connection)
+
+        original.assert_not_awaited()
+        refusal = connection.queue_message.call_args[0][0]
+        self.assertEqual(refusal.filename, "Album/Track.flac")
+        self.assertEqual(refusal.reason, FailReason.FILE_NOT_SHARED)
+
+    async def test_a_sharing_peer_reaches_aioslsk_untouched(self):
+        original = mock.AsyncMock()
+        manager = SimpleNamespace()
+        connection = SimpleNamespace(username="sharer", queue_message=mock.Mock())
+        message = SimpleNamespace(filename="Album/Track.flac")
+        guarded = _guarded_handler("_on_peer_transfer_queue", original)
+
+        self.guard()
+        with self.counted(40):
+            await guarded(manager, message, connection)
+
+        original.assert_awaited_once_with(manager, message, connection)
+        connection.queue_message.assert_not_called()
+
+    async def test_a_download_request_is_never_refused_as_an_upload(self):
+        original = mock.AsyncMock()
+        manager = SimpleNamespace()
+        connection = SimpleNamespace(username="freeloader", queue_message=mock.Mock())
+        message = SimpleNamespace(
+            ticket=7,
+            filename="Album/Track.flac",
+            direction=TransferDirection.DOWNLOAD.value,
+        )
+        guarded = _guarded_handler("_on_peer_transfer_request", original)
+
+        self.guard()
+        with self.counted(0):
+            await guarded(manager, message, connection)
+
+        original.assert_awaited_once_with(manager, message, connection)
+        connection.queue_message.assert_not_called()
+
+    async def test_a_direct_upload_request_from_a_leecher_is_refused(self):
+        original = mock.AsyncMock()
+        manager = SimpleNamespace()
+        connection = SimpleNamespace(username="freeloader", queue_message=mock.Mock())
+        message = SimpleNamespace(
+            ticket=7,
+            filename="Album/Track.flac",
+            direction=TransferDirection.UPLOAD.value,
+        )
+        guarded = _guarded_handler("_on_peer_transfer_request", original)
+
+        self.guard()
+        with self.counted(0):
+            await guarded(manager, message, connection)
+
+        original.assert_not_awaited()
+        refusal = connection.queue_message.call_args[0][0]
+        self.assertEqual(refusal.ticket, 7)
+        self.assertFalse(refusal.allowed)
+        self.assertEqual(refusal.reason, FailReason.FILE_NOT_SHARED)
 
 
 class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):

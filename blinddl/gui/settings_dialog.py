@@ -425,6 +425,18 @@ class SettingsDialog(wx.Dialog):
             "page. New completed downloads are added automatically."
         )
 
+        self.soulseek_block_leechers_check = wx.CheckBox(
+            page, label="Refuse uploads to users who share &nothing"
+        )
+        self.soulseek_block_leechers_check.SetValue(
+            bool(config["soulseek_block_leechers"])
+        )
+        self.soulseek_block_leechers_check.SetHelpText(
+            "Peers whose own share is empty are told the file is not shared. "
+            "Friends and free-slot priority users can always download from "
+            "you. Turn this off to upload to everyone."
+        )
+
         shared_label = wx.StaticText(page, label="Additional shared &folders:")
         self.soulseek_folders_list = wx.ListBox(
             page,
@@ -529,6 +541,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.soulseek_account_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         _row(sizer, description_label, self.soulseek_description_text)
         sizer.Add(self.soulseek_share_library_check, 0, wx.ALL, 8)
+        sizer.Add(self.soulseek_block_leechers_check, 0, wx.ALL, 8)
         sizer.Add(shared_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
         sizer.Add(self.soulseek_folders_list, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(folder_buttons, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
@@ -562,6 +575,7 @@ class SettingsDialog(wx.Dialog):
             self.soulseek_account_button,
             self.soulseek_description_text,
             self.soulseek_share_library_check,
+            self.soulseek_block_leechers_check,
             self.soulseek_folders_list,
             self.soulseek_add_folder_btn,
             self.soulseek_remove_folder_btn,
@@ -926,6 +940,9 @@ class SettingsDialog(wx.Dialog):
         )
         self.config["soulseek_share_library"] = (
             self.soulseek_share_library_check.GetValue()
+        )
+        self.config["soulseek_block_leechers"] = (
+            self.soulseek_block_leechers_check.GetValue()
         )
         self.config["soulseek_shared_folders"] = [
             self.soulseek_folders_list.GetString(index)
