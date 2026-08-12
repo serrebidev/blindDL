@@ -34,18 +34,22 @@ for _ in range(4):
 print("SURVIVED")
 """
 
-PANEL = """
+_PANEL_TEMPLATE = """
 class P(wx.Panel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.results = [{"title": "t%d" % i} for i in range(5000)]
+        self.results = [{"title": "t" + str(i)} for i in range(5000)]
         self.lst = L(self)
-        %s
+        __WIRE__
         for i, h in enumerate(["a","b","c","d","e","f"]):
             self.lst.InsertColumn(i, h)
     def cell(self, row, col):
         return self.results[row]["title"] if row < len(self.results) else ""
 """
+
+
+def PANEL(wire):
+    return _PANEL_TEMPLATE.replace("__WIRE__", wire)
 
 VARIANTS = {
     # What shipped: a bound method, no teardown guard.
@@ -58,7 +62,7 @@ class L(wx.ListCtrl):
         if self.cell_provider is None:
             return ""
         return self.cell_provider(item, column)
-""" + (PANEL % "self.lst.cell_provider = self.cell") + DRIVER,
+""" + PANEL("self.lst.cell_provider = self.cell") + DRIVER,
 
     # Stop answering, and empty the control, as destruction begins.
     "zero_on_destroy": PREAMBLE + """
@@ -76,7 +80,7 @@ class L(wx.ListCtrl):
         if self.cell_provider is None:
             return ""
         return self.cell_provider(item, column)
-""" + (PANEL % "self.lst.cell_provider = self.cell") + DRIVER,
+""" + PANEL("self.lst.cell_provider = self.cell") + DRIVER,
 
     # Same, but the list never strongly owns the panel.
     "weak_and_zero": PREAMBLE + """
@@ -95,7 +99,7 @@ class L(wx.ListCtrl):
     def OnGetItemText(self, item, column):
         p = self._ref() if self._ref else None
         return p(item, column) if p else ""
-""" + (PANEL % "self.lst.set_provider(self.cell)") + DRIVER,
+""" + PANEL("self.lst.set_provider(self.cell)") + DRIVER,
 
     # No Python override at all: the list owns its own strings.
     "self_contained": PREAMBLE + """
@@ -113,7 +117,7 @@ class L(wx.ListCtrl):
         if 0 <= item < len(self.rows):
             return self.rows[item]
         return ""
-""" + (PANEL % "self.lst.rows = [r['title'] for r in self.results]") + DRIVER,
+""" + PANEL("self.lst.rows = [r['title'] for r in self.results]") + DRIVER,
 
     # Keep the control non-virtual but never rebuild: the control is emptied
     # before the window goes away.
@@ -126,7 +130,7 @@ class L(wx.ListCtrl):
         if self.cell_provider is None:
             return ""
         return self.cell_provider(item, column)
-""" + (PANEL % "self.lst.cell_provider = self.cell") + """
+""" + PANEL("self.lst.cell_provider = self.cell") + """
 app = wx.App()
 def cycle():
     host = wx.Frame(None)
