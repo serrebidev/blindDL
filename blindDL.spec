@@ -284,6 +284,67 @@ elif sys.platform.startswith("linux"):
     ]
 pyz = PYZ(a.pure)
 
+# Windows version resource. NVDA (NVDA+Shift+V) and its JAWS equivalent read
+# ProductName/ProductVersion straight out of the executable; without this
+# block every PyInstaller binary reports "Application unknown, version not
+# detected". Passed as a VSVersionInfo object, which PyInstaller embeds
+# directly, and ignored automatically on other platforms.
+version_info = None
+if sys.platform == "win32":
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo,
+        StringFileInfo,
+        StringStruct,
+        StringTable,
+        VarFileInfo,
+        VarStruct,
+        VSVersionInfo,
+    )
+
+    def _version_tuple(value):
+        parts = [int(part) for part in re.split(r"[^0-9]+", value) if part]
+        parts = (parts + [0, 0, 0, 0])[:4]
+        return tuple(parts)
+
+    version_info = VSVersionInfo(
+        ffi=FixedFileInfo(
+            filevers=_version_tuple(VERSION),
+            prodvers=_version_tuple(VERSION),
+            mask=0x3F,
+            flags=0x0,
+            OS=0x40004,
+            fileType=0x1,
+            subtype=0x0,
+            date=(0, 0),
+        ),
+        kids=[
+            StringFileInfo(
+                [
+                    StringTable(
+                        "040904B0",
+                        [
+                            StringStruct("CompanyName", "serrebidev"),
+                            StringStruct(
+                                "FileDescription",
+                                "blindDL - accessible cross-platform media downloader",
+                            ),
+                            StringStruct("FileVersion", VERSION),
+                            StringStruct("InternalName", "blindDL"),
+                            StringStruct(
+                                "LegalCopyright",
+                                "Copyright (c) serrebidev and contributors",
+                            ),
+                            StringStruct("OriginalFilename", "blindDL.exe"),
+                            StringStruct("ProductName", "blindDL"),
+                            StringStruct("ProductVersion", VERSION),
+                        ],
+                    ),
+                ]
+            ),
+            VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+        ],
+    )
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -300,6 +361,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version=version_info,
 )
 collection = COLLECT(
     exe,
