@@ -35,6 +35,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.downloader import (
         DownloadItem,
         STATUS_DONE,
+        STATUS_ERROR,
         STATUS_QUEUED,
     )
     from blinddl import config as config_module
@@ -134,21 +135,27 @@ class _Queue:
     def __init__(self):
         self.items = []
         self.calls = []
+        self.folders = []
 
-    def add_ytdlp(self, url, title, audio_only=None):
+    def add_ytdlp(self, url, title, audio_only=None, folder=""):
         self.calls.append(("ytdlp", url, title, audio_only))
+        self.folders.append(folder)
 
-    def add_musicdl(self, song, title):
+    def add_musicdl(self, song, title, folder=""):
         self.calls.append(("musicdl", song, title))
+        self.folders.append(folder)
 
-    def add_sideb(self, url, title):
+    def add_sideb(self, url, title, folder=""):
         self.calls.append(("sideb", url, title))
+        self.folders.append(folder)
 
-    def add_applemusic(self, url, title):
+    def add_applemusic(self, url, title, folder=""):
         self.calls.append(("applemusic", url, title))
+        self.folders.append(folder)
 
-    def add_adult(self, payload, title):
+    def add_adult(self, payload, title, folder=""):
         self.calls.append(("adult", payload, title))
+        self.folders.append(folder)
 
     def add_book(self, payload, title):
         self.calls.append(("book", payload, title))
@@ -174,6 +181,9 @@ class _Queue:
             item.cancel_event.set()
 
     def remove_finished(self):
+        self.items = [item for item in self.items if item.status != STATUS_DONE]
+
+    def remove_completed(self):
         self.items = [item for item in self.items if item.status != STATUS_DONE]
 
 
@@ -237,6 +247,7 @@ class _Frame:
             "adult_sites_enabled": True,
             "search_timeout_s": 5,
             "audio_only": True,
+            "auto_clear_finished": False,
         }
         self.queue = _Queue()
         self.subs = _Subscriptions()
@@ -247,6 +258,9 @@ class _Frame:
         self.messages.append(message)
 
     def on_choose_sources(self):
+        pass
+
+    def show_downloads_tab(self):
         pass
 
     def play_media(self, player, location, title):
@@ -302,6 +316,32 @@ class GuiInteractionTests(unittest.TestCase):
             panel.on_download(None)
 
         thread.assert_not_called()
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_playlist_downloads_into_a_folder_of_its_own(self):
+        panel = UrlPanel(self.host, self.frame)
+        entries = [
+            {"url": "https://example.test/one", "title": "One"},
+            {"url": "https://example.test/two", "title": "Two"},
+        ]
+        picker = mock.Mock()
+        picker.ShowModal.return_value = wx.ID_OK
+        picker.selected_items.return_value = entries[:1]
+
+        with mock.patch("blinddl.gui.url_panel.ItemPickerDialog",
+                        return_value=picker):
+            panel._inspect_done(entries, "Best of 2026", True, "ytdlp")
+
+        # Picking one track still files it under the playlist it came from.
+        self.assertEqual(self.frame.queue.folders, ["Best of 2026"])
+
+        # A single video is not a collection and stays where it always went.
+        self.frame.queue.folders.clear()
+        panel._inspect_done(
+            [{"url": "https://example.test/solo", "title": "Solo"}],
+            "Solo", True, "ytdlp")
+        self.assertEqual(self.frame.queue.folders, [""])
         panel.shutdown()
         panel.Destroy()
 
@@ -924,9 +964,10 @@ class GuiInteractionTests(unittest.TestCase):
             notebook=mock.Mock(),
             library_panel=mock.Mock(),
             announce=mock.Mock(),
+            config={"auto_clear_finished": False},
         )
         frame.queue.counts.return_value = frame._last_counts
-        item = SimpleNamespace(status=STATUS_DONE, title="Finished")
+        item = SimpleNamespace(status=STATUS_DONE, title="Finished", seeding=False)
 
         frame.notebook.GetSelection.return_value = TAB_DOWNLOADS
         MainFrame._on_item_update(frame, item)
@@ -935,6 +976,36 @@ class GuiInteractionTests(unittest.TestCase):
         frame.notebook.GetSelection.return_value = TAB_LIBRARY
         MainFrame._on_item_update(frame, item)
         frame.library_panel.refresh.assert_called_once_with(announce=False)
+
+    def test_automatic_clearing_keeps_failures_and_drops_finishes(self):
+        frame = SimpleNamespace(
+            _closing=False,
+            downloads_panel=mock.Mock(),
+            queue=mock.Mock(),
+            _last_counts=(0, 0, 0, 0),
+            notebook=mock.Mock(),
+            library_panel=mock.Mock(),
+            announce=mock.Mock(),
+            config={"auto_clear_finished": True},
+        )
+        frame.queue.counts.return_value = frame._last_counts
+        frame.notebook.GetSelection.return_value = TAB_DOWNLOADS
+
+        MainFrame._on_item_update(
+            frame, SimpleNamespace(status=STATUS_DONE, title="Got it",
+                                   seeding=False))
+        frame.queue.remove_completed.assert_called_once_with()
+
+        # A torrent that is still seeding keeps its row, and so does a
+        # failure: its error is only readable while the row is there.
+        frame.queue.remove_completed.reset_mock()
+        MainFrame._on_item_update(
+            frame, SimpleNamespace(status=STATUS_DONE, title="Seeding",
+                                   seeding=True))
+        MainFrame._on_item_update(
+            frame, SimpleNamespace(status=STATUS_ERROR, title="Broke",
+                                   seeding=False, error="404"))
+        frame.queue.remove_completed.assert_not_called()
 
     def test_library_discovers_audio_and_video_recursively(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1207,9 +1278,10 @@ class GuiInteractionTests(unittest.TestCase):
         # the handler is driven directly here and the binding itself is
         # covered by pressing real keys against a running window.
         self.assertTrue(controls)
-        for _control in controls:
+        for control in controls:
             event = mock.Mock()
             event.GetKeyCode.return_value = wx.WXK_RETURN
+            event.GetEventObject.return_value = control
             with mock.patch.object(panel, "on_search") as search:
                 panel.on_row_key(event)
             search.assert_called_once_with(None)
@@ -1220,10 +1292,40 @@ class GuiInteractionTests(unittest.TestCase):
         # Arrow keys are left alone: they are how the choice is walked.
         event = mock.Mock()
         event.GetKeyCode.return_value = wx.WXK_DOWN
+        event.GetEventObject.return_value = panel.order_choice
         with mock.patch.object(panel, "on_search") as search:
             panel.on_row_key(event)
         search.assert_not_called()
         event.Skip.assert_called_once_with()
+
+    def test_enter_on_an_open_list_picks_the_item_without_searching(self):
+        # Walking a combo box open and pressing Enter chooses what is being
+        # read. Searching on that Enter takes the focus into the results
+        # before the choice has even been made.
+        panel = SearchPanel(self.host, self.frame)
+        event = mock.Mock()
+        event.GetKeyCode.return_value = wx.WXK_RETURN
+        event.GetEventObject.return_value = panel.order_choice
+
+        panel.on_dropdown_opened(
+            SimpleNamespace(GetEventObject=lambda: panel.order_choice,
+                            Skip=lambda: None))
+        with mock.patch.object(panel, "on_search") as search:
+            panel.on_row_key(event)
+        search.assert_not_called()
+        # Still skipped, so the native list commits the choice as usual.
+        event.Skip.assert_called_once_with()
+
+        # Closing the list hands Enter back to the search.
+        panel.on_dropdown_closed(
+            SimpleNamespace(GetEventObject=lambda: panel.order_choice,
+                            Skip=lambda: None))
+        event = mock.Mock()
+        event.GetKeyCode.return_value = wx.WXK_RETURN
+        event.GetEventObject.return_value = panel.order_choice
+        with mock.patch.object(panel, "on_search") as search:
+            panel.on_row_key(event)
+        search.assert_called_once_with(None)
 
     def test_sorting_rearranges_the_list_without_searching_again(self):
         # Sort by is a display control; the rows it reorders have already
@@ -1877,6 +1979,52 @@ class GuiInteractionTests(unittest.TestCase):
         )
         self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
 
+    def test_an_album_lands_in_a_folder_named_for_artist_and_album(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        album = {
+            "title": "Discovery",
+            "artist": "Daft Punk",
+            "kind": "deezer_album",
+            "url": "https://www.deezer.com/album/7",
+        }
+        tracks = [{"title": "One", "url": "https://www.deezer.com/track/1"}]
+
+        panel._album_tracks_ready(panel.album_token, [(album, tracks)], [])
+
+        self.assertEqual(self.frame.queue.folders, ["Daft Punk - Discovery"])
+
+        # An album row with no artist named still gets its own folder.
+        self.frame.queue.folders.clear()
+        panel._album_tracks_ready(
+            panel.album_token,
+            [({"title": "Untitled", "kind": "deezer_album"}, tracks)],
+            [],
+        )
+        self.assertEqual(self.frame.queue.folders, ["Untitled"])
+
+    def test_an_artist_search_files_its_downloads_under_the_artist(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        panel.kind_used = search_kind.KIND_ARTIST
+        panel.results = [{
+            "title": "One More Time",
+            "artist": "Daft Punk",
+            "kind": "deezer",
+            "url": "https://www.deezer.com/track/1",
+        }]
+
+        with mock.patch.object(panel, "_selected_indices", return_value=[0]):
+            panel.on_download_selected(None)
+        self.assertEqual(self.frame.queue.folders, ["Daft Punk"])
+
+        # A best-match search is not about anyone in particular.
+        self.frame.queue.folders.clear()
+        panel.kind_used = search_kind.KIND_BEST
+        with mock.patch.object(panel, "_selected_indices", return_value=[0]):
+            panel.on_download_selected(None)
+        self.assertEqual(self.frame.queue.folders, [""])
+
     def test_several_albums_are_queued_whole_without_a_picker(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_APPLE_MUSIC
@@ -2425,6 +2573,55 @@ class GuiInteractionTests(unittest.TestCase):
         panel.shutdown()
         panel.Destroy()
 
+    def test_finished_uploads_are_separated_and_can_be_cleared(self):
+        sending = {
+            "key": "peer\\sending",
+            "title": "Sending.flac",
+            "service": "Soulseek",
+            "peer": "peer",
+            "status": "Uploading",
+            "percent": 50,
+            "speed": 1024,
+            "active": True,
+        }
+        complete = {
+            "key": "peer\\done",
+            "title": "Done.flac",
+            "service": "Soulseek",
+            "peer": "peer",
+            "status": "Complete",
+            "percent": 100,
+            "speed": 0,
+            "active": False,
+        }
+        with (
+            mock.patch.object(
+                soulseek_backend, "uploads_snapshot",
+                return_value=[sending, complete],
+            ),
+            mock.patch(
+                "blinddl.gui.uploads_panel.torrent_engine.uploads",
+                return_value=[],
+            ),
+        ):
+            panel = UploadsPanel(self.host, self.frame)
+
+            self.assertEqual(panel.list.GetItemCount(), 1)
+            self.assertEqual(panel.list.GetItemText(0, 0), "Sending.flac")
+            self.assertEqual(panel.finished_list.GetItemCount(), 1)
+            self.assertEqual(panel.finished_list.GetItemText(0, 0), "Done.flac")
+
+            # With the automatic clear-out on, a finished upload is not listed.
+            self.frame.config["auto_clear_finished"] = True
+            panel._signature = None
+            panel.refresh()
+
+        self.assertEqual(panel.list.GetItemCount(), 1)
+        self.assertEqual(panel.finished_list.GetItemCount(), 0)
+        self.frame.config["auto_clear_finished"] = False
+        panel.shutdown()
+        panel.Destroy()
+
     def test_hidden_uploads_panel_ignores_progress_pushes(self):
         with mock.patch(
             "blinddl.gui.uploads_panel.torrent_engine.uploads", return_value=[]
@@ -2475,7 +2672,8 @@ class GuiInteractionTests(unittest.TestCase):
         item = DownloadItem("Track", "ytdlp", "https://example/track")
         native_list = mock.Mock()
         native_list.GetItemCount.return_value = 0
-        panel = SimpleNamespace(list=native_list, _rows={}, _values={})
+        panel = SimpleNamespace(
+            list=native_list, finished_list=mock.Mock(), _rows={}, _values={})
 
         DownloadsPanel.update_item(panel, item)
         native_list.SetItem.reset_mock()
@@ -2486,6 +2684,29 @@ class GuiInteractionTests(unittest.TestCase):
         DownloadsPanel.update_item(panel, item)
         native_list.SetItem.assert_called_once_with(0, 2, "25%")
 
+    def test_finished_downloads_live_in_their_own_list(self):
+        # What is still running is the whole of the first list, so it is
+        # never arrowed through to reach what is still going.
+        panel = DownloadsPanel(self.host, self.frame)
+        queued = DownloadItem("Queued", "ytdlp", "one")
+        queued.status = STATUS_QUEUED
+        done = DownloadItem("Done", "ytdlp", "two")
+        done.status = STATUS_DONE
+        self.frame.queue.items = [queued, done]
+        panel.refresh_all()
+
+        self.assertEqual(panel.list.GetItemCount(), 1)
+        self.assertEqual(panel.list.GetItemText(0, 0), "Queued")
+        self.assertEqual(panel.finished_list.GetItemCount(), 1)
+        self.assertEqual(panel.finished_list.GetItemText(0, 0), "Done")
+
+        # Finishing moves the row across without leaving a copy behind.
+        queued.status = STATUS_DONE
+        panel.update_item(queued)
+        self.assertEqual(panel.list.GetItemCount(), 0)
+        self.assertEqual(panel.finished_list.GetItemCount(), 2)
+        panel.Destroy()
+
     def test_downloads_cancel_multiple_and_clear_finished(self):
         panel = DownloadsPanel(self.host, self.frame)
         queued = DownloadItem("Queued", "ytdlp", "one")
@@ -2495,7 +2716,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.frame.queue.items = [queued, done]
         panel.refresh_all()
         panel.list.Select(0)
-        panel.list.Select(1)
+        panel.finished_list.Select(0)
 
         panel.on_cancel(None)
         self.assertTrue(queued.cancel_event.is_set())

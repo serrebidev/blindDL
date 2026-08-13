@@ -18,12 +18,15 @@ class _Queue:
     def __init__(self):
         self.ytdlp = []
         self.sideb = []
+        self.folders = []
 
-    def add_ytdlp(self, url, title, audio_only=None):
+    def add_ytdlp(self, url, title, audio_only=None, folder=""):
         self.ytdlp.append((url, title, audio_only))
+        self.folders.append(folder)
 
-    def add_sideb(self, url, title):
+    def add_sideb(self, url, title, folder=""):
         self.sideb.append((url, title))
+        self.folders.append(folder)
 
     def batch_additions(self):
         return nullcontext()
@@ -60,6 +63,15 @@ class SubscriptionStoreTests(unittest.TestCase):
         self.assertEqual((count, error), (1, ""))
         self.assertEqual([row[1] for row in self.queue.ytdlp], ["B"])
         self.assertEqual(self.store.get(sub["id"])["seen_ids"], ["a", "b"])
+
+    def test_queued_items_land_in_a_folder_named_after_the_feed(self):
+        # A subscription is a channel or playlist: what it publishes belongs
+        # together, not loose among every other download.
+        sub = self.store.add("https://www.youtube.com/@channel", "Channel", [])
+        self._check(sub["id"], [_item("a")], title="The Channel")
+
+        # The feed's own name, which the check has just refreshed.
+        self.assertEqual(self.queue.folders, ["The Channel"])
 
     def test_new_subscriptions_default_to_most_recent(self):
         sub = self.store.add("https://www.youtube.com/hashtag/rimworld",

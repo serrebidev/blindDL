@@ -62,6 +62,11 @@ def is_album(kind):
     return normalize(kind) == KIND_ALBUM
 
 
+def is_artist(kind):
+    """Whether *kind* asks for one artist's work rather than any match."""
+    return normalize(kind) == KIND_ARTIST
+
+
 def words(text):
     """The searchable words of *text*, lowercased and stripped of punctuation.
 

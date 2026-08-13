@@ -16,6 +16,8 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Returns results as each site answers instead of waiting for the slowest one, and lets you choose which sites are searched.
 - Asks supported sites for best-match, newest, or most-popular results, while clearly naming sites that cannot provide the chosen order.
 - Opens multi-item links as a checked list, so you take everything or only the items you want.
+- Files a playlist, channel, artist page, album, or Internet Archive item into a folder named after it, so its tracks arrive together instead of loose among everything else. A single video still lands straight in the download folder.
+- Keeps running and finished transfers in separate lists on the Downloads and Uploads tabs, and can clear the finished ones for you — see Settings, Downloads.
 - Subscribes to playlists, channels, hashtags, and search pages with a per-feed order, then checks for and downloads new items automatically.
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
@@ -91,7 +93,9 @@ The Search source combo box switches between music, books, audiobooks, and the I
 
 **Order** changes the request sent to each site: Best match, Most recent, or Most popular. It therefore changes which page of results arrives. **Sort by** only rearranges the rows already in the list, so it takes effect the moment you choose it. Not every provider exposes every order; BlindDL keeps that provider's best-match results and names it in the status announcement instead of pretending a locally rearranged page is the requested search.
 
-Source, Search type, and Order describe the *next* search rather than starting one, so you can walk each list to the option you want without a search running underneath you or the focus jumping into the results. Press Enter — from the query box or from any of those lists — or choose Search when you are ready.
+Source, Search type, and Order describe the *next* search rather than starting one, so you can walk each list to the option you want without a search running underneath you or the focus jumping into the results. Press Enter — from the query box or from any of those lists — or choose Search when you are ready. Enter while a list is open belongs to that list: it picks the option being read and nothing else, so opening a combo box with Alt+Down, arrowing to what you want and pressing Enter never starts a search.
+
+Whole albums download into a folder named for the artist and the album, and an Artist search files what you download from it under that artist's name, so a release arrives together instead of a track at a time among everything else.
 
 Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder, and open in whatever reader you already use. Audiobooks download as a folder of numbered chapters and resume where they stopped if you cancel. One Internet Archive item is often a whole series, so choosing a single result opens the same checked list used for playlists.
 
@@ -105,7 +109,7 @@ Soulseek downloads use the ordinary BlindDL download folder. That Library folder
 
 Enabling Soulseek also adds **Chat** and **Messages** tabs. Chat lists available and remembered rooms, accepts any typed room name, joins and leaves public rooms, and creates or joins an invited private room when **Private room** is checked. Room and direct-message transcripts, joined rooms, private-room choices, friends, and free-slot priorities are restored on the next run. Messages exposes the friend list with presence status; select a friend to address a message, or type a username directly. Friends can be added and removed from that tab. Browse opens an accessible folder tree and file list with a local filter; folders can be navigated in either view, and both views offer file and recursive-folder downloads. Profile, message, friend, and free-slot-priority actions are available there too.
 
-The **Uploads** tab immediately after Downloads combines live Soulseek uploads from shared folders with torrents that are still seeding. It shows the service, peer, progress, speed, and torrent ratio, and its context menu can stop selected uploads or seeds. The download queue is saved atomically: active downloads resume as queued work after a restart, Soulseek keeps its transfer cache, and completed torrents that were still uploading are reattached to libtorrent's resume data. Re-adding a known completed download skips it, while re-adding a failed or cancelled partial resumes its existing queue row. Stopped seeds stay stopped.
+The **Uploads** tab immediately after Downloads combines live Soulseek uploads from shared folders with torrents that are still seeding. It shows the service, peer, progress, speed, and torrent ratio, and its context menu can stop selected uploads or seeds. Both tabs are split in two: what is still running is the whole of the first list, and **Finished downloads** or **Finished uploads** below it holds what is over, so a long history is never arrowed through to reach a live transfer. **Clear finished downloads and uploads automatically** in Settings, Downloads empties those sections as transfers complete; downloads that failed or were cancelled are kept either way, so their error can still be read, and a torrent that is still seeding keeps its row until seeding stops. The download queue is saved atomically: active downloads resume as queued work after a restart, Soulseek keeps its transfer cache, and completed torrents that were still uploading are reattached to libtorrent's resume data. Re-adding a known completed download skips it, while re-adding a failed or cancelled partial resumes its existing queue row. Stopped seeds stay stopped.
 
 ## Torrents
 
@@ -157,6 +161,8 @@ Only one BlindDL instance runs per user. Starting it again does not create a dup
 Settings and subscriptions live in `%APPDATA%\blindDL` on Windows, `~/Library/Application Support/blindDL` on macOS, and `${XDG_CONFIG_HOME:-~/.config}/blindDL` on Linux.
 
 Temporary search files stay under the platform configuration directory and are cleared at startup, so only finished downloads land in your chosen download folder.
+
+A link that holds more than one thing — a playlist, a channel, an artist page, an album, or an Internet Archive item — downloads into a subfolder of that folder named after it, and a subscription files what it publishes under the feed's own name. Anything asked for on its own goes straight into the download folder as before.
 
 ## Contributing
 

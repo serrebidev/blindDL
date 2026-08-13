@@ -387,6 +387,12 @@ class MainFrame(wx.Frame):
         if self._closing:
             return
         self.downloads_panel.update_item(item)
+        if (item.status == STATUS_DONE and not item.seeding
+                and self.config["auto_clear_finished"]):
+            # Only the clean finishes go. A failed or cancelled download
+            # keeps its row so the error stays readable.
+            self.queue.remove_completed()
+            self.downloads_panel.refresh_all()
         counts = self.queue.counts()
         if counts != self._last_counts:
             self._last_counts = counts

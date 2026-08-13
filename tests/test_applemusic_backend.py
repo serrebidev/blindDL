@@ -327,7 +327,7 @@ class AppleMusicDownloadTests(unittest.TestCase):
                                    return_value=(api, None)), \
                  mock.patch("musicdl.modules.utils.appleutils."
                             "AppleMusicClientDownloadSongUtils.getdownloaditem",
-                            return_value=self._fake_item()) as get_item, \
+                            return_value=self._fake_item()), \
                  mock.patch.object(applemusic_backend.subprocess, "run") as run, \
                  self._patch_download_tools(run):
                 applemusic_backend.download(

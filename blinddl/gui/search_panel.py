@@ -6,6 +6,7 @@
 
 import ntpath
 import re
+import sys
 import threading
 import time
 
@@ -357,6 +358,50 @@ def _music_source_label(source):
     if source in musicdl_backend.ALL_SOURCES:
         return musicdl_backend.source_label(source)
     return source
+
+
+def _dropdown_is_open(control):
+    """Whether this combo box is showing its list.
+
+    Enter means two things in a combo box. With the list open it picks the
+    item being read, and that is all it means: searching then would carry
+    the focus off into the results while the choice was still being walked,
+    which is the whole complaint about these controls. With the list closed
+    there is nothing left to pick, so Enter is free to run the search.
+
+    Windows can be asked outright, through the native combo box behind the
+    control. Everywhere else the dropdown and close-up events recorded on
+    the control answer instead, and a platform that reports neither simply
+    behaves as it did before.
+    """
+    if getattr(control, "_blinddl_popup_open", False):
+        return True
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes  # noqa: PLC0415 - Windows-only, and only for this ask
+
+        handle = control.GetHandle()
+        if not handle:
+            return False
+        # CB_GETDROPPEDSTATE: non-zero while the list part is dropped down.
+        return bool(ctypes.windll.user32.SendMessageW(int(handle), 0x0157, 0, 0))
+    except Exception:  # noqa: BLE001 - a key press must never fail on this
+        return False
+
+
+def _album_folder(album):
+    """The folder a whole album downloads into: "Artist - Album".
+
+    Two artists can release an album under the same name, and a folder
+    called Greatest Hits with both of them in it is no use to anyone. The
+    artist is dropped when the row does not name one.
+    """
+    title = str(album.get("title") or album.get("album") or "").strip()
+    artist = str(album.get("artist") or "").strip()
+    if not title:
+        return ""
+    return f"{artist} - {title}" if artist else title
 
 
 def _is_album_item(item):
@@ -796,6 +841,10 @@ class SearchPanel(wx.Panel):
             self.sort_choice,
         ):
             control.Bind(wx.EVT_CHAR_HOOK, self.on_row_key)
+            # An open list is being walked, and the Enter that ends the walk
+            # belongs to the list, not to the search. See _dropdown_is_open.
+            control.Bind(wx.EVT_COMBOBOX_DROPDOWN, self.on_dropdown_opened)
+            control.Bind(wx.EVT_COMBOBOX_CLOSEUP, self.on_dropdown_closed)
 
         self.results_list = _ResultsList(self)
         self.results_list.cell_provider = self._result_cell
@@ -925,13 +974,28 @@ class SearchPanel(wx.Panel):
             self.sort_choice.SetSelection(mode)
         event.Skip()
 
+    def on_dropdown_opened(self, event):
+        setattr(event.GetEventObject(), "_blinddl_popup_open", True)
+        event.Skip()
+
+    def on_dropdown_closed(self, event):
+        setattr(event.GetEventObject(), "_blinddl_popup_open", False)
+        event.Skip()
+
     def on_row_key(self, event):
-        """Run the search when Enter is pressed on one of the row's controls."""
+        """Run the search when Enter is pressed on one of the row's controls.
+
+        Not while the list is open, though: that Enter is how the item being
+        read is chosen, and answering it with a search sends the focus into
+        the results before the choice has even been made. Walking a combo
+        box open is exactly what a screen reader user does with one.
+        """
         if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
-            # Skipped as well, so a dropdown that is open still closes and
+            # Skipped either way, so an open dropdown still closes and
             # commits the choice the Enter was meant to pick.
             event.Skip()
-            self.on_search(None)
+            if not _dropdown_is_open(event.GetEventObject()):
+                self.on_search(None)
             return
         event.Skip()
 
@@ -1872,16 +1936,22 @@ class SearchPanel(wx.Panel):
         with self.frame.queue.batch_additions():
             for album, tracks in resolved:
                 apple = album.get("kind") == "applemusic_album"
+                # An album is a release, so its tracks go in a folder of its
+                # own -- named for the artist as well when the row knows one,
+                # since two artists can put out the same album title.
+                folder = _album_folder(album)
                 for track in tracks:
                     title = track.get("title") or album["title"]
                     titles.append(title)
                     if apple:
                         added.append(
-                            self.frame.queue.add_applemusic(track["url"], title)
+                            self.frame.queue.add_applemusic(
+                                track["url"], title, folder=folder)
                         )
                     else:
                         added.append(
-                            self.frame.queue.add_sideb(track["url"], title)
+                            self.frame.queue.add_sideb(
+                                track["url"], title, folder=folder)
                         )
         message = addition_summary(added, titles)
         if errors:
@@ -2214,6 +2284,22 @@ class SearchPanel(wx.Panel):
             self,
         )
 
+    def _artist_folder(self, item):
+        """Folder for a row from an artist search, or "" for any other row.
+
+        Searching by Artist is a request for that artist's work, so what
+        comes out of it is filed under their name instead of scattered
+        through the download folder a track at a time. A best-match or
+        title search is not about anyone in particular, and keeps landing
+        where it always did.
+        """
+        if not search_kind.is_artist(self.kind_used):
+            return ""
+        artist = item.get("artist") or item.get("singers") or ""
+        if isinstance(artist, (list, tuple)):
+            artist = ", ".join(str(name) for name in artist if name)
+        return str(artist).strip()
+
     def on_download_selected(self, event):
         indices = [i for i in self._selected_indices() if i < len(self.results)]
         if not indices:
@@ -2249,6 +2335,7 @@ class SearchPanel(wx.Panel):
             added = []
             for index in indices:
                 item = self.results[index]
+                folder = self._artist_folder(item)
                 if item.get("kind") == "soulseek":
                     added.append(
                         self.frame.queue.add_soulseek(item, item["title"])
@@ -2256,15 +2343,17 @@ class SearchPanel(wx.Panel):
                 elif engine == ENGINE_MUSIC:
                     if item.get("kind") in ("sideb", "deezer"):
                         added.append(
-                            self.frame.queue.add_sideb(item["url"], item["title"])
+                            self.frame.queue.add_sideb(
+                                item["url"], item["title"], folder=folder)
                         )
                     else:
                         added.append(self.frame.queue.add_musicdl(
-                            item["song_info"], item["title"]
+                            item["song_info"], item["title"], folder=folder
                         ))
                 elif engine == ENGINE_DEEZER:
                     added.append(
-                        self.frame.queue.add_sideb(item["url"], item["title"])
+                        self.frame.queue.add_sideb(
+                            item["url"], item["title"], folder=folder)
                     )
                 elif engine == ENGINE_BOOKS:
                     added.append(self.frame.queue.add_book(item, item["title"]))
@@ -2295,7 +2384,7 @@ class SearchPanel(wx.Panel):
                 elif engine == ENGINE_APPLE_MUSIC:
                     added.append(
                         self.frame.queue.add_applemusic(
-                            item["url"], item["title"])
+                            item["url"], item["title"], folder=folder)
                     )
                 else:
                     added.append(

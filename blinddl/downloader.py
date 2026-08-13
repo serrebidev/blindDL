@@ -15,6 +15,7 @@ from contextlib import contextmanager
 import enum
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -100,11 +101,27 @@ def format_speed(bytes_per_second):
     return ""
 
 
+def safe_folder(name):
+    """A folder name for a playlist, channel, artist or archive item.
+
+    The title comes from the site, so it can hold anything a path cannot.
+    An empty result means the download lands straight in the download
+    folder, exactly as a single video always has.
+    """
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", str(name or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned[:120]
+
+
 class DownloadItem:
     def __init__(self, title, kind, payload, audio_only=True,
-                 audio_format="mp3", video_format="mp4"):
+                 audio_format="mp3", video_format="mp4", folder=""):
         self.id = uuid.uuid4().hex
         self.title = title
+        # Subfolder of the download folder this item belongs in: the name of
+        # the playlist, channel, artist or archive item it came from. Empty
+        # for a download that was asked for on its own.
+        self.folder = safe_folder(folder)
         # "ytdlp", "musicdl", "sideb", "adult", "book", "audiobook",
         # "archive", "soulseek" or "torrent"
         self.kind = kind
@@ -241,8 +258,13 @@ class DownloadQueue:
         and signed URLs.  Comparing their complete payload would therefore
         miss the same file after a fresh search.  Each backend's durable
         identifier is used instead, together with output settings that can
-        legitimately produce a different file.
+        legitimately produce a different file -- including the folder, since
+        the same track in two playlists is two files in two places.
         """
+        return (str(getattr(item, "folder", "") or ""), *cls._payload_key(item))
+
+    @classmethod
+    def _payload_key(cls, item):
         payload = item.payload
         kind = item.kind
 
@@ -376,6 +398,7 @@ class DownloadQueue:
                 # and chapter-based backends can continue their own partials.
                 existing.title = item.title
                 existing.payload = item.payload
+                existing.folder = item.folder
                 existing.audio_only = item.audio_only
                 existing.audio_format = item.audio_format
                 existing.video_format = item.video_format
@@ -435,31 +458,36 @@ class DownloadQueue:
                 for item in items:
                     self._notify(item)
 
-    def add_ytdlp(self, url, title, audio_only=None):
+    def add_ytdlp(self, url, title, audio_only=None, folder=""):
         if audio_only is None:
             audio_only = self.config["audio_only"]
         item = DownloadItem(title=title, kind="ytdlp", payload=url,
                             audio_only=audio_only,
                             audio_format=self.config["audio_format"],
-                            video_format=self.config["video_format"])
+                            video_format=self.config["video_format"],
+                            folder=folder)
         return self.add(item)
 
-    def add_musicdl(self, song_info, title):
-        item = DownloadItem(title=title, kind="musicdl", payload=song_info)
+    def add_musicdl(self, song_info, title, folder=""):
+        item = DownloadItem(title=title, kind="musicdl", payload=song_info,
+                            folder=folder)
         return self.add(item)
 
-    def add_sideb(self, url, title):
-        item = DownloadItem(title=title, kind="sideb", payload=url)
+    def add_sideb(self, url, title, folder=""):
+        item = DownloadItem(title=title, kind="sideb", payload=url,
+                            folder=folder)
         return self.add(item)
 
-    def add_applemusic(self, url, title):
-        item = DownloadItem(title=title, kind="applemusic", payload=url)
+    def add_applemusic(self, url, title, folder=""):
+        item = DownloadItem(title=title, kind="applemusic", payload=url,
+                            folder=folder)
         return self.add(item)
 
-    def add_adult(self, payload, title):
+    def add_adult(self, payload, title, folder=""):
         item = DownloadItem(title=title, kind="adult", payload=payload,
                             audio_only=False,
-                            video_format=self.config["video_format"])
+                            video_format=self.config["video_format"],
+                            folder=folder)
         return self.add(item)
 
     def add_book(self, payload, title):
@@ -502,6 +530,22 @@ class DownloadQueue:
             self.items = [
                 item for item in self.items
                 if item.status not in FINISHED_STATUSES or item.seeding
+            ]
+            self._rebuild_counts_locked()
+        self._save_state()
+
+    def remove_completed(self):
+        """Drop the downloads that finished cleanly, keeping the rest.
+
+        This is what the automatic clear-out in Settings uses. A download
+        that failed or was cancelled stays: its row is the only place the
+        error can be read, and a list that empties itself after a failure
+        would hide the one thing worth knowing about.
+        """
+        with self._cond:
+            self.items = [
+                item for item in self.items
+                if item.status != STATUS_DONE or item.seeding
             ]
             self._rebuild_counts_locked()
         self._save_state()
@@ -631,6 +675,7 @@ class DownloadQueue:
             "id": item.id,
             "title": item.title,
             "kind": item.kind,
+            "folder": item.folder,
             "audio_only": item.audio_only,
             "audio_format": item.audio_format,
             "video_format": item.video_format,
@@ -667,6 +712,7 @@ class DownloadQueue:
             audio_only=bool(record.get("audio_only", True)),
             audio_format=str(record.get("audio_format") or "mp3"),
             video_format=str(record.get("video_format") or "mp4"),
+            folder=str(record.get("folder") or ""),
         )
         item.id = str(record.get("id") or uuid.uuid4().hex)
         item.percent = max(0.0, min(100.0, float(record.get("percent") or 0)))
@@ -835,6 +881,21 @@ class DownloadQueue:
             self._save_state()
             self._notify(item)
 
+    def _out_dir(self, item):
+        """Where this item's files go: its own folder when it came from one.
+
+        A playlist, channel, artist page or archive item downloads into a
+        folder named after it, so its files arrive together instead of
+        being mixed through everything else in the download folder.
+        """
+        base = self.config["download_dir"]
+        folder = getattr(item, "folder", "")
+        if not folder:
+            return base
+        path = os.path.join(base, folder)
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def _run_ytdlp(self, item):
         def progress(d):
             item.update_from_ytdlp(d)
@@ -842,7 +903,7 @@ class DownloadQueue:
 
         ytdlp_backend.download(
             item.payload,
-            self.config["download_dir"],
+            self._out_dir(item),
             audio_only=item.audio_only,
             audio_format=item.audio_format,
             video_format=item.video_format,
@@ -854,7 +915,7 @@ class DownloadQueue:
     def _run_musicdl(self, item):
         # musicdl exposes no progress callbacks; the item stays in the
         # indeterminate "Downloading" state until it returns.
-        musicdl_backend.download(item.payload, self.config["download_dir"])
+        musicdl_backend.download(item.payload, self._out_dir(item))
 
     def _run_sideb(self, item):
         # An ARL unlocks Deezer's original MP3 320/FLAC stream. Only fall back
@@ -883,12 +944,12 @@ class DownloadQueue:
                 self._notify(item)
 
         sideb_backend.download(
-            item.payload, self.config["download_dir"], self.config,
+            item.payload, self._out_dir(item), self.config,
             event_cb=on_event)
 
     def _run_applemusic(self, item):
         applemusic_backend.download(
-            item.payload, self.config["download_dir"], self.config,
+            item.payload, self._out_dir(item), self.config,
             cancel_event=item.cancel_event)
 
     def _run_adult(self, item):
@@ -911,7 +972,7 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         adult_backend.download(
-            item.payload, self.config["download_dir"], progress_cb=progress,
+            item.payload, self._out_dir(item), progress_cb=progress,
             cancel_event=item.cancel_event, video_format=item.video_format)
 
     def _run_book(self, item):
@@ -929,7 +990,7 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         book_backend.download(
-            item.payload, self.config["download_dir"], self.config,
+            item.payload, self._out_dir(item), self.config,
             progress_cb=progress, cancel_event=item.cancel_event)
 
     def _run_audiobook(self, item):
@@ -947,7 +1008,7 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         audiobook_backend.download(
-            item.payload, self.config["download_dir"], progress_cb=progress,
+            item.payload, self._out_dir(item), progress_cb=progress,
             cancel_event=item.cancel_event)
 
     def _run_archive(self, item):
@@ -965,7 +1026,7 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         archive_backend.download(
-            item.payload, self.config["download_dir"], progress_cb=progress,
+            item.payload, self._out_dir(item), progress_cb=progress,
             cancel_event=item.cancel_event)
 
     def _run_soulseek(self, item):
@@ -1014,7 +1075,7 @@ class DownloadQueue:
         self._notify(item)
         # out_dir is where a private tracker's .torrent lands when the row
         # carries no magnet; a magnet never touches the disk.
-        torrent_backend.hand_off(item.payload, self.config["download_dir"])
+        torrent_backend.hand_off(item.payload, self._out_dir(item))
         item.speed = ""
 
     def _run_torrent_engine(self, item):
@@ -1038,7 +1099,7 @@ class DownloadQueue:
         item.speed = "Starting torrent"
         self._notify(item)
         torrent_engine.download(
-            item.payload, self.config["download_dir"], self.config,
+            item.payload, self._out_dir(item), self.config,
             progress_cb=progress, cancel_event=item.cancel_event)
         item.seeding = True
 
@@ -1056,5 +1117,5 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         deezer_backend.download(
-            item.payload, self.config["download_dir"], self.config,
+            item.payload, self._out_dir(item), self.config,
             progress_cb=progress, cancel_event=item.cancel_event)

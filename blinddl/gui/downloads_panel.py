@@ -2,44 +2,77 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Downloads tab: live list of queued/active/finished downloads."""
+"""Downloads tab: queued and running downloads, and a finished section.
+
+The two are separate lists rather than one list sorted by status. A queue
+that mixes them makes the one question the tab is opened to answer -- what
+is still going -- into a search through everything that ever finished, and
+arrow keys are the only way through a list. Here the running downloads are
+the whole of the first list, and the finished ones are out of the way in
+the second until they are wanted.
+"""
 
 import wx
 
 from .. import torrent_engine
 from ..downloader import ACTIVE_STATUSES, FINISHED_STATUSES, STATUS_DOWNLOADING
 
+COLUMNS = ("Title", "Status", "Progress", "Speed", "ETA", "Error")
+
 
 class DownloadsPanel(wx.Panel):
     def __init__(self, parent, frame):
         super().__init__(parent)
         self.frame = frame
-        self._rows = {}  # item.id -> row index
-        self._values = {}  # item.id -> last values written to the native list
+        self._rows = {}  # item.id -> (list control, row index)
+        self._values = {}  # item.id -> last values written to that row
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        self.list = wx.ListCtrl(self, style=wx.LC_REPORT)
-        self.list.SetName("Downloads")
-        self.list.SetHelpText(
-            "Select downloads. Context Menu opens actions.")
-        for i, heading in enumerate(("Title", "Status", "Progress", "Speed",
-                                     "ETA", "Error")):
-            self.list.InsertColumn(i, heading)
-        self.list.SetColumnWidth(0, 300)
-        self.list.Bind(wx.EVT_CONTEXT_MENU, self.on_downloads_menu)
+        active_label = wx.StaticText(self, label="&Downloads:")
+        self.list = self._make_list(
+            "Downloads",
+            "Queued and running downloads. Context Menu opens actions.")
+        finished_label = wx.StaticText(self, label="&Finished downloads:")
+        self.finished_list = self._make_list(
+            "Finished downloads",
+            "Downloads that finished, failed or were cancelled. Context "
+            "Menu opens actions.")
 
+        sizer.Add(active_label, 0, wx.LEFT | wx.TOP, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(finished_label, 0, wx.LEFT, 8)
+        sizer.Add(self.finished_list, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizer(sizer)
+
+    def _make_list(self, name, help_text):
+        control = wx.ListCtrl(self, style=wx.LC_REPORT)
+        control.SetName(name)
+        control.SetHelpText(help_text)
+        for index, heading in enumerate(COLUMNS):
+            control.InsertColumn(index, heading)
+        control.SetColumnWidth(0, 300)
+        control.Bind(wx.EVT_CONTEXT_MENU, self.on_downloads_menu)
+        return control
 
     # -- updates from the queue (main thread) ------------------------------
 
     def update_item(self, item):
-        row = self._rows.get(item.id)
-        if row is None:
-            row = self.list.GetItemCount()
-            self.list.InsertItem(row, item.title)
-            self._rows[item.id] = row
+        target = (self.finished_list if item.status in FINISHED_STATUSES
+                  else self.list)
+        known = self._rows.get(item.id)
+        if known is not None and known[0] is not target:
+            # The download just crossed into the finished section. Taking a
+            # row out of the middle of a list renumbers everything under it,
+            # so both lists are rebuilt -- a download crosses this line once.
+            self.refresh_all()
+            return
+        if known is None:
+            row = target.GetItemCount()
+            target.InsertItem(row, item.title)
+            self._rows[item.id] = (target, row)
+        else:
+            row = known[1]
         if (item.status == STATUS_DOWNLOADING and
                 item.kind in ("musicdl", "adult", "soulseek") and
                 not item.percent):
@@ -61,11 +94,12 @@ class DownloadsPanel(wx.Panel):
         start = 1 if previous is None else 0
         for column in range(start, len(values)):
             if previous is None or previous[column] != values[column]:
-                self.list.SetItem(row, column, values[column])
+                target.SetItem(row, column, values[column])
         self._values[item.id] = values
 
     def refresh_all(self):
         self.list.DeleteAllItems()
+        self.finished_list.DeleteAllItems()
         self._rows.clear()
         self._values.clear()
         for item in self.frame.queue.items:
@@ -73,41 +107,49 @@ class DownloadsPanel(wx.Panel):
 
     # -- actions -------------------------------------------------------------
 
-    def _selected_rows(self):
+    def _event_list(self, event):
+        """The list a context menu was asked for, defaulting to the top one."""
+        control = event.GetEventObject()
+        if control is self.finished_list:
+            return self.finished_list
+        return self.list
+
+    def _selected_rows(self, control):
         rows = []
-        row = self.list.GetFirstSelected()
+        row = control.GetFirstSelected()
         while row != -1:
             rows.append(row)
-            row = self.list.GetNextSelected(row)
+            row = control.GetNextSelected(row)
         return rows
 
-    def _selected_items(self):
-        selected_rows = set(self._selected_rows())
-        item_ids = [item_id for item_id, row in self._rows.items()
-                    if row in selected_rows]
+    def _selected_items(self, control):
+        selected_rows = set(self._selected_rows(control))
+        item_ids = [item_id for item_id, (owner, row) in self._rows.items()
+                    if owner is control and row in selected_rows]
         return [item for item_id in item_ids
                 if (item := self.frame.queue._find(item_id)) is not None]
 
-    def _target_context_item(self, event):
+    def _target_context_item(self, event, control):
         """Make a right-clicked row the target while preserving a group click."""
         position = event.GetPosition()
         if position == wx.DefaultPosition:
-            if not self._selected_rows():
-                focused = self.list.GetFocusedItem()
+            if not self._selected_rows(control):
+                focused = control.GetFocusedItem()
                 if focused >= 0:
-                    self.list.Select(focused)
+                    control.Select(focused)
             return
-        row, _flags = self.list.HitTest(self.list.ScreenToClient(position))
-        if row < 0 or self.list.IsSelected(row):
+        row, _flags = control.HitTest(control.ScreenToClient(position))
+        if row < 0 or control.IsSelected(row):
             return
-        for selected in self._selected_rows():
-            self.list.Select(selected, False)
-        self.list.Focus(row)
-        self.list.Select(row)
+        for selected in self._selected_rows(control):
+            control.Select(selected, False)
+        control.Focus(row)
+        control.Select(row)
 
     def on_downloads_menu(self, event):
-        self._target_context_item(event)
-        selected = self._selected_items()
+        control = self._event_list(event)
+        self._target_context_item(event, control)
+        selected = self._selected_items(control)
         menu = wx.Menu()
         cancel = menu.Append(wx.ID_ANY, "&Cancel selected")
         stop_seeding = menu.Append(wx.ID_ANY, "Stop &seeding")
@@ -122,29 +164,35 @@ class DownloadsPanel(wx.Panel):
             for item in self.frame.queue.items))
         clear_selection.Enable(bool(selected))
         select_all.Enable(
-            self.list.GetSelectedItemCount() < self.list.GetItemCount())
-        menu.Bind(wx.EVT_MENU, self.on_cancel, cancel)
-        menu.Bind(wx.EVT_MENU, self.on_stop_seeding, stop_seeding)
+            control.GetSelectedItemCount() < control.GetItemCount())
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_cancel(e, control), cancel)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_stop_seeding(e, control),
+                  stop_seeding)
         menu.Bind(wx.EVT_MENU, self.on_clear, clear_finished)
-        menu.Bind(wx.EVT_MENU, self._select_all, select_all)
-        menu.Bind(wx.EVT_MENU, self._clear_selection, clear_selection)
-        self.list.PopupMenu(menu)
+        menu.Bind(wx.EVT_MENU, lambda e: self._select_all(e, control),
+                  select_all)
+        menu.Bind(wx.EVT_MENU, lambda e: self._clear_selection(e, control),
+                  clear_selection)
+        control.PopupMenu(menu)
         menu.Destroy()
 
-    def _select_all(self, event):
-        for row in range(self.list.GetItemCount()):
-            self.list.Select(row)
-        count = self.list.GetSelectedItemCount()
+    def _select_all(self, event, control=None):
+        control = control if control is not None else self.list
+        for row in range(control.GetItemCount()):
+            control.Select(row)
+        count = control.GetSelectedItemCount()
         noun = "download" if count == 1 else "downloads"
         self.frame.announce(f"Selected {count} {noun}.")
 
-    def _clear_selection(self, event):
-        for row in self._selected_rows():
-            self.list.Select(row, False)
+    def _clear_selection(self, event, control=None):
+        control = control if control is not None else self.list
+        for row in self._selected_rows(control):
+            control.Select(row, False)
         self.frame.announce("Selection cleared.")
 
-    def on_cancel(self, event):
-        items = [item for item in self._selected_items()
+    def on_cancel(self, event, control=None):
+        control = control if control is not None else self.list
+        items = [item for item in self._selected_items(control)
                  if item.status in ACTIVE_STATUSES]
         if not items:
             self.frame.announce("No selected downloads can be cancelled.")
@@ -173,8 +221,9 @@ class DownloadsPanel(wx.Panel):
                 keys.append((key, item.title))
         return keys
 
-    def on_stop_seeding(self, event):
-        stopping = self._seeding_keys(self._selected_items())
+    def on_stop_seeding(self, event, control=None):
+        control = control if control is not None else self.list
+        stopping = self._seeding_keys(self._selected_items(control))
         if not stopping:
             self.frame.announce("None of the selected downloads are seeding.")
             return

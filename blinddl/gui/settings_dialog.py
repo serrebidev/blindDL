@@ -201,6 +201,18 @@ class SettingsDialog(wx.Dialog):
             "the site serves; AVI is re-encoded, which takes longer."
         )
 
+        self.auto_clear_check = wx.CheckBox(
+            page, label="Clear &finished downloads and uploads automatically"
+        )
+        self.auto_clear_check.SetValue(bool(config["auto_clear_finished"]))
+        self.auto_clear_check.SetHelpText(
+            "Takes a download out of the Finished downloads list once it has "
+            "completed, and an upload out of Finished uploads once the other "
+            "side has the file. Downloads that failed or were cancelled are "
+            "kept either way, so their error can still be read. Torrents that "
+            "are still seeding keep their row until seeding stops."
+        )
+
         conc_label = wx.StaticText(page, label="&Concurrent downloads:")
         self.conc_spin = wx.SpinCtrl(
             page, min=1, max=32, initial=int(config["max_concurrent"])
@@ -225,6 +237,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(dir_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.dir_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
+        sizer.Add(self.auto_clear_check, 0, wx.ALL, 8)
         _row(sizer, fmt_label, self.format_choice)
         _row(sizer, video_fmt_label, self.video_format_choice)
         _row(sizer, conc_label, self.conc_spin)
@@ -1096,6 +1109,7 @@ class SettingsDialog(wx.Dialog):
         self.config["video_format"] = VIDEO_FORMAT_CHOICES[
             self.video_format_choice.GetSelection()
         ][1]
+        self.config["auto_clear_finished"] = self.auto_clear_check.GetValue()
         self.config["max_concurrent"] = self.conc_spin.GetValue()
         self.config["search_timeout_s"] = self.search_spin.GetValue()
         self.config["sub_check_hours"] = self.sub_spin.GetValue()

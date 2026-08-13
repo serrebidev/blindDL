@@ -204,6 +204,39 @@ class DownloadPersistenceTests(unittest.TestCase):
 
         self.assertEqual(len(queue.items), 2)
 
+    def test_collection_downloads_get_a_folder_that_survives_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            config = self.config()
+            config["download_dir"] = folder
+            queue = DownloadQueue(
+                config, None, state_path=state, start_workers=False
+            )
+            loose = queue.add_ytdlp("https://example.invalid/one", "One")
+            # A title that a path cannot hold is cleaned, not refused.
+            grouped = queue.add_ytdlp(
+                "https://example.invalid/one", "One",
+                folder='Live: 2019/2020 <best>')
+
+            self.assertEqual(loose.folder, "")
+            self.assertEqual(grouped.folder, "Live 2019 2020 best")
+            # Same URL, different destination: two downloads, not one.
+            self.assertEqual(len(queue.items), 2)
+            self.assertEqual(
+                queue._out_dir(grouped),
+                str(Path(folder) / "Live 2019 2020 best"),
+            )
+            self.assertTrue((Path(folder) / "Live 2019 2020 best").is_dir())
+            self.assertEqual(queue._out_dir(loose), folder)
+
+            restored = DownloadQueue(
+                config, None, state_path=state, start_workers=False
+            )
+            self.assertEqual(
+                sorted(item.folder for item in restored.items),
+                ["", "Live 2019 2020 best"],
+            )
+
     def test_musicdl_song_info_round_trips_without_pickle(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder) / "downloads.json"

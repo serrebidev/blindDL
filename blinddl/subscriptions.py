@@ -184,15 +184,21 @@ class SubscriptionStore:
         seen = set(seen_ids)
         new_ids = []
         new_count = 0
+        # A subscription is a channel or a playlist, so what it publishes
+        # goes in a folder named after it, the same way a channel URL
+        # downloaded by hand does.
+        folder = sub.get("title") or title or ""
         with self.queue.batch_additions():
             for item in items:
                 if item["id"] in seen:
                     continue
                 if item.get("kind") == "sideb":
-                    self.queue.add_sideb(item["url"], item["title"])
+                    self.queue.add_sideb(item["url"], item["title"],
+                                         folder=folder)
                 else:
                     self.queue.add_ytdlp(
-                        item["url"], item["title"], audio_only=audio_only
+                        item["url"], item["title"], audio_only=audio_only,
+                        folder=folder
                     )
                 seen.add(item["id"])
                 new_ids.append(item["id"])

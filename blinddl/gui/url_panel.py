@@ -191,6 +191,7 @@ class UrlPanel(wx.Panel):
         if not items:
             self.frame.announce("No items found.")
             return
+        all_items = items
         if len(items) > 1:
             dialog = ItemPickerDialog(self, items, title)
             if dialog.ShowModal() != wx.ID_OK:
@@ -204,24 +205,33 @@ class UrlPanel(wx.Panel):
                 self.frame.announce("No items selected.")
                 self.url_text.SetFocus()
                 return
+        # A URL that held more than one thing was a playlist, channel,
+        # artist, album or archive item, and its files belong together in a
+        # folder of its own rather than loose among every other download.
+        # The folder is the collection's, even when only part of it was
+        # picked. A single video keeps landing in the download folder.
+        folder = title if len(all_items) > 1 else ""
         with self.frame.queue.batch_additions():
             added = []
             for item in items:
                 if engine == "applemusic":
                     added.append(self.frame.queue.add_applemusic(
-                        item["url"], item["title"]
+                        item["url"], item["title"], folder=folder
                     ))
                 elif engine in ("sideb", "deezer"):
                     added.append(
-                        self.frame.queue.add_sideb(item["url"], item["title"])
+                        self.frame.queue.add_sideb(item["url"], item["title"],
+                                                   folder=folder)
                     )
                 elif engine == "adult":
                     added.append(
-                        self.frame.queue.add_adult(item, item["title"])
+                        self.frame.queue.add_adult(item, item["title"],
+                                                   folder=folder)
                     )
                 else:
                     added.append(self.frame.queue.add_ytdlp(
-                        item["url"], item["title"], audio_only=audio_only
+                        item["url"], item["title"], audio_only=audio_only,
+                        folder=folder
                     ))
         self.frame.announce(
             addition_summary(added, [item["title"] for item in items])

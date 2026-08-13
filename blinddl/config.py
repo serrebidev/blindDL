@@ -38,6 +38,12 @@ DEFAULTS = {
     "video_format": "mp4",
     # Maximum simultaneous downloads. No hard cap beyond this user setting.
     "max_concurrent": 4,
+    # Take a download out of the Finished downloads list once it has
+    # completed, and an upload out of Finished uploads once the other side
+    # has the file. Off by default. Downloads that failed or were cancelled
+    # are never cleared automatically: their row is the only place the error
+    # can be read.
+    "auto_clear_finished": False,
     # What a search asks its sites for: "relevance" (each site's own best
     # match), "recent" or "popular". This goes out with the query rather than
     # rearranging the answer, so it decides which results arrive at all. Not
