@@ -864,6 +864,29 @@ class SettingsDialog(wx.Dialog):
             "site requires login."
         )
 
+        cookies_file_label = wx.StaticText(page, label="Cookies &file:")
+        self.cookies_file_picker = wx.FilePickerCtrl(
+            page,
+            path=config["cookies_file"],
+            message="Select a cookies.txt file",
+            wildcard="Cookies files (*.txt)|*.txt|All files (*.*)|*.*",
+        )
+        self.cookies_file_picker.SetName("Cookies file")
+        self.cookies_file_picker.SetHelpText(
+            "A Netscape cookies.txt used for YouTube and other sites that "
+            "need a sign-in. Copy from browser exports one, or leave blank "
+            "to read the browser above live."
+        )
+        self.cookies_copy_btn = wx.Button(page, label="Copy from &browser")
+        self.cookies_copy_btn.SetName("Copy cookies from browser")
+        self.cookies_copy_btn.SetHelpText(
+            "Exports cookies from a signed-in browser to a cookies.txt file."
+        )
+        self.cookies_copy_btn.Bind(wx.EVT_BUTTON, self._on_copy_cookies)
+        cookies_file_box = wx.BoxSizer(wx.HORIZONTAL)
+        cookies_file_box.Add(self.cookies_file_picker, 1, wx.RIGHT, 6)
+        cookies_file_box.Add(self.cookies_copy_btn, 0)
+
         sizer.Add(self.tray_check, 0, wx.ALL, 8)
         sizer.Add(self.tray_minimize_check, 0, wx.ALL, 8)
         sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
@@ -871,6 +894,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.update_check, 0, wx.ALL, 8)
         sizer.Add(self.auto_install_check, 0, wx.ALL, 8)
         _row(sizer, cookies_label, self.cookies_choice)
+        _row(sizer, cookies_file_label, cookies_file_box)
         page.SetSizer(sizer)
         return page
 
@@ -898,6 +922,12 @@ class SettingsDialog(wx.Dialog):
             "Pastes the Deezer arl cookie value from the clipboard."
         )
         self.arl_paste_btn.Bind(wx.EVT_BUTTON, self._on_arl_paste)
+        self.arl_browser_btn = wx.Button(page, label="From &browser")
+        self.arl_browser_btn.SetName("Copy Deezer ARL from browser")
+        self.arl_browser_btn.SetHelpText(
+            "Reads the arl cookie from a browser signed into Deezer."
+        )
+        self.arl_browser_btn.Bind(wx.EVT_BUTTON, self._on_arl_from_browser)
 
         am_label = wx.StaticText(page, label="Apple Music cookies &file:")
         am_box = wx.BoxSizer(wx.HORIZONTAL)
@@ -978,7 +1008,8 @@ class SettingsDialog(wx.Dialog):
         arl_row.Add(arl_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         arl_box = wx.BoxSizer(wx.HORIZONTAL)
         arl_box.Add(self.arl_text, 1, wx.RIGHT, 6)
-        arl_box.Add(self.arl_paste_btn, 0)
+        arl_box.Add(self.arl_paste_btn, 0, wx.RIGHT, 6)
+        arl_box.Add(self.arl_browser_btn, 0)
         arl_row.Add(arl_box, 1)
         sizer.Add(arl_row, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -1075,6 +1106,75 @@ class SettingsDialog(wx.Dialog):
         self.config["apple_music_cookies"] = out
         self.frame.announce(f"Apple Music cookies exported from {label}.")
 
+    def _on_copy_cookies(self, event):
+        """Export a general cookies.txt for YouTube and other signed-in sites."""
+        import os
+        import tempfile
+
+        from .. import browser_cookies
+
+        descriptor, out = tempfile.mkstemp(suffix=".txt", prefix="cookies_")
+        os.close(descriptor)
+        try:
+            label = browser_cookies.export_cookies(
+                out,
+                preferred=self.config.get("cookies_from_browser") or None,
+            )
+        except browser_cookies.CookieExportError as exc:
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+            wx.MessageBox(
+                "Could not export cookies from any browser:\n\n"
+                + "\n".join(exc.errors),
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - still clean up the temp file
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+            wx.MessageBox(
+                f"Could not export cookies: {exc}",
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+
+        self.cookies_file_picker.SetPath(out)
+        self.config["cookies_file"] = out
+        announce = getattr(self.frame, "announce", None)
+        if announce is not None:
+            announce(f"Cookies exported from {label}.")
+
+    def _on_arl_from_browser(self, event):
+        """Read the Deezer arl cookie from a signed-in browser."""
+        from .. import browser_cookies
+
+        announce = getattr(self.frame, "announce", None)
+        try:
+            value, label = browser_cookies.extract_cookie_value(
+                "arl", ["deezer.com"],
+                preferred=self.config.get("cookies_from_browser") or None,
+            )
+        except browser_cookies.CookieExportError as exc:
+            wx.MessageBox(
+                "Could not read the Deezer arl cookie from any browser:\n\n"
+                + "\n".join(exc.errors),
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+        self.arl_text.SetValue(value)
+        if announce is not None:
+            announce(f"Copied the Deezer ARL cookie from {label}.")
+
     # -- saving --------------------------------------------------------------
 
     def apply(self):
@@ -1157,6 +1257,7 @@ class SettingsDialog(wx.Dialog):
         self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
             self.cookies_choice.GetSelection()
         ][1]
+        self.config["cookies_file"] = self.cookies_file_picker.GetPath().strip()
 
         self.config["sideb_lyrics"] = self.lyrics_check.GetValue()
         self.config["adult_sites_enabled"] = self.adult_sites_check.GetValue()

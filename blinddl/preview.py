@@ -119,6 +119,7 @@ def resolve_search_result(item, audio_only, config):
                 target,
                 audio_only=True,
                 cookies_from_browser=config.get("cookies_from_browser"),
+                cookies_file=config.get("cookies_file"),
             ),
             title,
         )
@@ -134,6 +135,7 @@ def resolve_search_result(item, audio_only, config):
             url,
             audio_only=audio_only,
             cookies_from_browser=config.get("cookies_from_browser"),
+            cookies_file=config.get("cookies_file"),
         ),
         title,
     )
@@ -171,5 +173,6 @@ def resolve_url(url, audio_only, config):
         url,
         audio_only=audio_only,
         cookies_from_browser=config.get("cookies_from_browser"),
+        cookies_file=config.get("cookies_file"),
     )
     return stream, url

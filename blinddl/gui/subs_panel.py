@@ -319,7 +319,9 @@ class SubsPanel(wx.Panel):
             else:
                 items, title = ytdlp_backend.extract_flat(
                     url, cookies_from_browser=
-                    self.frame.config["cookies_from_browser"], order=order)
+                    self.frame.config["cookies_from_browser"],
+                    cookies_file=self.frame.config.get("cookies_file"),
+                    order=order)
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._add_failed, str(exc))
             return

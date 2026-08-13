@@ -164,7 +164,8 @@ class UrlPanel(wx.Panel):
         try:
             items, title = ytdlp_backend.extract_flat(
                 url, cookies_from_browser=
-                self.frame.config["cookies_from_browser"])
+                self.frame.config["cookies_from_browser"],
+                cookies_file=self.frame.config.get("cookies_file"))
         except Exception as exc:  # noqa: BLE001 - shown to the user
             error = str(exc)
             if native_error:

@@ -11,8 +11,22 @@ from unittest import mock
 from blinddl import browser_cookies
 
 
-def _cookie(name, domain):
-    return SimpleNamespace(name=name, domain=domain)
+def _cookie(name, domain, value="v"):
+    return SimpleNamespace(name=name, domain=domain, value=value)
+
+
+class _FakeJar:
+    """A cookie jar stand-in that iterates its cookies and records saves."""
+
+    def __init__(self, *cookies):
+        self.cookies = list(cookies)
+        self.saved = None
+
+    def __iter__(self):
+        return iter(self.cookies)
+
+    def save(self, path):
+        self.saved = path
 
 
 class BrowserCookiesTests(unittest.TestCase):
@@ -24,8 +38,8 @@ class BrowserCookiesTests(unittest.TestCase):
         self.assertTrue(browser_cookies._has_apple_music_token(jar))
 
     def test_export_writes_first_browser_with_token(self):
-        jar_without = mock.Mock()
-        jar_with = mock.Mock()
+        jar_without = _FakeJar(_cookie("itspod", ".music.apple.com"))
+        jar_with = _FakeJar(_cookie("media-user-token", ".music.apple.com"))
         with (
             mock.patch.object(
                 browser_cookies,
@@ -51,7 +65,7 @@ class BrowserCookiesTests(unittest.TestCase):
             )
 
         self.assertEqual(label, "Firefox (p)")
-        jar_with.save.assert_called_once_with("/out.txt")
+        self.assertEqual(jar_with.saved, "/out.txt")
 
     def test_export_explains_dpapi_failure_and_raises(self):
         with (
@@ -161,6 +175,63 @@ class BrowserCookiesTests(unittest.TestCase):
         extract.assert_not_called()
         self.assertIn("app-bound cookie encryption", ctx.exception.errors[0])
         self.assertIn("Firefox", ctx.exception.errors[0])
+
+    def test_export_cookies_accepts_any_cookies_without_needs(self):
+        jar = _FakeJar(_cookie("SID", ".youtube.com"))
+        with (
+            mock.patch.object(
+                browser_cookies,
+                "candidate_browsers",
+                return_value=[("Firefox", "firefox", "/y/p")],
+            ),
+            mock.patch.object(browser_cookies, "_uses_app_bound", return_value=False),
+            mock.patch.object(
+                browser_cookies, "extract_cookies_from_browser", return_value=jar
+            ),
+        ):
+            label = browser_cookies.export_cookies("/out.txt")
+
+        self.assertEqual(label, "Firefox")
+        self.assertEqual(jar.saved, "/out.txt")
+
+    def test_extract_cookie_value_returns_matching_cookie(self):
+        jar = _FakeJar(
+            _cookie("sid", ".deezer.com"),
+            _cookie("arl", ".deezer.com", "the-arl-value"),
+        )
+        with (
+            mock.patch.object(
+                browser_cookies,
+                "candidate_browsers",
+                return_value=[("Firefox", "firefox", "/y/p")],
+            ),
+            mock.patch.object(browser_cookies, "_uses_app_bound", return_value=False),
+            mock.patch.object(
+                browser_cookies, "extract_cookies_from_browser", return_value=jar
+            ),
+        ):
+            value, label = browser_cookies.extract_cookie_value("arl", ["deezer.com"])
+
+        self.assertEqual(label, "Firefox")
+        self.assertEqual(value, "the-arl-value")
+
+    def test_extract_cookie_value_raises_when_missing(self):
+        jar = _FakeJar(_cookie("sid", ".deezer.com"))
+        with (
+            mock.patch.object(
+                browser_cookies,
+                "candidate_browsers",
+                return_value=[("Firefox", "firefox", "/y/p")],
+            ),
+            mock.patch.object(browser_cookies, "_uses_app_bound", return_value=False),
+            mock.patch.object(
+                browser_cookies, "extract_cookies_from_browser", return_value=jar
+            ),
+        ):
+            with self.assertRaises(browser_cookies.CookieExportError) as ctx:
+                browser_cookies.extract_cookie_value("arl", ["deezer.com"])
+
+        self.assertIn("no arl cookie", ctx.exception.errors[0])
 
 
 if __name__ == "__main__":

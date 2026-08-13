@@ -599,7 +599,7 @@ class AdultProviderTests(unittest.TestCase):
             items, title = adult_backend.inspect_url(extracted[0]["url"])
 
         extract.assert_called_once_with(
-            extracted[0]["url"], cookies_from_browser="")
+            extracted[0]["url"], cookies_from_browser="", cookies_file="")
         self.assertEqual(title, "Example")
         self.assertEqual(items[0]["provider"], "thisvid")
         self.assertEqual(items[0]["duration_s"], 90)
@@ -617,6 +617,7 @@ class AdultProviderTests(unittest.TestCase):
             payload["url"], "output", audio_only=False, video_format="mkv",
             progress_cb=None, cancel_event=None,
             cookies_from_browser=None,
+            cookies_file=None,
         )
 
     def test_aebn_url_inspection_returns_movie_metadata(self):

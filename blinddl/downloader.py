@@ -910,6 +910,7 @@ class DownloadQueue:
             progress_cb=progress,
             cancel_event=item.cancel_event,
             cookies_from_browser=self.config["cookies_from_browser"],
+            cookies_file=self.config.get("cookies_file"),
         )
 
     def _run_musicdl(self, item):

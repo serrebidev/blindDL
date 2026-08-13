@@ -2,14 +2,15 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Export Apple Music cookies from an installed, signed-in browser.
+"""Export browser cookies for sites that need a sign-in.
 
 yt-dlp's ``--cookies-from-browser`` only knows each browser's stock install
 directory, so Brave Beta/Nightly, Opera GX and LibreWolf are invisible to it,
 and it cannot decrypt the app-bound ("v20") cookies modern Chromium browsers
 use. This module instead enumerates the browsers actually on the machine --
 with their real profiles -- hands yt-dlp an explicit profile path for each
-one, and keeps only exports that carry the Apple Music ``media-user-token``.
+one, and writes Netscape-format cookie files (or single sign-in tokens such
+as Deezer's ``arl``) from the first browser that has them.
 """
 
 import json
@@ -281,13 +282,15 @@ def _uses_app_bound(browser_name, profile):
     return False
 
 
-def export_apple_music_cookies(dest_path, preferred=None):
-    """Extract Apple Music cookies into ``dest_path`` (Netscape format).
+def export_cookies(dest_path, preferred=None, needs=None, why=None):
+    """Extract cookies into ``dest_path`` (Netscape format) and return a label.
 
     Tries every detected browser in turn and keeps the first export that
-    carries a ``media-user-token`` for ``music.apple.com``. Returns the label
-    of the browser that supplied it. Raises :class:`CookieExportError` with a
-    per-browser ``errors`` list when none works.
+    satisfies ``needs`` (an optional ``callable(jar) -> bool``); when it is
+    None, the first browser with any cookies wins. ``why`` is the per-browser
+    note recorded when a jar fails ``needs``. Raises
+    :class:`CookieExportError` with a per-browser ``errors`` list when none
+    works.
     """
     errors = []
     for label, browser_name, profile in candidate_browsers(preferred):
@@ -302,9 +305,56 @@ def export_apple_music_cookies(dest_path, preferred=None):
         except Exception as exc:  # noqa: BLE001 - report per browser, keep going
             errors.append(f"{label}: {_explain(exc)}")
             continue
-        if not _has_apple_music_token(jar):
-            errors.append(f"{label}: no media-user-token for music.apple.com")
+        if needs is not None and not needs(jar):
+            errors.append(f"{label}: {why or 'missing the required cookie'}")
+            continue
+        if not list(jar):
+            errors.append(f"{label}: no cookies found")
             continue
         jar.save(dest_path)
         return label
+    raise CookieExportError(errors)
+
+
+def export_apple_music_cookies(dest_path, preferred=None):
+    """Extract Apple Music cookies into ``dest_path`` (Netscape format).
+
+    Keeps only exports that carry a ``media-user-token`` for
+    ``music.apple.com``.
+    """
+    return export_cookies(
+        dest_path,
+        preferred=preferred,
+        needs=_has_apple_music_token,
+        why="no media-user-token for music.apple.com",
+    )
+
+
+def extract_cookie_value(name, domains, preferred=None):
+    """Return ``(value, label)`` for the first browser with a matching cookie.
+
+    ``domains`` are domain suffixes matched against each cookie's domain
+    (``cookie.domain.endswith(suffix)``). Raises :class:`CookieExportError`
+    when no browser carries the cookie -- used for single-token sign-ins like
+    Deezer's ``arl``.
+    """
+    errors = []
+    for label, browser_name, profile in candidate_browsers(preferred):
+        if _uses_app_bound(browser_name, profile):
+            errors.append(
+                f"{label}: app-bound cookie encryption (unsupported); "
+                "export from Firefox instead"
+            )
+            continue
+        try:
+            jar = extract_cookies_from_browser(browser_name, profile)
+        except Exception as exc:  # noqa: BLE001 - report per browser, keep going
+            errors.append(f"{label}: {_explain(exc)}")
+            continue
+        for cookie in jar:
+            if cookie.name == name and any(
+                cookie.domain.endswith(domain) for domain in domains
+            ):
+                return cookie.value, label
+        errors.append(f"{label}: no {name} cookie for {', '.join(domains)}")
     raise CookieExportError(errors)

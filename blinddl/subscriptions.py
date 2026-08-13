@@ -172,6 +172,7 @@ class SubscriptionStore:
                 items, title = ytdlp_backend.extract_flat(
                     sub["url"], cookies_from_browser=
                     self.config["cookies_from_browser"],
+                    cookies_file=self.config.get("cookies_file"),
                     order=search_order.normalize(
                         sub.get("order", search_order.ORDER_RELEVANCE)))
         except Exception as exc:  # noqa: BLE001 - shown to the user

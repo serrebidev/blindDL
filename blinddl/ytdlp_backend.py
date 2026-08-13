@@ -194,8 +194,8 @@ def _iter_entries(entries, depth=MAX_NESTED_DEPTH):
             yield entry
 
 
-def extract_flat(url, cookies_from_browser=None, limit=None,
-                 order=ORDER_RELEVANCE):
+def extract_flat(url, cookies_from_browser=None, cookies_file=None,
+                 limit=None, order=ORDER_RELEVANCE):
     """Inspect a URL without downloading.
 
     Returns (items, title): items is a list of normalized dicts (one entry
@@ -223,6 +223,8 @@ def extract_flat(url, cookies_from_browser=None, limit=None,
     }
     if limit:
         opts["playlistend"] = int(limit)
+    if cookies_file:
+        opts["cookiefile"] = str(cookies_file)
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -263,7 +265,7 @@ def search(query, count=SEARCH_COUNT, order=ORDER_RELEVANCE):
 
 
 def resolve_stream(url, audio_only=False, cookies_from_browser=None,
-                   http_headers=None):
+                   cookies_file=None, http_headers=None):
     """Resolve *url* to one stream that a native media player can open.
 
     Video previews deliberately request a progressive format containing both
@@ -288,6 +290,8 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
+    if cookies_file:
+        opts["cookiefile"] = str(cookies_file)
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
 
@@ -325,7 +329,8 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
 
 def download(url, out_dir, audio_only=True, audio_format="mp3",
              video_format="mp4", progress_cb=None, cancel_event=None,
-             http_headers=None, cookies_from_browser=None):
+             http_headers=None, cookies_from_browser=None,
+             cookies_file=None):
     """Download one URL. progress_cb receives yt-dlp progress dicts.
 
     audio_format and video_format both accept "original", which means the
@@ -352,6 +357,8 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
+    if cookies_file:
+        opts["cookiefile"] = str(cookies_file)
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     if audio_only:

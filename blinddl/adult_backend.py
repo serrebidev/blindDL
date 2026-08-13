@@ -580,7 +580,8 @@ def _is_mymusclevideo_playlist_url(url):
     )
 
 
-def _inspect_mymusclevideo_playlist(url, cookies_from_browser=""):
+def _inspect_mymusclevideo_playlist(url, cookies_from_browser="",
+                                     cookies_file=""):
     response = requests.get(url, headers={"User-Agent": _UA}, timeout=30)
     response.raise_for_status()
     parser = _MyMuscleVideoSearchParser()
@@ -615,6 +616,7 @@ def _inspect_mymusclevideo_playlist(url, cookies_from_browser=""):
             "url": video_url,
             "adult_category": CONTENT_GAY,
             "cookies_from_browser": cookies_from_browser,
+            "cookies_file": cookies_file,
         }
         for video_url, title in parser.items
     ]
@@ -660,7 +662,8 @@ def _thisvid_playlist_parts(url):
     return match.groups() if match else None
 
 
-def _inspect_thisvid_playlist(url, cookies_from_browser=""):
+def _inspect_thisvid_playlist(url, cookies_from_browser="",
+                               cookies_file=""):
     playlist_id, current_slug = _thisvid_playlist_parts(url)
     response = requests.get(url, headers={"User-Agent": _UA}, timeout=30)
     response.raise_for_status()
@@ -682,7 +685,8 @@ def _inspect_thisvid_playlist(url, cookies_from_browser=""):
     items = []
     seen = set()
     for video_url, title, private in entries:
-        if video_url in seen or (private and not cookies_from_browser):
+        if video_url in seen or (
+                private and not (cookies_from_browser or cookies_file)):
             continue
         seen.add(video_url)
         items.append({
@@ -697,6 +701,7 @@ def _inspect_thisvid_playlist(url, cookies_from_browser=""):
             "url": video_url,
             "adult_category": CONTENT_GAY,
             "cookies_from_browser": cookies_from_browser,
+            "cookies_file": cookies_file,
             "requires_login": private,
         })
     if not items:
@@ -1245,15 +1250,16 @@ def inspect_url(url, config=None):
         return _inspect_aebn(url)
     if provider.download_style == "ytdlp":
         browser = config["cookies_from_browser"] if config is not None else ""
+        cookies_file = config.get("cookies_file") if config is not None else ""
         if (provider.key == "mymusclevideo"
                 and _is_mymusclevideo_playlist_url(url)):
             return _inspect_mymusclevideo_playlist(
-                url, cookies_from_browser=browser)
+                url, cookies_from_browser=browser, cookies_file=cookies_file)
         if provider.key == "thisvid" and _thisvid_playlist_parts(url):
             return _inspect_thisvid_playlist(
-                url, cookies_from_browser=browser)
+                url, cookies_from_browser=browser, cookies_file=cookies_file)
         extracted, title = ytdlp_backend.extract_flat(
-            url, cookies_from_browser=browser)
+            url, cookies_from_browser=browser, cookies_file=cookies_file)
         items = []
         for entry in extracted:
             items.append({
@@ -1267,6 +1273,7 @@ def inspect_url(url, config=None):
                 "file_size": "",
                 "url": entry["url"],
                 "cookies_from_browser": browser,
+                "cookies_file": cookies_file,
             })
         if not items:
             raise RuntimeError(f"{provider.label} returned no downloadable media.")
@@ -1518,6 +1525,7 @@ def download(payload, out_dir, progress_cb=None, cancel_event=None,
             video_format=video_format,
             progress_cb=progress_cb, cancel_event=cancel_event,
             cookies_from_browser=payload.get("cookies_from_browser"),
+            cookies_file=payload.get("cookies_file"),
         )
         return
 

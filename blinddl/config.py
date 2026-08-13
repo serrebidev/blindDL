@@ -183,6 +183,11 @@ DEFAULTS = {
     # Optional browser profile whose cookies yt-dlp may read for sites the
     # user is already signed into. Empty means no browser-cookie access.
     "cookies_from_browser": "",
+    # Optional Netscape cookies.txt exported from a browser (Settings,
+    # General, Copy from browser). When set, yt-dlp uses this file for
+    # YouTube and other signed-in sites instead of re-reading the browser
+    # live, which also sidesteps app-bound encryption.
+    "cookies_file": "",
     # Paths only: session secrets remain in user-controlled JSON files rather
     # than being copied into blindDL's config.
     "onlyfans_auth_file": "",
