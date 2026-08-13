@@ -2,5 +2,5 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-__version__ = "0.19.2"
+__version__ = "0.20.0"
 APP_NAME = "blindDL"
