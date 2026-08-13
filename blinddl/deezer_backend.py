@@ -445,6 +445,41 @@ def extract_flat(url, config=None):
     raise RuntimeError(f"Unsupported Deezer URL kind: {kind}")
 
 
+def _media_candidates(payload):
+    """Flatten Deezer's stream response to (format, source) pairs."""
+    candidates = []
+    for entry in payload.get("data") or []:
+        for media in entry.get("media") or []:
+            media_format = str(media.get("format") or "").upper() or None
+            for source in media.get("sources") or []:
+                if isinstance(source, dict) and source.get("url"):
+                    candidates.append((media_format, source))
+    return candidates
+
+
+def _request_media_sources(session, fmt, track_token):
+    """Ask Deezer for one quality, keeping its fallback behavior explicit."""
+    response = requests.post(
+        _GET_URL,
+        json={
+            "license_token": session["license_token"],
+            "media": [{"type": "FULL", "formats": [{
+                "cipher": "BF_CBC_STRIPE", "format": fmt,
+            }]}],
+            # media.deezer.com changed this field from a singular token to a
+            # list. The old spelling now returns HTTP 422 with a text body.
+            "track_tokens": [track_token],
+        },
+        headers={"User-Agent": _USER_AGENT, "Accept": "application/json",
+                 "Origin": "https://www.deezer.com",
+                 "Referer": "https://www.deezer.com/"},
+        timeout=HTTP_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return _media_candidates(payload), payload.get("errors")
+
+
 def _sanitize(name):
     for char in '<>:"/\\|?*':
         name = name.replace(char, "_")
@@ -474,31 +509,29 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None):
 
     wanted = _PREFERRED_FORMATS.get(
         config.get("deezer_format", "flac"), _DEFAULT_FORMATS)
-    response = requests.post(
-        _GET_URL,
-        json={
-            "license_token": session["license_token"],
-            "media": [{"type": "FULL", "formats": [
-                {"cipher": "BF_CBC_STRIPE", "format": fmt}
-                for fmt in wanted]}],
-            # media.deezer.com changed this field from a singular token to a
-            # list. The old spelling now returns HTTP 422 with a text body.
-            "track_tokens": [track_token],
-        },
-        headers={"User-Agent": _USER_AGENT, "Accept": "application/json",
-                 "Origin": "https://www.deezer.com",
-                 "Referer": "https://www.deezer.com/"},
-        timeout=HTTP_TIMEOUT_S,
-    )
-    response.raise_for_status()
-    payload = response.json()
     candidates = []
-    for entry in payload.get("data") or []:
-        for media in entry.get("media") or []:
-            for source in media.get("sources") or []:
-                candidates.append((media.get("format"), source))
+    fallback_candidates = []
+    details = None
+    # Send one quality per request. Apart from making the priority explicit,
+    # this prevents the gateway from choosing MP3_320 merely because it was
+    # the first source in a response that also contained FLAC.
+    for requested_format in wanted:
+        returned, details = _request_media_sources(
+            session, requested_format, track_token)
+        matching = [
+            candidate for candidate in returned
+            if candidate[0] is None or candidate[0] == requested_format
+        ]
+        if matching:
+            candidates = matching
+            break
+        # Some gateway responses report a usable fallback under the wrong
+        # request. Keep it as a last resort, but never prefer it over a
+        # matching result from a later quality request.
+        fallback_candidates.extend(returned)
     if not candidates:
-        details = payload.get("errors")
+        candidates = fallback_candidates
+    if not candidates:
         suffix = f" Deezer reported: {details}" if details else ""
         raise DeezerQualityError(
             f"This Deezer account cannot serve "
@@ -506,7 +539,7 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None):
 
     os.makedirs(out_dir, exist_ok=True)
     fmt, source = candidates[0]
-    fmt = fmt or wanted[0]
+    fmt = (fmt or wanted[0]).upper()
     ext = "flac" if fmt == "FLAC" else "mp3"
     artist = _sanitize(meta.get("ART_NAME") or "Unknown artist")
     title = _sanitize(meta.get("SNG_TITLE") or track_id)
