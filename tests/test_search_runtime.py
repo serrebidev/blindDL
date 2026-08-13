@@ -140,8 +140,14 @@ class SearchConcurrencyTests(unittest.TestCase):
         release = threading.Event()
         client = _BlockingClient("TestMusicClient", state, release)
 
+        # Building the clients takes most of the deadline, so a search that
+        # counts it finishes at about the 0.8s deadline and one that starts
+        # the clock afterwards runs to about 1.4s. The two are three tenths
+        # of a second either side of the bound below rather than the fiftieth
+        # they were at a tenth of these timings, which is what left a busy CI
+        # runner able to fail a correct search on scheduling jitter alone.
         def build_clients():
-            time.sleep(0.15)
+            time.sleep(0.6)
             return {"TestMusicClient": client}
 
         started = time.monotonic()
@@ -149,7 +155,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             with mock.patch.object(
                 musicdl_backend, "_get_clients", side_effect=build_clients
             ):
-                musicdl_backend.search("query", timeout_s=0.2)
+                musicdl_backend.search("query", timeout_s=0.8)
             elapsed = time.monotonic() - started
         finally:
             release.set()
@@ -160,7 +166,7 @@ class SearchConcurrencyTests(unittest.TestCase):
                time.monotonic() < deadline):
             time.sleep(0.01)
 
-        self.assertLess(elapsed, 0.3)
+        self.assertLess(elapsed, 1.1)
         self.assertFalse(any(t.name == "search-TestMusicClient"
                              for t in threading.enumerate()))
 

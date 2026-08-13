@@ -1639,22 +1639,23 @@ class GuiInteractionTests(unittest.TestCase):
     def test_settings_opens_on_the_download_folder_not_the_ok_button(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)
-        # The dialog's default button takes the focus when it is shown, which
-        # is what used to put Settings on OK -- past every setting in it.
-        dialog.FindWindow(wx.ID_OK).SetFocus()
+        folder_box = dialog.dir_picker.GetTextCtrl()
 
-        dialog.focus_first_control()
+        # ShowModal sends this once the dialog's default button has taken
+        # the focus, which is what used to leave Settings on OK -- past
+        # every setting in it. Where the focus really lands cannot be read
+        # back from a dialog that was never shown: wxGTK leaves it where it
+        # was and wxOSX reports nothing at all, so what is checked here is
+        # the control this asks for.
+        with mock.patch.object(folder_box, "SetFocus") as set_focus:
+            dialog.InitDialog()
 
+        set_focus.assert_called_once_with()
         self.assertEqual(dialog.notebook.GetSelection(), 0)
         self.assertEqual(dialog.notebook.GetPageText(0), "Downloads")
-        self.assertIs(
-            wx.Window.FindFocus(), dialog.dir_picker.GetTextCtrl()
-        )
         # The edit box inside the picker carries the name too, so the
         # control the focus lands in is not an unlabelled one.
-        self.assertEqual(
-            dialog.dir_picker.GetTextCtrl().GetName(), "Download folder"
-        )
+        self.assertEqual(folder_box.GetName(), "Download folder")
         dialog.Destroy()
 
     def test_speak_status_checkbox_defaults_on_and_saves(self):
