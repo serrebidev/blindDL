@@ -44,16 +44,16 @@ _KEY_SECRET = b"g4el58wc0zvf9na1"
 _CHUNK = 2048
 HTTP_TIMEOUT_S = 30
 
-# Preference order per blindDL audio-format setting: flac and "original"
-# get lossless first, everything else gets MP3 320. No silent drop to
-# 128 kbps -- if the account cannot serve these, the caller falls back to
-# Side B.
+# Preference order per the dedicated Deezer format setting: flac gets
+# lossless first (Deezer's own master), mp3_320 asks for 320 kbps directly.
+# No silent drop to 128 kbps -- if the account cannot serve these, the
+# caller falls back to Side B.
 _PREFERRED_FORMATS = {
     "flac": ["FLAC", "MP3_320"],
-    # Deezer's own master is the FLAC, so "no conversion" means taking it.
-    "original": ["FLAC", "MP3_320"],
+    "mp3_320": ["MP3_320"],
 }
-_DEFAULT_FORMATS = ["MP3_320"]
+# FLAC is the default when the setting is missing or unrecognized.
+_DEFAULT_FORMATS = ["FLAC", "MP3_320"]
 # /search/track caps a request at 100 rows; two pages reach the 200 blindDL
 # lists per search.
 _SEARCH_LIMIT = 100
@@ -472,7 +472,8 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None):
             f"Deezer gave no stream token for track {track_id} "
             "(region-locked or unavailable).")
 
-    wanted = _PREFERRED_FORMATS.get(config["audio_format"], _DEFAULT_FORMATS)
+    wanted = _PREFERRED_FORMATS.get(
+        config.get("deezer_format", "flac"), _DEFAULT_FORMATS)
     response = requests.post(
         _GET_URL,
         json={

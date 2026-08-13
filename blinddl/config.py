@@ -178,6 +178,10 @@ DEFAULTS = {
     # Deezer ARL cookie: unlocks native FLAC/MP3 320 downloads and Deezer's
     # word-level (karaoke) lyrics. Empty = Side B audio and LRCLIB lyrics.
     "deezer_arl": "",
+    # What ARL-backed Deezer downloads are saved as: "flac" takes Deezer's
+    # lossless master (falling back to MP3 320 where the account or track
+    # cannot serve FLAC), "mp3_320" asks for 320 kbps directly.
+    "deezer_format": "flac",
     # Apple Music cookies file (Netscape format): unlocks full Apple Music
     # downloads (songs, albums, and playlists). Export browser cookies while
     # logged in at music.apple.com. Empty = Apple Music downloads are

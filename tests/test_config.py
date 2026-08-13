@@ -53,6 +53,11 @@ class ConfigLoadTests(unittest.TestCase):
 
         self.assertEqual(config["search_timeout_s"], 12)
 
+    def test_deezer_format_defaults_to_flac(self):
+        config = self._load({})
+
+        self.assertEqual(config["deezer_format"], "flac")
+
 
 if __name__ == "__main__":
     unittest.main()

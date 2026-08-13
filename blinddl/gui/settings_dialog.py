@@ -48,6 +48,12 @@ APPLE_FORMAT_CHOICES = [
     ("MP3 V2 (~190 kbps)", "mp3_v2"),
     ("MP3 320 kbps", "mp3_320"),
 ]
+# Deezer (ARL-backed) output formats. FLAC is Deezer's own lossless master;
+# MP3 320 is what free accounts and most tracks top out at.
+DEEZER_FORMAT_CHOICES = [
+    ("FLAC (lossless, best quality)", "flac"),
+    ("MP3 320 kbps", "mp3_320"),
+]
 BROWSER_COOKIE_CHOICES = [
     ("None", ""),
     ("Chrome", "chrome"),
@@ -851,6 +857,18 @@ class SettingsDialog(wx.Dialog):
 
         sizer.Add(self._heading(page, "Deezer"), 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.lyrics_check, 0, wx.ALL, 8)
+        deezer_format_label = wx.StaticText(page, label="Default &format:")
+        self.deezer_format_choice = self._choice(
+            page,
+            DEEZER_FORMAT_CHOICES,
+            config.get("deezer_format", "flac"),
+            "Deezer default format",
+        )
+        self.deezer_format_choice.SetHelpText(
+            "FLAC takes Deezer's lossless master, falling back to MP3 320 "
+            "where it is unavailable. MP3 320 asks for that bitrate directly."
+        )
+        _row(sizer, deezer_format_label, self.deezer_format_choice)
         arl_row = wx.BoxSizer(wx.HORIZONTAL)
         arl_row.Add(arl_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         arl_box = wx.BoxSizer(wx.HORIZONTAL)
@@ -1061,6 +1079,9 @@ class SettingsDialog(wx.Dialog):
             self.justforfans_auth_picker.GetPath().strip()
         )
         self.config["deezer_arl"] = self.arl_text.GetValue().strip()
+        self.config["deezer_format"] = DEEZER_FORMAT_CHOICES[
+            self.deezer_format_choice.GetSelection()
+        ][1]
         self.config["apple_music_cookies"] = self.am_cookies_picker.GetPath().strip()
         self.config["apple_music_format"] = APPLE_FORMAT_CHOICES[
             self.am_format_choice.GetSelection()

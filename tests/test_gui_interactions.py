@@ -85,7 +85,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         _soulseek_media_kind,
         _sorted_results,
     )
-    from blinddl.gui.settings_dialog import SettingsDialog
+    from blinddl.gui.settings_dialog import DEEZER_FORMAT_CHOICES, SettingsDialog
     from blinddl.gui.soulseek_user_dialog import UserBrowserDialog
     from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import (
@@ -1426,6 +1426,21 @@ class GuiInteractionTests(unittest.TestCase):
 
         self.assertEqual(dialog.arl_paste_btn.GetLabel(), "&Paste")
         self.assertEqual(dialog.arl_text.GetName(), "Deezer ARL cookie")
+        dialog.Destroy()
+
+    def test_deezer_format_defaults_to_flac_and_saves(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        # FLAC is the first choice and the default.
+        self.assertEqual(dialog.deezer_format_choice.GetSelection(), 0)
+        self.assertEqual(dialog.deezer_format_choice.GetStringSelection(),
+                         DEEZER_FORMAT_CHOICES[0][0])
+        dialog.deezer_format_choice.SetSelection(1)
+        dialog.apply()
+
+        self.assertEqual(config["deezer_format"], "mp3_320")
+        self.assertTrue(config.saved)
         dialog.Destroy()
 
     def test_failed_cookie_export_removes_secure_temporary_file(self):
