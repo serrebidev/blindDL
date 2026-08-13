@@ -125,6 +125,11 @@ def main() -> int | None:
     prepare_runtime_path()
     if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
         return _self_test(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "--app-bound-export":
+        # Elevated helper relaunched from blinddl.app_bound.export_elevated.
+        from . import app_bound
+
+        return app_bound.main(["--export", sys.argv[2]])
 
     import wx
 

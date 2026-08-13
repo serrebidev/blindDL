@@ -155,6 +155,20 @@ if importlib.util.find_spec("libtorrent") is None:
     )
 hiddenimports.append("libtorrent")
 
+# Chromium app-bound cookie decryption (blinddl/app_bound.py) reaches into
+# win32crypt/win32security for DPAPI and win32com.shell for the elevated
+# helper launcher. Most of those imports are lazy, so collect them explicitly
+# rather than trusting bytecode analysis on the Windows build machine.
+if sys.platform == "win32":
+    hiddenimports += [
+        "win32api",
+        "win32con",
+        "win32crypt",
+        "win32security",
+        "win32event",
+        "win32com.shell.shell",
+    ]
+
 for distribution in (
     "wxPython",
     "yt-dlp",

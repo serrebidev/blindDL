@@ -29,6 +29,10 @@ defusedxml>=0.7.1
 libtorrent>=2.0.11; python_version < "3.14"
 mutagen>=1.47,<2
 pycryptodome>=3.23,<4
+# Decrypting Chromium's app-bound ("v20") cookies needs DPAPI (win32crypt/
+# win32security) and the elevated-helper launcher (win32com). Optional at
+# runtime on macOS/Linux, required for the Windows build.
+pywin32>=306; sys_platform == "win32"
 platformdirs>=4.9.4,<5
 tzdata>=2025.2
 # Optional at runtime through Settings, but included in complete installs so

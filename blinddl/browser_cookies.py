@@ -11,6 +11,10 @@ use. This module instead enumerates the browsers actually on the machine --
 with their real profiles -- hands yt-dlp an explicit profile path for each
 one, and writes Netscape-format cookie files (or single sign-in tokens such
 as Deezer's ``arl``) from the first browser that has them.
+
+App-bound browsers are decrypted too: when one is needed, blindDL relaunches
+itself as a short-lived elevated helper (a single UAC prompt) that unwraps the
+app-bound key and decrypts the cookies -- see :mod:`blinddl.app_bound`.
 """
 
 import json
@@ -194,38 +198,45 @@ def _firefox_candidates(profiles_root):
 
 
 def candidate_browsers(preferred=None):
-    """Yield ``(label, browser_name, profile)`` for every detected browser.
+    """Yield ``(label, browser_name, profile, user_data_dir)`` per browser.
 
     ``profile`` is an absolute directory path, or ``None`` to let yt-dlp use
-    its own default-path detection. ``preferred`` is a ``cookies_from_browser``
-    value to try first; when it names a browser that was not detected it is
-    added as a fallback so the user's explicit choice is still honoured.
+    its own default-path detection; ``user_data_dir`` is the Chromium install
+    root (for ``Local State``) and is ``None`` for Firefox. ``preferred`` is a
+    ``cookies_from_browser`` value to try first; when it names a browser that
+    was not detected it is added as a fallback so the user's explicit choice
+    is still honoured.
     """
     candidates = []
 
     for key, label, user_data_dir in _chromium_installs():
         for profile in _chromium_candidates(user_data_dir):
             if profile == user_data_dir:
-                candidates.append((label, key, profile))
+                candidates.append((label, key, profile, user_data_dir))
             elif os.path.basename(profile) == "Default":
-                candidates.append((label, key, profile))
+                candidates.append((label, key, profile, user_data_dir))
             else:
                 candidates.append(
-                    (f"{label} ({os.path.basename(profile)})", key, profile)
+                    (
+                        f"{label} ({os.path.basename(profile)})",
+                        key,
+                        profile,
+                        user_data_dir,
+                    )
                 )
 
     for label, profiles_root in _firefox_installs():
         for profile in _firefox_candidates(profiles_root):
             candidates.append(
-                (f"{label} ({os.path.basename(profile)})", "firefox", profile)
+                (f"{label} ({os.path.basename(profile)})", "firefox", profile, None)
             )
 
     # yt-dlp's own default-path detection, so a browser installed somewhere
     # unusual still gets a chance. Skip keys we already enumerated.
-    seen = {key for _label, key, _profile in candidates}
+    seen = {key for _label, key, _profile, _user_data in candidates}
     for key, label in _BROWSER_LABELS.items():
         if key not in seen:
-            candidates.append((label, key, None))
+            candidates.append((label, key, None, None))
 
     if preferred:
         matched = [c for c in candidates if c[1] == preferred]
@@ -233,7 +244,7 @@ def candidate_browsers(preferred=None):
         candidates = matched + rest
         if not matched:
             label = _BROWSER_LABELS.get(preferred, preferred.title())
-            candidates.insert(0, (label, preferred, None))
+            candidates.insert(0, (label, preferred, None, None))
     return candidates
 
 
@@ -257,48 +268,66 @@ def _explain(exc):
     return message or type(exc).__name__
 
 
-def _uses_app_bound(browser_name, profile):
-    """True when a Chromium profile's Local State advertises app-bound crypto.
+def _uses_app_bound(browser_name, profile, user_data_dir):
+    """True when a Chromium install's Local State advertises app-bound crypto.
 
-    App-bound ("v20") cookies can only be unwrapped by the browser's own
-    elevation service, which refuses callers that are not the browser itself;
-    the only known workarounds need SYSTEM privileges or process injection,
-    so blindDL treats these browsers as unreadable and points the user at
-    Firefox instead, whose cookie jar is not encrypted.
+    App-bound ("v20") cookies are decrypted by the elevated helper, so this
+    only decides *how* a browser is read, not whether it is skipped.
     """
-    if browser_name == "firefox" or not profile:
+    if browser_name == "firefox" or not user_data_dir:
         return False
-    for path in (
-        os.path.join(os.path.dirname(profile), "Local State"),
-        os.path.join(profile, "Local State"),
-    ):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                state = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        if "app_bound_encrypted_key" in (state.get("os_crypt") or {}):
-            return True
-    return False
+    try:
+        with open(
+            os.path.join(user_data_dir, "Local State"), encoding="utf-8"
+        ) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return "app_bound_encrypted_key" in (state.get("os_crypt") or {})
 
 
-def export_cookies(dest_path, preferred=None, needs=None, why=None):
+def _elevate(candidates, dest_path, require, errors):
+    """Elevate once to export app-bound cookies; append errors, return label.
+
+    ``candidates`` is a list of ``(label, user_data_dir, profile)`` in
+    preference order. Returns the matching browser's label, or None when no
+    app-bound browser matched (or elevation is unavailable).
+    """
+    if sys.platform not in ("win32", "cygwin"):
+        errors.append(
+            "app-bound cookie encryption (unsupported on this platform); "
+            "export from Firefox instead"
+        )
+        return None
+    try:
+        from . import app_bound
+    except ImportError as exc:
+        errors.append(f"app-bound cookie decryption is unavailable: {exc}")
+        return None
+    label, app_errors = app_bound.export_elevated(
+        candidates, dest_path, require=require
+    )
+    errors.extend(app_errors)
+    return label
+
+
+def export_cookies(dest_path, preferred=None, needs=None, why=None, require=None):
     """Extract cookies into ``dest_path`` (Netscape format) and return a label.
 
     Tries every detected browser in turn and keeps the first export that
     satisfies ``needs`` (an optional ``callable(jar) -> bool``); when it is
     None, the first browser with any cookies wins. ``why`` is the per-browser
-    note recorded when a jar fails ``needs``. Raises
+    note recorded when a jar fails ``needs``. ``require`` is an optional
+    ``(name, domain_suffixes)`` pair handed to the app-bound helper so it can
+    skip browsers that decrypt but lack the cookie. Raises
     :class:`CookieExportError` with a per-browser ``errors`` list when none
     works.
     """
     errors = []
-    for label, browser_name, profile in candidate_browsers(preferred):
-        if _uses_app_bound(browser_name, profile):
-            errors.append(
-                f"{label}: app-bound cookie encryption (unsupported); "
-                "export from Firefox instead"
-            )
+    app_bound = []
+    for label, browser_name, profile, user_data_dir in candidate_browsers(preferred):
+        if _uses_app_bound(browser_name, profile, user_data_dir):
+            app_bound.append((label, user_data_dir, profile))
             continue
         try:
             jar = extract_cookies_from_browser(browser_name, profile)
@@ -313,6 +342,11 @@ def export_cookies(dest_path, preferred=None, needs=None, why=None):
             continue
         jar.save(dest_path)
         return label
+
+    if app_bound:
+        label = _elevate(app_bound, dest_path, require, errors)
+        if label:
+            return label
     raise CookieExportError(errors)
 
 
@@ -327,6 +361,7 @@ def export_apple_music_cookies(dest_path, preferred=None):
         preferred=preferred,
         needs=_has_apple_music_token,
         why="no media-user-token for music.apple.com",
+        require=("media-user-token", ("music.apple.com",)),
     )
 
 
@@ -339,12 +374,10 @@ def extract_cookie_value(name, domains, preferred=None):
     Deezer's ``arl``.
     """
     errors = []
-    for label, browser_name, profile in candidate_browsers(preferred):
-        if _uses_app_bound(browser_name, profile):
-            errors.append(
-                f"{label}: app-bound cookie encryption (unsupported); "
-                "export from Firefox instead"
-            )
+    app_bound = []
+    for label, browser_name, profile, user_data_dir in candidate_browsers(preferred):
+        if _uses_app_bound(browser_name, profile, user_data_dir):
+            app_bound.append((label, user_data_dir, profile))
             continue
         try:
             jar = extract_cookies_from_browser(browser_name, profile)
@@ -357,4 +390,39 @@ def extract_cookie_value(name, domains, preferred=None):
             ):
                 return cookie.value, label
         errors.append(f"{label}: no {name} cookie for {', '.join(domains)}")
+
+    if app_bound:
+        value, label = _extract_app_bound_value(app_bound, name, domains, errors)
+        if value is not None:
+            return value, label
     raise CookieExportError(errors)
+
+
+def _extract_app_bound_value(candidates, name, domains, errors):
+    """Return ``(value, label)`` for an app-bound browser's matching cookie."""
+    import tempfile
+    from http.cookiejar import MozillaCookieJar
+
+    descriptor, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="blinddl_arl_")
+    os.close(descriptor)
+    try:
+        label = _elevate(candidates, tmp_path, (name, domains), errors)
+        if label is None:
+            return None, None
+        jar = MozillaCookieJar(tmp_path)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        for cookie in jar:
+            if cookie.name == name and any(
+                cookie.domain.endswith(domain) for domain in domains
+            ):
+                return cookie.value, label
+        errors.append(f"{label}: no {name} cookie for {', '.join(domains)}")
+        return None, None
+    except (OSError, ValueError) as exc:  # noqa: BLE001 - malformed export
+        errors.append(f"app-bound cookie export could not be read: {exc}")
+        return None, None
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
