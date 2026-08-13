@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         search_order,
         speech,
         soulseek_backend,
+        updater,
         ytdlp_backend,
     )
     from blinddl.downloader import (
@@ -178,6 +180,17 @@ class _Queue:
 class _SettingsConfig(dict):
     def __init__(self):
         super().__init__(copy.deepcopy(DEFAULTS))
+        self.saved = False
+
+    def save(self):
+        self.saved = True
+
+
+class _SavingConfig(dict):
+    """A config holding only the keys one test cares about."""
+
+    def __init__(self, values):
+        super().__init__(values)
         self.saved = False
 
     def save(self):
@@ -398,6 +411,222 @@ class GuiInteractionTests(unittest.TestCase):
         call_later.assert_called_once_with(100, hide)
         hide.assert_called_once_with()
 
+    @staticmethod
+    def _update_holder(**overrides):
+        config = {
+            "auto_update": True,
+            "auto_install_update": False,
+            "update_check_hours": 12,
+            "last_update_check": 0,
+        }
+        config.update(overrides.pop("config", {}))
+        holder = SimpleNamespace(
+            _closing=False,
+            _update_checking=False,
+            _pending_update=None,
+            _pending_update_announced=False,
+            config=config,
+            announce=mock.Mock(),
+            _auto_update_worker=mock.Mock(),
+        )
+        holder.config = _SavingConfig(config)
+        for name, value in overrides.items():
+            setattr(holder, name, value)
+        return holder
+
+    def test_the_startup_check_does_not_wait_for_the_interval(self):
+        # A release that landed while blindDL was closed should be found
+        # when it opens, not up to twelve hours afterwards.
+        holder = self._update_holder()
+        holder.config["last_update_check"] = time.time()
+
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._maybe_auto_update(holder, force=True)
+
+        thread.assert_called_once()
+        self.assertTrue(holder._update_checking)
+
+    def test_later_checks_wait_for_the_twelve_hour_interval(self):
+        holder = self._update_holder()
+        holder.config["last_update_check"] = time.time() - 3600
+
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._maybe_auto_update(holder)
+        thread.assert_not_called()
+
+        holder.config["last_update_check"] = time.time() - 13 * 3600
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._maybe_auto_update(holder)
+        thread.assert_called_once()
+
+    def test_a_check_already_running_is_not_started_twice(self):
+        holder = self._update_holder(_update_checking=True)
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._maybe_auto_update(holder, force=True)
+        thread.assert_not_called()
+
+        # Nor while a downloaded update is still waiting to be installed.
+        holder = self._update_holder(_pending_update=("update", "package"))
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._maybe_auto_update(holder, force=True)
+        thread.assert_not_called()
+
+        holder = self._update_holder(config={"auto_update": False})
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._maybe_auto_update(holder, force=True)
+        thread.assert_not_called()
+
+    def test_a_found_release_is_only_named_unless_auto_install_is_on(self):
+        holder = self._update_holder()
+        update = SimpleNamespace(version="9.9.9")
+
+        with (
+            mock.patch.object(updater, "check_for_app_update",
+                              return_value=update),
+            mock.patch.object(updater, "download_app_update") as download,
+            mock.patch.object(wx, "CallAfter",
+                              side_effect=lambda fn, *a: fn(*a)),
+        ):
+            MainFrame._check_for_release(holder, lambda _line: None)
+
+        download.assert_not_called()
+        self.assertIn("9.9.9", holder.announce.call_args.args[0])
+        self.assertIn("Help", holder.announce.call_args.args[0])
+
+    def test_a_check_that_cannot_reach_github_says_nothing(self):
+        # This runs on its own every twelve hours; a passing network fault
+        # is not news, and saying so would interrupt whatever is being read.
+        holder = self._update_holder()
+        with (
+            mock.patch.object(updater, "check_for_app_update",
+                              side_effect=OSError("no route to host")),
+            mock.patch.object(wx, "CallAfter",
+                              side_effect=lambda fn, *a: fn(*a)),
+        ):
+            MainFrame._check_for_release(holder, lambda _line: None)
+        holder.announce.assert_not_called()
+
+    def test_auto_install_downloads_and_reports_a_download_that_fails(self):
+        update = SimpleNamespace(version="9.9.9")
+        holder = self._update_holder(
+            config={"auto_install_update": True},
+            _update_downloaded=mock.Mock(),
+        )
+
+        with (
+            mock.patch.object(updater, "check_for_app_update",
+                              return_value=update),
+            mock.patch.object(updater, "download_app_update",
+                              return_value="package.exe") as download,
+            mock.patch.object(wx, "CallAfter",
+                              side_effect=lambda fn, *a: fn(*a)),
+        ):
+            MainFrame._check_for_release(holder, lambda _line: None)
+
+        download.assert_called_once()
+        holder._update_downloaded.assert_called_once_with(update, "package.exe")
+
+        # A download that fails after an update was found is worth saying:
+        # by then something was expected to happen.
+        holder = self._update_holder(config={"auto_install_update": True})
+        with (
+            mock.patch.object(updater, "check_for_app_update",
+                              return_value=update),
+            mock.patch.object(updater, "download_app_update",
+                              side_effect=RuntimeError("checksum failed")),
+            mock.patch.object(wx, "CallAfter",
+                              side_effect=lambda fn, *a: fn(*a)),
+        ):
+            MainFrame._check_for_release(holder, lambda _line: None)
+        self.assertIn("checksum failed", holder.announce.call_args.args[0])
+
+    def test_an_update_waits_for_the_downloads_to_finish(self):
+        update = SimpleNamespace(version="9.9.9")
+        holder = self._update_holder(
+            _pending_update=(update, "package.exe"),
+            queue=SimpleNamespace(counts=lambda: (1, 2, 0, 0)),
+            _start_update_idle_timer=mock.Mock(),
+            _stop_update_idle_timer=mock.Mock(),
+        )
+
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._install_pending_update(holder)
+            # A second look does not repeat itself at the user.
+            MainFrame._install_pending_update(holder)
+
+        thread.assert_not_called()
+        holder._start_update_idle_timer.assert_called()
+        self.assertEqual(holder.announce.call_count, 1)
+        self.assertIn("once the downloads finish",
+                      holder.announce.call_args.args[0])
+        # The package is still there, waiting for a quieter moment.
+        self.assertIsNotNone(holder._pending_update)
+
+    def test_an_update_installs_once_the_queue_is_quiet(self):
+        update = SimpleNamespace(version="9.9.9")
+        holder = self._update_holder(
+            _pending_update=(update, "package.exe"),
+            queue=SimpleNamespace(counts=lambda: (0, 0, 5, 1)),
+            _start_update_idle_timer=mock.Mock(),
+            _stop_update_idle_timer=mock.Mock(),
+            _install_update_worker=mock.Mock(),
+        )
+
+        with mock.patch.object(threading, "Thread") as thread:
+            MainFrame._install_pending_update(holder)
+
+        holder._stop_update_idle_timer.assert_called_once_with()
+        self.assertEqual(thread.call_args.kwargs["args"],
+                         (update, "package.exe"))
+        # Cleared before the worker starts, so a tick landing meanwhile
+        # cannot start the same install twice.
+        self.assertIsNone(holder._pending_update)
+
+    def test_installing_closes_blinddl_through_the_ordinary_shutdown(self):
+        update = SimpleNamespace(version="9.9.9")
+        holder = self._update_holder(
+            _quitting=False, Close=mock.Mock()
+        )
+
+        MainFrame._update_started(holder, update, True)
+
+        # Closing this way is what writes the queue, torrents and Soulseek
+        # shares down before the window goes.
+        self.assertTrue(holder._quitting)
+        holder.Close.assert_called_once_with()
+        self.assertIn("restart", holder.announce.call_args.args[0])
+
+        # macOS opens a disk image instead, so blindDL stays where it is.
+        holder = self._update_holder(_quitting=False, Close=mock.Mock())
+        MainFrame._update_started(holder, update, False)
+        holder.Close.assert_not_called()
+        self.assertIn("Finish the install", holder.announce.call_args.args[0])
+
+    def test_check_for_updates_lives_in_the_help_menu(self):
+        holder = mock.MagicMock()
+
+        MainFrame._build_menus(holder)
+
+        menubar = holder.SetMenuBar.call_args[0][0]
+        labels = [menubar.GetMenuLabelText(index)
+                  for index in range(menubar.GetMenuCount())]
+        self.assertEqual(labels, ["File", "Tools", "Help"])
+        help_menu = menubar.GetMenu(labels.index("Help"))
+        help_labels = [item.GetItemLabelText() for item in help_menu.GetMenuItems()
+                       if not item.IsSeparator()]
+        self.assertIn("Check for updates...", help_labels)
+        # Tools is what blindDL fetches media with; updating blindDL itself
+        # is not one of those things and no longer sits there.
+        tools_menu = menubar.GetMenu(labels.index("Tools"))
+        tools_labels = [item.GetItemLabelText()
+                        for item in tools_menu.GetMenuItems()
+                        if not item.IsSeparator()]
+        self.assertFalse([label for label in tools_labels
+                          if "update" in label.casefold()])
+        # The shortcut moved with it rather than being left behind.
+        item = help_menu.FindItemById(holder.ID_UPDATE)
+        self.assertIn("CTRL+U", item.GetItemLabel().upper())
+
     def test_exit_menu_leaves_alt_f4_to_the_window_close_path(self):
         # A menu accelerator is matched before Windows' own close handling, so
         # labelling Exit with Alt+F4 would quit outright instead of closing the
@@ -441,7 +670,7 @@ class GuiInteractionTests(unittest.TestCase):
             queue=SimpleNamespace(start=mock.Mock()),
             subs=SimpleNamespace(start=mock.Mock()),
             config={"soulseek_enabled": True},
-            _maybe_auto_update=mock.Mock(),
+            _start_update_checks=mock.Mock(),
             _apply_soulseek_setting=mock.Mock(),
         )
 
@@ -450,7 +679,7 @@ class GuiInteractionTests(unittest.TestCase):
 
         holder.queue.start.assert_called_once_with()
         holder.subs.start.assert_called_once_with()
-        holder._maybe_auto_update.assert_called_once_with()
+        holder._start_update_checks.assert_called_once_with()
         holder._apply_soulseek_setting.assert_called_once_with()
 
     def test_search_queues_every_selected_result(self):
@@ -1639,7 +1868,7 @@ class GuiInteractionTests(unittest.TestCase):
     def test_settings_opens_on_the_download_folder_not_the_ok_button(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)
-        folder_box = dialog.dir_picker.GetTextCtrl()
+        folder_box = dialog.first_control()
 
         # ShowModal sends this once the dialog's default button has taken
         # the focus, which is what used to leave Settings on OK -- past
@@ -1656,6 +1885,33 @@ class GuiInteractionTests(unittest.TestCase):
         # The edit box inside the picker carries the name too, so the
         # control the focus lands in is not an unlabelled one.
         self.assertEqual(folder_box.GetName(), "Download folder")
+        # And the box is asked for outright, because wxGTK's default picker
+        # is a bare Browse button with no way to read or type the path.
+        self.assertIsNotNone(dialog.dir_picker.GetTextCtrl())
+        dialog.Destroy()
+
+    def test_automatic_install_is_off_by_default_and_follows_the_check(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        # Checking is on by default; installing without being asked is not.
+        self.assertTrue(dialog.update_check.GetValue())
+        self.assertFalse(dialog.auto_install_check.GetValue())
+        self.assertTrue(dialog.auto_install_check.IsEnabled())
+
+        # Nothing to install automatically if nothing is looking.
+        dialog.update_check.SetValue(False)
+        dialog.update_check.ProcessEvent(
+            wx.CommandEvent(wx.EVT_CHECKBOX.typeId, dialog.update_check.GetId())
+        )
+        self.assertFalse(dialog.auto_install_check.IsEnabled())
+
+        dialog.update_check.SetValue(True)
+        dialog.auto_install_check.SetValue(True)
+        dialog.apply()
+
+        self.assertTrue(config["auto_install_update"])
+        self.assertTrue(config.saved)
         dialog.Destroy()
 
     def test_speak_status_checkbox_defaults_on_and_saves(self):

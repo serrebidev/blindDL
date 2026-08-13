@@ -21,7 +21,7 @@ def app_data_dir():
 
 # Saved configs carry every key, so a changed default would never reach a
 # user who has run blindDL before. This is how one is handed on anyway.
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 DEFAULTS = {
     # Where finished downloads go.
@@ -216,10 +216,18 @@ DEFAULTS = {
     # How often subscriptions are checked for new items, in hours.
     "sub_check_hours": 6,
     # Automatically check runtime components. Frozen builds update them only
-    # as part of a complete blindDL release.
+    # as part of a complete blindDL release. The check runs once at startup
+    # whatever the interval below says, so a release that landed while
+    # blindDL was closed is found when it opens rather than hours later.
     "auto_update": True,
-    # Minimum hours between automatic update checks.
-    "update_check_hours": 24,
+    # Download and install a new blindDL release as soon as the check finds
+    # one, instead of saying it is available and waiting to be asked. Off by
+    # default: finishing an update restarts blindDL, and taking the window
+    # away is not something to do unasked. Even when on, it waits for the
+    # download queue to go quiet first.
+    "auto_install_update": False,
+    # Hours between automatic update checks after the one at startup.
+    "update_check_hours": 12,
     # Timestamp (unix) of the last automatic update check; 0 = never.
     "last_update_check": 0,
     # Bumped when a default changes in a way an existing config should follow.
@@ -284,6 +292,10 @@ class Config:
             # Five seconds was too short for all music providers to get a
             # useful chance to answer. Preserve any timeout the user chose.
             self.data["search_timeout_s"] = 30
+        if from_version < 3 and self.data["update_check_hours"] == 24:
+            # Twice a day rather than once, so a release is picked up the
+            # same day it lands. An interval the user chose is left alone.
+            self.data["update_check_hours"] = 12
         self.data["config_version"] = CONFIG_VERSION
         self.save()
 

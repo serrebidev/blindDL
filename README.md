@@ -20,8 +20,10 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.
-- Checks for new BlindDL releases, verifies the download checksum, and starts
-  the correct platform update from inside the app.
+- Checks for new BlindDL releases on startup and every 12 hours, verifies the
+  download checksum, and starts the correct platform update from inside the
+  app — or installs it on its own, once your downloads have finished, if you
+  ask it to in Settings, Window.
 - Searches music by track title, album, or artist, and downloads a whole album as every track on it.
 - Uses native controls, labeled fields, status-bar announcements, context menus, and complete keyboard operation.
 - Speaks its status-bar announcements through NVDA, JAWS, and friends, and shows them on a Braille display, so a finished search or a failed download arrives on its own. Turn it off in Settings, Window.
@@ -137,7 +139,7 @@ GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and
 - Ctrl+F — jump to search
 - Ctrl+O — open the download folder
 - Ctrl+, — open Settings
-- Ctrl+U — check for updates
+- Ctrl+U — check for updates (Help menu)
 - Ctrl+Shift+C — check all subscriptions now
 - Ctrl+Shift+S — choose which sites are searched
 - Ctrl+Q — exit for real, even when closing is set to hide in the tray

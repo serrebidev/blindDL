@@ -53,6 +53,25 @@ class ConfigLoadTests(unittest.TestCase):
 
         self.assertEqual(config["search_timeout_s"], 12)
 
+    def test_daily_update_check_migrates_to_twice_a_day(self):
+        config = self._load({"config_version": 2, "update_check_hours": 24})
+
+        self.assertEqual(config["update_check_hours"], 12)
+        self.assertEqual(config["config_version"], config_module.CONFIG_VERSION)
+
+    def test_a_chosen_update_interval_survives_migration(self):
+        config = self._load({"config_version": 2, "update_check_hours": 48})
+
+        self.assertEqual(config["update_check_hours"], 48)
+
+    def test_updates_are_not_installed_behind_the_users_back(self):
+        # Finishing an update restarts blindDL, so it is opt-in even though
+        # checking for one is not.
+        config = self._load({})
+
+        self.assertTrue(config["auto_update"])
+        self.assertFalse(config["auto_install_update"])
+
     def test_deezer_format_defaults_to_flac(self):
         config = self._load({})
 

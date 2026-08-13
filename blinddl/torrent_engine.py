@@ -156,7 +156,7 @@ def install_hint():
     python = f"{sys.version_info.major}.{sys.version_info.minor}"
     return (
         "The libtorrent package is not installed, so blindDL cannot download "
-        "torrents itself. Tools, Check for updates installs it. If the "
+        "torrents itself. Help, Check for updates installs it. If the "
         f"install fails, libtorrent publishes no build for Python {python} "
         "yet; run blindDL on an earlier Python, or leave the setting off and "
         "torrents will open in your own BitTorrent client as before.")

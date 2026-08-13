@@ -126,14 +126,21 @@ class SettingsDialog(wx.Dialog):
         event.Skip()
         self.focus_first_control()
 
-    def focus_first_control(self):
-        """Put the focus on the download folder box, the first setting."""
+    def first_control(self):
+        """The control Settings opens on: the download folder box.
+
+        A picker is an edit box next to a Browse button, and the edit box is
+        what makes the path readable and typable straight away -- focusing
+        the picker itself would land on the button. wxGTK can still build a
+        picker without one, in which case the picker is all there is to
+        focus, so this never assumes the box exists.
+        """
         picker = self.dir_picker
-        # The picker is a text box next to a Browse button. Focusing the
-        # text box is what makes the path typable and readable straight
-        # away; focusing the picker itself would land on the button.
         text = picker.GetTextCtrl() if hasattr(picker, "GetTextCtrl") else None
-        (text or picker).SetFocus()
+        return text or picker
+
+    def focus_first_control(self):
+        self.first_control().SetFocus()
 
     # -- pages ---------------------------------------------------------------
 
@@ -159,11 +166,16 @@ class SettingsDialog(wx.Dialog):
         config = self.config
 
         dir_label = wx.StaticText(page, label="&Download folder:")
+        # The style is spelled out because wxGTK leaves the edit box out of
+        # its default: the download folder would be a bare Browse button
+        # there, with no way to read or type the path, while Windows and
+        # macOS get a box. The Torrents page asks for it the same way.
         self.dir_picker = _name_picker(
             wx.DirPickerCtrl(
                 page,
                 path=config["download_dir"],
                 message="Choose download folder",
+                style=wx.DIRP_USE_TEXTCTRL | wx.DIRP_DIR_MUST_EXIST,
             ),
             "Download folder",
         )
@@ -802,6 +814,30 @@ class SettingsDialog(wx.Dialog):
         )
         self.update_check = wx.CheckBox(page, label=update_label)
         self.update_check.SetValue(bool(config["auto_update"]))
+        self.update_check.SetHelpText(
+            "Checks when blindDL starts and every "
+            f"{int(config['update_check_hours'])} hours after that."
+        )
+
+        self.auto_install_check = wx.CheckBox(
+            page, label="&Install BlindDL updates as soon as they are found"
+        )
+        self.auto_install_check.SetValue(bool(config["auto_install_update"]))
+        self.auto_install_check.SetHelpText(
+            "Downloads and verifies the new release, then installs it and "
+            "restarts blindDL. It waits until nothing is downloading, and "
+            "anything still in the queue is picked up again afterwards. Off "
+            "means blindDL says a release is available and leaves it to you. "
+            "Applies to released builds; a source checkout updates its "
+            "download tools instead."
+        )
+
+        def enable_auto_install(_event=None):
+            # Nothing to install automatically if nothing is looking.
+            self.auto_install_check.Enable(self.update_check.GetValue())
+
+        self.update_check.Bind(wx.EVT_CHECKBOX, enable_auto_install)
+        enable_auto_install()
 
         cookies_label = wx.StaticText(page, label="Use cookies from &browser:")
         self.cookies_choice = self._choice(
@@ -820,6 +856,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
         sizer.Add(self.speak_status_check, 0, wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
+        sizer.Add(self.auto_install_check, 0, wx.ALL, 8)
         _row(sizer, cookies_label, self.cookies_choice)
         page.SetSizer(sizer)
         return page
@@ -1124,6 +1161,7 @@ class SettingsDialog(wx.Dialog):
         self.config["start_maximized"] = self.start_maximized_check.GetValue()
         self.config["speak_status"] = self.speak_status_check.GetValue()
         self.config["auto_update"] = self.update_check.GetValue()
+        self.config["auto_install_update"] = self.auto_install_check.GetValue()
         self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
             self.cookies_choice.GetSelection()
         ][1]

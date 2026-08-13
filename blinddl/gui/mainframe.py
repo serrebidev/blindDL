@@ -37,6 +37,14 @@ from .update_dialog import UpdateDialog
 from .url_panel import UrlPanel
 from .uploads_panel import UploadsPanel
 
+# How often the update clock is looked at, rather than setting one timer for
+# the whole interval: blindDL lives in the tray for days at a time, and a
+# timer that long stops being accurate the first time the machine sleeps.
+UPDATE_TICK_MS = 30 * 60 * 1000
+# How often a downloaded update looks to see whether the queue has gone
+# quiet enough for blindDL to restart into it.
+UPDATE_IDLE_TICK_MS = 60 * 1000
+
 TAB_URL = 0
 TAB_SEARCH = 1
 TAB_DOWNLOADS = 2
@@ -68,6 +76,13 @@ class MainFrame(wx.Frame):
         self._last_counts = None
         self.chat_panel = None
         self.messages_panel = None
+        # Update checking: one repeating clock, one worker at a time, and a
+        # verified package waiting for the queue to go quiet.
+        self._update_timer = None
+        self._update_idle_timer = None
+        self._update_checking = False
+        self._pending_update = None
+        self._pending_update_announced = False
 
         self._build_ui()
         self.downloads_panel.refresh_all()
@@ -92,7 +107,7 @@ class MainFrame(wx.Frame):
         self._background_started = True
         self.queue.start()
         self.subs.start()
-        self._maybe_auto_update()
+        self._start_update_checks()
         if self.config["soulseek_enabled"]:
             self._apply_soulseek_setting()
 
@@ -140,11 +155,14 @@ class MainFrame(wx.Frame):
         tools_menu.Append(self.ID_ADD_SUB, "&Add subscription...")
         self.ID_CHECK_SUBS = wx.NewIdRef()
         tools_menu.Append(self.ID_CHECK_SUBS, "Check &subscriptions\tCtrl+Shift+C")
-        tools_menu.AppendSeparator()
-        self.ID_UPDATE = wx.NewIdRef()
-        tools_menu.Append(self.ID_UPDATE, "Check for &updates...\tCtrl+U")
 
+        # Checking for updates is about blindDL itself rather than about the
+        # media it fetches, which is what everything left in Tools is, so it
+        # sits with About under Help where an application usually keeps it.
         help_menu = wx.Menu()
+        self.ID_UPDATE = wx.NewIdRef()
+        help_menu.Append(self.ID_UPDATE, "Check for &updates...\tCtrl+U")
+        help_menu.AppendSeparator()
         help_menu.Append(wx.ID_ABOUT, "&About blindDL")
 
         menubar = wx.MenuBar()
@@ -578,6 +596,9 @@ class MainFrame(wx.Frame):
             "downloads the tracks you keep.\n"
             "Status messages are spoken as they appear; Settings, Window "
             "turns that off.\n"
+            "blindDL looks for a new release when it starts and every "
+            "12 hours, and can install one on its own; see Settings, "
+            "Window. Help, Check for updates does it now.\n"
             "Torrent results open in your own BitTorrent client, or download "
             "here when Settings, Torrents says so. Add your Prowlarr or "
             "Jackett in Tools, My torrent indexers to search private "
@@ -695,7 +716,12 @@ class MainFrame(wx.Frame):
             self._tray_hide_timer = wx.CallLater(100, self._hide_to_tray)
             return
         self._closing = True
-        for timer_name in ("_background_start_timer", "_tray_hide_timer"):
+        for timer_name in (
+            "_background_start_timer",
+            "_tray_hide_timer",
+            "_update_timer",
+            "_update_idle_timer",
+        ):
             timer = getattr(self, timer_name, None)
             if timer is not None and timer.IsRunning():
                 timer.Stop()
@@ -725,14 +751,33 @@ class MainFrame(wx.Frame):
 
     # -- automatic dependency updates -------------------------------------------
 
-    def _maybe_auto_update(self):
-        if not self.config["auto_update"]:
+    def _start_update_checks(self):
+        """Check for an update now, then keep checking on the saved interval."""
+        self._update_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_update_tick, self._update_timer)
+        self._update_timer.Start(UPDATE_TICK_MS)
+        # Startup is the one check that does not wait for the interval. A
+        # release that landed while blindDL was closed should be found when
+        # it opens, not up to twelve hours afterwards.
+        self._maybe_auto_update(force=True)
+
+    def _on_update_tick(self, event):
+        self._maybe_auto_update()
+
+    def _maybe_auto_update(self, force=False):
+        if self._closing or not self.config["auto_update"]:
             return
-        interval = int(self.config["update_check_hours"]) * 3600
-        if time.time() - float(self.config["last_update_check"]) < interval:
+        # A check that is still running has not finished paying for itself;
+        # starting a second one would only duplicate the network calls.
+        if self._update_checking or self._pending_update is not None:
             return
+        if not force:
+            interval = max(1, int(self.config["update_check_hours"])) * 3600
+            if time.time() - float(self.config["last_update_check"]) < interval:
+                return
         self.config["last_update_check"] = time.time()
         self.config.save()
+        self._update_checking = True
         threading.Thread(
             target=self._auto_update_worker, daemon=True, name="blinddl-updater"
         ).start()
@@ -745,17 +790,128 @@ class MainFrame(wx.Frame):
 
         try:
             if getattr(sys, "frozen", False):
-                update = updater.check_for_app_update(log)
-                if update is not None:
-                    wx.CallAfter(
-                        self.announce,
-                        f"BlindDL {update.version} is available. Use Tools, "
-                        "Check for updates to install it.",
-                    )
+                self._check_for_release(log)
                 return
             updater.ensure_deno(log)
             changed = updater.run_full_update(log)
+            if changed:
+                wx.CallAfter(self.announce, "Tools updated. Restart blindDL.")
         except Exception:  # noqa: BLE001 - background best effort
             return
-        if changed:
-            wx.CallAfter(self.announce, "Tools updated. Restart blindDL.")
+        finally:
+            self._update_checking = False
+
+    def _check_for_release(self, log):
+        """Look for a newer blindDL, and fetch it when asked to.
+
+        A check that cannot reach GitHub says nothing: this runs on its own
+        every twelve hours, and a passing network fault is not news. A
+        download that fails after an update *was* found is worth saying,
+        because by then something was expected to happen.
+        """
+        try:
+            update = updater.check_for_app_update(log)
+        except Exception:  # noqa: BLE001 - a network blip must not nag
+            return
+        if update is None:
+            return
+        if not self.config["auto_install_update"]:
+            wx.CallAfter(
+                self.announce,
+                f"blindDL {update.version} is available. Use Help, Check "
+                "for updates to install it.",
+            )
+            return
+        wx.CallAfter(
+            self.announce, f"Downloading blindDL {update.version}..."
+        )
+        try:
+            package = updater.download_app_update(update, log)
+        except Exception as exc:  # noqa: BLE001 - the user was expecting this
+            wx.CallAfter(
+                self.announce, f"Automatic update failed: {exc}"
+            )
+            return
+        wx.CallAfter(self._update_downloaded, update, package)
+
+    def _update_downloaded(self, update, package):
+        if self._closing:
+            return
+        self._pending_update = (update, package)
+        self._pending_update_announced = False
+        self._install_pending_update()
+
+    def _install_pending_update(self):
+        """Install the downloaded update once nothing is mid-download.
+
+        Finishing an update restarts blindDL. The queue does turn active
+        rows back into resumable ones on the way out, so nothing is lost
+        either way, but pulling the window away from someone in the middle
+        of a download is not something to do unasked.
+        """
+        if self._closing or self._pending_update is None:
+            return
+        update, package = self._pending_update
+        active, queued, _done, _failed = self.queue.counts()
+        if active or queued:
+            if not self._pending_update_announced:
+                self._pending_update_announced = True
+                self.announce(
+                    f"blindDL {update.version} is ready and installs once "
+                    "the downloads finish."
+                )
+            self._start_update_idle_timer()
+            return
+        self._stop_update_idle_timer()
+        self._pending_update = None
+        self.announce(f"Installing blindDL {update.version}...")
+        threading.Thread(
+            target=self._install_update_worker,
+            args=(update, package),
+            daemon=True,
+            name="blinddl-auto-install",
+        ).start()
+
+    def _install_update_worker(self, update, package):
+        lines = []
+        try:
+            exit_to_update = updater.install_app_update(
+                update, package, lines.append
+            )
+        except Exception as exc:  # noqa: BLE001 - shown on the status bar
+            wx.CallAfter(self.announce, f"Automatic update failed: {exc}")
+            return
+        wx.CallAfter(self._update_started, update, exit_to_update)
+
+    def _update_started(self, update, exit_to_update):
+        if self._closing:
+            return
+        if exit_to_update:
+            # Closing this way runs the ordinary shutdown, so the queue,
+            # torrents and Soulseek shares are all written down first.
+            self.announce(
+                f"Installing blindDL {update.version}; it will restart."
+            )
+            self._quitting = True
+            self.Close()
+            return
+        self.announce(
+            f"blindDL {update.version} was downloaded. Finish the install "
+            "to use it."
+        )
+
+    def _start_update_idle_timer(self):
+        if self._update_idle_timer is None:
+            self._update_idle_timer = wx.Timer(self)
+            self.Bind(
+                wx.EVT_TIMER, self._on_update_idle_tick, self._update_idle_timer
+            )
+        if not self._update_idle_timer.IsRunning():
+            self._update_idle_timer.Start(UPDATE_IDLE_TICK_MS)
+
+    def _stop_update_idle_timer(self):
+        if self._update_idle_timer is not None:
+            self._update_idle_timer.Stop()
+
+    def _on_update_idle_tick(self, event):
+        self._install_pending_update()
