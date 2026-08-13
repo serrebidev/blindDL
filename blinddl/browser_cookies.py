@@ -12,6 +12,7 @@ with their real profiles -- hands yt-dlp an explicit profile path for each
 one, and keeps only exports that carry the Apple Music ``media-user-token``.
 """
 
+import json
 import os
 import sys
 
@@ -255,6 +256,31 @@ def _explain(exc):
     return message or type(exc).__name__
 
 
+def _uses_app_bound(browser_name, profile):
+    """True when a Chromium profile's Local State advertises app-bound crypto.
+
+    App-bound ("v20") cookies can only be unwrapped by the browser's own
+    elevation service, which refuses callers that are not the browser itself;
+    the only known workarounds need SYSTEM privileges or process injection,
+    so blindDL treats these browsers as unreadable and points the user at
+    Firefox instead, whose cookie jar is not encrypted.
+    """
+    if browser_name == "firefox" or not profile:
+        return False
+    for path in (
+        os.path.join(os.path.dirname(profile), "Local State"),
+        os.path.join(profile, "Local State"),
+    ):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if "app_bound_encrypted_key" in (state.get("os_crypt") or {}):
+            return True
+    return False
+
+
 def export_apple_music_cookies(dest_path, preferred=None):
     """Extract Apple Music cookies into ``dest_path`` (Netscape format).
 
@@ -265,6 +291,12 @@ def export_apple_music_cookies(dest_path, preferred=None):
     """
     errors = []
     for label, browser_name, profile in candidate_browsers(preferred):
+        if _uses_app_bound(browser_name, profile):
+            errors.append(
+                f"{label}: app-bound cookie encryption (unsupported); "
+                "export from Firefox instead"
+            )
+            continue
         try:
             jar = extract_cookies_from_browser(browser_name, profile)
         except Exception as exc:  # noqa: BLE001 - report per browser, keep going

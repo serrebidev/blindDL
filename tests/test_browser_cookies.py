@@ -117,6 +117,51 @@ class BrowserCookiesTests(unittest.TestCase):
 
         self.assertEqual(candidates[0], ("Firefox", "firefox", None))
 
+    def test_uses_app_bound_reads_local_state(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            user_data = os.path.join(tmp, "User Data")
+            profile = os.path.join(user_data, "Default")
+            os.makedirs(profile)
+
+            # No Local State yet -> not app-bound.
+            self.assertFalse(browser_cookies._uses_app_bound("brave", profile))
+
+            with open(
+                os.path.join(user_data, "Local State"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump({"os_crypt": {"encrypted_key": "x"}}, handle)
+            self.assertFalse(browser_cookies._uses_app_bound("brave", profile))
+
+            with open(
+                os.path.join(user_data, "Local State"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump({"os_crypt": {"app_bound_encrypted_key": "APPB..."}}, handle)
+            self.assertTrue(browser_cookies._uses_app_bound("brave", profile))
+
+        # Firefox cookies are never app-bound encrypted.
+        self.assertFalse(browser_cookies._uses_app_bound("firefox", "/some/profile"))
+
+    def test_export_skips_app_bound_browsers_with_a_hint(self):
+        with (
+            mock.patch.object(
+                browser_cookies,
+                "candidate_browsers",
+                return_value=[("Brave Beta", "brave", "/x/Default")],
+            ),
+            mock.patch.object(browser_cookies, "_uses_app_bound", return_value=True),
+            mock.patch.object(
+                browser_cookies, "extract_cookies_from_browser"
+            ) as extract,
+        ):
+            with self.assertRaises(browser_cookies.CookieExportError) as ctx:
+                browser_cookies.export_apple_music_cookies("/out.txt")
+
+        extract.assert_not_called()
+        self.assertIn("app-bound cookie encryption", ctx.exception.errors[0])
+        self.assertIn("Firefox", ctx.exception.errors[0])
+
 
 if __name__ == "__main__":
     unittest.main()
