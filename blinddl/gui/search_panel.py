@@ -753,8 +753,9 @@ class SearchPanel(wx.Panel):
         self.kind_choice.SetName("Search type")
         self.kind_choice.SetHelpText(
             "Best match searches everything. Track title and Artist match "
-            "only that field. Album lists whole albums, and Enter on one "
-            "downloads every track it contains."
+            "only that field. Album lists whole albums, and Enter on an "
+            "album row downloads every track it contains. Choosing a type "
+            "here takes effect on the next search."
         )
         self.kind_choice.SetSelection(search_kind.KINDS.index(self.current_kind))
         self.kind_choice.Bind(wx.EVT_CHOICE, self.on_kind_changed)
@@ -763,8 +764,9 @@ class SearchPanel(wx.Panel):
         self.order_choice = wx.Choice(self, choices=search_order.ORDER_LABEL_LIST)
         self.order_choice.SetName("Search result order")
         self.order_choice.SetHelpText(
-            "Chooses which results each site returns. Sites that cannot "
-            "honour the order are named after the search."
+            "Chooses which results each site returns, so it takes effect on "
+            "the next search. Sites that cannot honour the order are named "
+            "afterwards."
         )
         self.order_choice.SetSelection(search_order.ORDERS.index(self.current_order))
         self.order_choice.Bind(wx.EVT_CHOICE, self.on_order_changed)
@@ -772,11 +774,28 @@ class SearchPanel(wx.Panel):
         sort_label = wx.StaticText(self, label="Sort &by:")
         self.sort_choice = wx.Choice(self, choices=SORT_LABELS)
         self.sort_choice.SetName("Sort search results")
+        self.sort_choice.SetHelpText(
+            "Rearranges the results already in the list, which happens as "
+            "soon as it is chosen. It never re-runs the search."
+        )
         self.sort_choice.SetSelection(SORT_RELEVANCE)
         self.sort_choice.Bind(wx.EVT_CHOICE, self.on_sort_changed)
 
         self.search_btn = wx.Button(self, label="&Search")
         self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
+
+        # Every control on this row is a way of describing the search, so
+        # Enter runs it from any of them, exactly as it does from the query
+        # box. Nothing here searches merely because it was arrowed past.
+        # The hook is needed because a native combo box swallows Return
+        # before EVT_KEY_DOWN ever sees it.
+        for control in (
+            self.engine_choice,
+            self.kind_choice,
+            self.order_choice,
+            self.sort_choice,
+        ):
+            control.Bind(wx.EVT_CHAR_HOOK, self.on_row_key)
 
         self.results_list = _ResultsList(self)
         self.results_list.cell_provider = self._result_cell
@@ -906,8 +925,31 @@ class SearchPanel(wx.Panel):
             self.sort_choice.SetSelection(mode)
         event.Skip()
 
+    def on_row_key(self, event):
+        """Run the search when Enter is pressed on one of the row's controls."""
+        if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            # Skipped as well, so a dropdown that is open still closes and
+            # commits the choice the Enter was meant to pick.
+            event.Skip()
+            self.on_search(None)
+            return
+        event.Skip()
+
+    def _setting_changed(self, message):
+        """Say what a search setting is now, and how to act on it.
+
+        Choosing one of these used to search straight away. Arrowing through
+        the choices then fired a search per step and threw the focus into
+        the results at the end of each one, so the list could not be walked
+        to the option wanted -- the whole point of a combo box. They now
+        only describe the next search; Enter or the Search button runs it.
+        """
+        if self.query_text.GetValue().strip():
+            message += " Press Enter to search."
+        self.frame.announce(message)
+
     def on_kind_changed(self, event):
-        """Save the search type and repeat an existing search with it."""
+        """Save the search type. The next search is the one that uses it."""
         selection = self.kind_choice.GetSelection()
         if not 0 <= selection < len(search_kind.KINDS):
             selection = 0
@@ -917,17 +959,14 @@ class SearchPanel(wx.Panel):
         save = getattr(self.frame.config, "save", None)
         if save is not None:
             save()
-        if self.query_text.GetValue().strip():
-            self.on_search(None)
-        else:
-            self.frame.announce(
-                f"Search type set to {search_kind.label(self.current_kind)}."
-            )
+        self._setting_changed(
+            f"Search type set to {search_kind.label(self.current_kind)}."
+        )
         if event is not None:
             event.Skip()
 
     def on_order_changed(self, event):
-        """Save the query order and repeat an existing search with it."""
+        """Save the query order. The next search is the one that uses it."""
         selection = self.order_choice.GetSelection()
         if not 0 <= selection < len(search_order.ORDERS):
             selection = 0
@@ -942,12 +981,9 @@ class SearchPanel(wx.Panel):
         sort_mode = _sort_for_order(engine, self.current_order)
         if sort_mode < self.sort_choice.GetCount():
             self.sort_choice.SetSelection(sort_mode)
-        if self.query_text.GetValue().strip():
-            self.on_search(None)
-        else:
-            self.frame.announce(
-                f"Search order set to {search_order.label(self.current_order)}."
-            )
+        self._setting_changed(
+            f"Search order set to {search_order.label(self.current_order)}."
+        )
         if event is not None:
             event.Skip()
 

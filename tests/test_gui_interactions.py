@@ -1146,7 +1146,10 @@ class GuiInteractionTests(unittest.TestCase):
             ["Zulu", "Bravo", "Alpha"],
         )
 
-    def test_search_order_choice_is_persistent_and_repeats_the_query(self):
+    def test_search_order_is_saved_without_searching_on_every_step(self):
+        # Arrowing through the choices used to fire a search per step and
+        # throw the focus into the results at the end of each one, so the
+        # list could not be walked to the option wanted.
         panel = SearchPanel(self.host, self.frame)
         panel.query_text.SetValue("dragnet")
         panel.order_choice.SetSelection(
@@ -1157,7 +1160,74 @@ class GuiInteractionTests(unittest.TestCase):
             panel.on_order_changed(None)
 
         self.assertEqual(self.frame.config["search_order"], search_order.ORDER_RECENT)
-        search.assert_called_once_with(None)
+        search.assert_not_called()
+        self.assertEqual(
+            self.frame.messages[-1],
+            "Search order set to Most recent. Press Enter to search.",
+        )
+
+    def test_a_setting_change_only_offers_enter_when_there_is_a_query(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.order_choice.SetSelection(
+            search_order.ORDERS.index(search_order.ORDER_POPULAR)
+        )
+
+        with mock.patch.object(panel, "on_search"):
+            panel.on_order_changed(None)
+
+        # Nothing typed yet, so there is nothing for Enter to search.
+        self.assertEqual(
+            self.frame.messages[-1], "Search order set to Most popular."
+        )
+
+    def test_enter_searches_from_any_control_on_the_search_row(self):
+        panel = SearchPanel(self.host, self.frame)
+        controls = (
+            panel.engine_choice,
+            panel.kind_choice,
+            panel.order_choice,
+            panel.sort_choice,
+        )
+        # A key event cannot be built in-process convincingly enough to send
+        # through the control -- wx keeps the key code on the C++ side -- so
+        # the handler is driven directly here and the binding itself is
+        # covered by pressing real keys against a running window.
+        self.assertTrue(controls)
+        for _control in controls:
+            event = mock.Mock()
+            event.GetKeyCode.return_value = wx.WXK_RETURN
+            with mock.patch.object(panel, "on_search") as search:
+                panel.on_row_key(event)
+            search.assert_called_once_with(None)
+            # Skipped as well, so an open dropdown still commits the choice
+            # the Enter was meant to pick.
+            event.Skip.assert_called_once_with()
+
+        # Arrow keys are left alone: they are how the choice is walked.
+        event = mock.Mock()
+        event.GetKeyCode.return_value = wx.WXK_DOWN
+        with mock.patch.object(panel, "on_search") as search:
+            panel.on_row_key(event)
+        search.assert_not_called()
+        event.Skip.assert_called_once_with()
+
+    def test_sorting_rearranges_the_list_without_searching_again(self):
+        # Sort by is a display control; the rows it reorders have already
+        # arrived, so it never goes back to the sites.
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_MUSIC
+        panel.results = [
+            {"title": "Zulu", "_search_order": 0},
+            {"title": "Alpha", "_search_order": 1},
+        ]
+        panel._render_results(ENGINE_MUSIC)
+        panel.sort_choice.SetSelection(SORT_NAME)
+
+        with mock.patch.object(panel, "on_search") as search:
+            panel.on_sort_changed(None)
+
+        search.assert_not_called()
+        self.assertEqual(panel.results_list.GetItemText(0), "Alpha")
 
     def test_search_status_names_sources_that_cannot_honour_order(self):
         self.assertEqual(
@@ -1193,7 +1263,7 @@ class GuiInteractionTests(unittest.TestCase):
             )
             self.assertEqual(panel._selected_kind(), search_kind.KIND_BEST)
 
-    def test_search_type_choice_is_persistent_and_repeats_the_query(self):
+    def test_search_type_is_saved_without_searching_on_every_step(self):
         panel = SearchPanel(self.host, self.frame)
         panel.query_text.SetValue("discovery")
         panel.kind_choice.SetSelection(
@@ -1204,7 +1274,11 @@ class GuiInteractionTests(unittest.TestCase):
             panel.on_kind_changed(None)
 
         self.assertEqual(self.frame.config["search_kind"], search_kind.KIND_ALBUM)
-        search.assert_called_once_with(None)
+        search.assert_not_called()
+        self.assertEqual(
+            self.frame.messages[-1],
+            "Search type set to Album. Press Enter to search.",
+        )
 
     def test_album_search_asks_only_the_sites_that_have_albums(self):
         panel = SearchPanel(self.host, self.frame)
