@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest import mock
 
-from blinddl import deezer_backend, search_order, sideb_backend
+from blinddl import deezer_backend, search_kind, search_order, sideb_backend
 
 
 def _track_payload(track_id, title, artist="Artist"):
@@ -84,6 +84,117 @@ class DeezerBackendTests(unittest.TestCase):
             [("/search/track", {"q": "example", "limit": 100, "index": 0}),
              ("/search/track", {"q": "example", "limit": 100, "index": 100})],
         )
+
+    def test_track_search_keeps_only_titles_that_really_match(self):
+        # Deezer's own track:"..." term matches the query's words anywhere,
+        # including inside the word "track", so the narrowing is done here.
+        payload = {"data": [
+            {"id": 1, "title": "One More Time", "rank": 5},
+            {"id": 2, "title": "One More Time (Radio Edit)", "rank": 4},
+            {"id": 3, "title": "Baby One More", "rank": 9},
+            {"id": 4, "title": "Bonus Track", "rank": 8},
+        ]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload) as api:
+            items = deezer_backend.search(
+                "one more time", kind=search_kind.KIND_TRACK)
+
+        self.assertEqual(api.call_args.args[0], "/search/track")
+        self.assertEqual(api.call_args.args[1]["q"], "one more time")
+        self.assertEqual(
+            [item["title"] for item in items],
+            ["One More Time", "One More Time (Radio Edit)"],
+        )
+
+    def test_best_match_search_keeps_every_result(self):
+        payload = {"data": [
+            {"id": 1, "title": "One More Time", "rank": 5},
+            {"id": 2, "title": "Something else", "rank": 4},
+        ]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload) as api:
+            items = deezer_backend.search(
+                "one more time", kind=search_kind.KIND_BEST)
+
+        self.assertEqual(api.call_args.args[1]["q"], "one more time")
+        self.assertEqual(len(items), 2)
+
+    def test_artist_search_looks_the_artist_up_before_taking_their_tracks(self):
+        def api(path, params=None):
+            if path == "/search/artist":
+                return {"data": [{"id": 27, "name": "Daft Punk"},
+                                 {"id": 99, "name": "Daft Punk Experience"}]}
+            if path == "/artist/27/top":
+                return {"data": [
+                    {"id": 1, "title": "One More Time",
+                     "album": {"title": "Discovery"}, "rank": 9},
+                ]}
+            return {"data": [
+                {"id": 2, "title": "Tribute", "album": {}, "rank": 1},
+            ]}
+
+        with mock.patch.object(deezer_backend, "_api_get",
+                               side_effect=api) as calls:
+            items = deezer_backend.search(
+                "daft punk", kind=search_kind.KIND_ARTIST)
+
+        self.assertEqual(calls.call_args_list[0].args[0], "/search/artist")
+        self.assertEqual([item["title"] for item in items],
+                         ["One More Time", "Tribute"])
+        # /artist/{id}/top names the artist on the request rather than on
+        # each track, so the rows would otherwise arrive without one.
+        self.assertEqual([item["artist"] for item in items],
+                         ["Daft Punk", "Daft Punk Experience"])
+
+    def test_artist_search_survives_one_artist_that_cannot_be_read(self):
+        def api(path, params=None):
+            if path == "/search/artist":
+                return {"data": [{"id": 1, "name": "Gone"},
+                                 {"id": 2, "name": "Here"}]}
+            if path == "/artist/1/top":
+                raise RuntimeError("410 Gone")
+            return {"data": [{"id": 9, "title": "Song", "rank": 1}]}
+
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api):
+            items = deezer_backend.search(
+                "example", kind=search_kind.KIND_ARTIST)
+
+        self.assertEqual([item["artist"] for item in items], ["Here"])
+
+    def test_album_search_returns_album_rows_with_their_track_counts(self):
+        payload = {"data": [
+            {"id": 7, "title": "Discovery", "nb_tracks": 14,
+             "artist": {"name": "Daft Punk"},
+             "link": "https://www.deezer.com/album/7"},
+            {"id": 8, "title": "Single", "nb_tracks": 1,
+             "artist": {"name": "Daft Punk"}},
+        ]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload) as api:
+            items = deezer_backend.search(
+                "discovery", kind=search_kind.KIND_ALBUM)
+
+        self.assertEqual(api.call_args.args[0], "/search/album")
+        # The album endpoint already matches album titles, so no field term.
+        self.assertEqual(api.call_args.args[1]["q"], "discovery")
+        self.assertEqual([item["kind"] for item in items],
+                         ["deezer_album", "deezer_album"])
+        self.assertEqual(items[0]["title"], "Discovery")
+        self.assertEqual(items[0]["artist"], "Daft Punk")
+        self.assertEqual(items[0]["format"], "Album, 14 tracks")
+        self.assertEqual(items[1]["format"], "Album, 1 track")
+        self.assertEqual(items[1]["url"], "https://www.deezer.com/album/8")
+
+    def test_album_search_cannot_answer_most_popular(self):
+        # /search/album publishes neither a rank nor a date, so claiming the
+        # order was honoured would be a lie the status line then repeats.
+        self.assertTrue(deezer_backend.supports_order(
+            search_order.ORDER_POPULAR))
+        self.assertFalse(deezer_backend.supports_order(
+            search_order.ORDER_POPULAR, search_kind.KIND_ALBUM))
+        self.assertTrue(deezer_backend.supports_order(
+            search_order.ORDER_RELEVANCE, search_kind.KIND_ALBUM))
+        self.assertTrue(deezer_backend.supports_kind(search_kind.KIND_ARTIST))
 
     def test_download_uses_plural_tokens_and_actual_media_format(self):
         session = {

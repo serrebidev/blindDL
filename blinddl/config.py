@@ -43,6 +43,12 @@ DEFAULTS = {
     # rearranging the answer, so it decides which results arrive at all. Not
     # every site can sort; the ones that cannot are named after the search.
     "search_order": "relevance",
+    # What a music search matches on: "best" (anything), "track", "album" or
+    # "artist". Album is the one that changes the shape of the answer -- its
+    # results are whole releases, and downloading one takes every track on
+    # it. Sites with no field search are named after the search, exactly as
+    # with search_order above.
+    "search_kind": "best",
     # How the Subscriptions list is arranged: "added", "title", "site",
     # "checked", "stale", "tracked" or "enabled". Purely a view setting -- it
     # never changes which subscriptions are checked or in what order.
@@ -202,6 +208,11 @@ DEFAULTS = {
     "tray_on_minimize": True,
     # Open the main window maximized on launch.
     "start_maximized": False,
+    # Say status-bar messages out loud through the screen reader as they
+    # appear, instead of leaving them to be found with NVDA+End. On by
+    # default: the status bar is where blindDL says a search finished or a
+    # download failed, and neither should have to be gone looking for.
+    "speak_status": True,
     # How often subscriptions are checked for new items, in hours.
     "sub_check_hours": 6,
     # Automatically check runtime components. Frozen builds update them only

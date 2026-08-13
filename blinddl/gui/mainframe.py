@@ -14,6 +14,7 @@ import wx
 from .. import (
     APP_NAME,
     soulseek_backend,
+    speech,
     torrent_engine,
     updater,
 )
@@ -196,11 +197,21 @@ class MainFrame(wx.Frame):
 
     # -- helpers used by panels ----------------------------------------------
 
-    def announce(self, message):
-        """Put a message on the status bar (NVDA: Insert+End reads it)."""
+    def announce(self, message, speak=True):
+        """Say a message and leave it on the status bar.
+
+        The status bar is still written either way, so NVDA+End reads the
+        last thing that happened as it always did. Speaking it as well is
+        what makes a finished search or a failed download arrive on its own
+        instead of having to be checked for; Settings, Window turns that off
+        for anyone who would rather it did not. Repeats are not spoken twice
+        -- a status tick with nothing new to say rewrites the same sentence.
+        """
         if self._closing:
             return
         self.SetStatusText(message, 0)
+        if speak and self.config["speak_status"]:
+            speech.announce(message)
 
     def show_tab(self, index):
         self.notebook.SetSelection(index)
@@ -562,6 +573,11 @@ class MainFrame(wx.Frame):
             "Search also finds free books, audiobooks, old-time radio, "
             "movies and TV. Downloaded books open in your usual reader "
             "from the Library tab.\n"
+            "Search type narrows a music search to a track title, an album "
+            "or an artist. Album lists whole releases; Enter on one "
+            "downloads the tracks you keep.\n"
+            "Status messages are spoken as they appear; Settings, Window "
+            "turns that off.\n"
             "Torrent results open in your own BitTorrent client, or download "
             "here when Settings, Torrents says so. Add your Prowlarr or "
             "Jackett in Tools, My torrent indexers to search private "

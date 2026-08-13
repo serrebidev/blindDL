@@ -22,7 +22,9 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Updates its downloader components — yt-dlp and friends — from inside the app.
 - Checks for new BlindDL releases, verifies the download checksum, and starts
   the correct platform update from inside the app.
+- Searches music by track title, album, or artist, and downloads a whole album as every track on it.
 - Uses native controls, labeled fields, status-bar announcements, context menus, and complete keyboard operation.
+- Speaks its status-bar announcements through NVDA, JAWS, and friends, and shows them on a Braille display, so a finished search or a failed download arrives on its own. Turn it off in Settings, Window.
 
 Optional adult and account-based sites are supported and switched off by default; see [docs/optional-sites.md](docs/optional-sites.md) if you want them.
 
@@ -82,6 +84,8 @@ On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`, `f
 ## Searching
 
 The Search source combo box switches between music, books, audiobooks, and the Internet Archive's radio, music, movie, and TV collections. Every source searches its sites in parallel and fills the list as they answer, and the result columns rename themselves to suit — a book search reads Title, Author, Library, Year, Size.
+
+**Search type** decides what counts as a match for a music search: Best match, Track title, Album, or Artist. Track title and Artist match that field alone, so an artist search cannot be answered with a song that merely mentions the name. **Album** returns whole releases instead of tracks — pressing Enter on one opens the same checked list used for playlists and queues every track you keep. Deezer and Apple Music are the two sources with a catalogue to search this way; on the Music sites choice an album search therefore asks Deezer alone rather than burying a handful of albums under several hundred tracks, and the status announcement says so. Book, torrent, Internet Archive, and Soulseek searches have no such fields, so the control is switched off for them.
 
 **Order** changes the request sent to each site: Best match, Most recent, or Most popular. It therefore changes which page of results arrives. **Sort by** only rearranges the rows already in the list. Not every provider exposes every order; BlindDL keeps that provider's best-match results and names it in the status announcement instead of pretending a locally rearranged page is the requested search.
 

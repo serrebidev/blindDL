@@ -25,6 +25,10 @@ classifiers = [
 dependencies = [
   "wxPython>=4.2; platform_system != 'Linux'",
   "yt-dlp[default]>=2025.1.1",
+  # Speaks the status bar through NVDA, JAWS, System Access, ZDSR or
+  # Dolphin, and on a Braille display. blindDL falls back to NVDA's and
+  # JAWS' own APIs where it is missing, so it stays optional at runtime.
+  "accessible-output2>=0.17; platform_system == 'Windows'",
   # musicdl is vendored at its current upstream HEAD because its published
   # metadata pins a vulnerable cryptography release. Keep these requirements
   # aligned with requirements-musicdl.txt and musicdl/VENDORED.md.

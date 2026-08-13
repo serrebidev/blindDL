@@ -10,7 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from blinddl import applemusic_backend
+from blinddl import applemusic_backend, search_kind
 
 
 def _track(track_id, name, url=None, artist="Artist", album="Album",
@@ -55,6 +55,59 @@ class AppleMusicSearchTests(unittest.TestCase):
             items = applemusic_backend.search("query")
 
         self.assertEqual([item["title"] for item in items], ["Two"])
+
+    def test_search_types_match_one_itunes_field(self):
+        response = mock.Mock()
+        response.raise_for_status = mock.Mock()
+        response.json.return_value = {"results": []}
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=response) as get:
+            applemusic_backend.search("query", kind=search_kind.KIND_BEST)
+            best = get.call_args.kwargs["params"]
+            applemusic_backend.search("query", kind=search_kind.KIND_TRACK)
+            track = get.call_args.kwargs["params"]
+            applemusic_backend.search("query", kind=search_kind.KIND_ARTIST)
+            artist = get.call_args.kwargs["params"]
+
+        # Best match sends no attribute at all, which is what makes iTunes
+        # search every field rather than one of them.
+        self.assertNotIn("attribute", best)
+        self.assertEqual(track["attribute"], "songTerm")
+        self.assertEqual(artist["attribute"], "artistTerm")
+        self.assertEqual(artist["entity"], "song")
+
+    def test_album_search_returns_album_rows(self):
+        payload = {"results": [{
+            "collectionId": 55,
+            "collectionName": "Discovery",
+            "artistName": "Daft Punk",
+            "trackCount": 14,
+            "collectionViewUrl": "https://music.apple.com/us/album/55",
+            "artworkUrl100": "https://example.test/100x100bb.jpg",
+        }, {
+            "collectionId": 56,
+            "collectionName": "No link",
+        }]}
+        response = mock.Mock()
+        response.raise_for_status = mock.Mock()
+        response.json.return_value = payload
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=response) as get:
+            items = applemusic_backend.search(
+                "discovery", kind=search_kind.KIND_ALBUM)
+
+        self.assertEqual(get.call_args.kwargs["params"]["entity"], "album")
+        self.assertEqual(get.call_args.kwargs["params"]["attribute"],
+                         "albumTerm")
+        # A release with no page to open cannot be downloaded, so it is left
+        # out rather than listed as a row that does nothing.
+        self.assertEqual([item["title"] for item in items], ["Discovery"])
+        self.assertEqual(items[0]["kind"], "applemusic_album")
+        self.assertEqual(items[0]["format"], "Album, 14 tracks")
+        self.assertEqual(items[0]["url"],
+                         "https://music.apple.com/us/album/55")
+        self.assertTrue(applemusic_backend.supports_kind(
+            search_kind.KIND_ALBUM))
 
     def test_search_returns_empty_on_error(self):
         error = applemusic_backend.requests.exceptions.ConnectionError(

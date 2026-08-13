@@ -30,6 +30,9 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from . import search_kind
+from .search_kind import KIND_ALBUM, KIND_ARTIST, KIND_BEST, KIND_TRACK
+
 _SEARCH_SOURCE = "Apple Music"
 _ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _ITUNES_LOOKUP_URL = "https://itunes.apple.com/lookup"
@@ -140,35 +143,84 @@ def parse_apple_url(url):
     }
 
 
-def search(query, config=None, order=None):
+# What the iTunes Search API is asked to match for each Search tab search
+# type: an entity to return, and the one field to match on. Best match sends
+# no attribute at all, which is what makes it search everything.
+_ITUNES_SEARCH_KINDS = {
+    KIND_BEST: ("song", None),
+    KIND_TRACK: ("song", "songTerm"),
+    KIND_ARTIST: ("song", "artistTerm"),
+    KIND_ALBUM: ("album", "albumTerm"),
+}
+
+
+def supports_kind(kind):
+    """The iTunes API matches one named field per search, so all four work."""
+    return search_kind.normalize(kind) in _ITUNES_SEARCH_KINDS
+
+
+def search(query, config=None, order=None, kind=KIND_BEST):
     """Search Apple Music through iTunes' public, credential-free API.
 
     The catalogue behind music.apple.com is the one the iTunes Search API
     serves, so a hit's trackViewUrl resolves to the same song there. It
     returns up to 200 tracks, which is what the Search tab lists.
+
+    *kind* is the Search tab's search type. Album returns one row per
+    release, which downloads as every track on it; the others return tracks,
+    matched on the whole entry or on just the title or artist.
     """
+    kind = search_kind.normalize(kind)
+    entity, attribute = _ITUNES_SEARCH_KINDS.get(
+        kind, _ITUNES_SEARCH_KINDS[KIND_BEST]
+    )
+    params = {
+        "term": query,
+        "media": "music",
+        "entity": entity,
+        "limit": 200,
+    }
+    if attribute:
+        params["attribute"] = attribute
     try:
-        response = requests.get(
-            _ITUNES_SEARCH_URL,
-            params={
-                "term": query,
-                "media": "music",
-                "entity": "song",
-                "limit": 200,
-            },
-            timeout=30,
-        )
+        response = requests.get(_ITUNES_SEARCH_URL, params=params, timeout=30)
         response.raise_for_status()
         results = response.json().get("results", [])
     except (requests.RequestException, ValueError):
         return []
     items = []
-    for track in results:
-        url = track.get("trackViewUrl") or ""
+    for entry in results:
+        if kind == KIND_ALBUM:
+            url = entry.get("collectionViewUrl") or ""
+            if url:
+                items.append(_album_item(entry, url))
+            continue
+        url = entry.get("trackViewUrl") or ""
         if not url:
             continue
-        items.append(_track_item(track, url))
+        items.append(_track_item(entry, url))
     return items
+
+
+def _album_item(collection, url):
+    """One row for a whole album, which downloads as all of its tracks."""
+    tracks = int(collection.get("trackCount") or 0)
+    title = collection.get("collectionName") or "Unknown album"
+    return {
+        "id": f"applemusic:album:{collection.get('collectionId') or url}",
+        # Resolved to its tracks by the Search tab before anything is
+        # queued; the queue only ever sees ordinary Apple Music items.
+        "kind": "applemusic_album",
+        "title": title,
+        "artist": collection.get("artistName") or "",
+        "album": title,
+        "source": _SEARCH_SOURCE,
+        "duration_s": 0,
+        "tracks": tracks,
+        "format": search_kind.album_type_label(tracks),
+        "url": url,
+        "artwork_url": _larger_artwork(collection.get("artworkUrl100") or ""),
+    }
 
 
 def _track_item(track, url):

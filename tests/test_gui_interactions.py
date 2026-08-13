@@ -24,7 +24,9 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         deezer_backend,
         musicdl_backend,
         preview,
+        search_kind,
         search_order,
+        speech,
         soulseek_backend,
         ytdlp_backend,
     )
@@ -79,6 +81,8 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SOULSEEK_COLUMN_HEADINGS,
         SOULSEEK_SORT_LABELS,
         SearchPanel,
+        _kind_capable_sources,
+        _kind_phrase,
         _order_capable_sources,
         _order_phrase,
         _sort_for_order,
@@ -933,6 +937,135 @@ class GuiInteractionTests(unittest.TestCase):
             "match: Bandcamp.",
         )
 
+    def test_search_type_is_offered_only_where_a_music_field_exists(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.current_kind = search_kind.KIND_ALBUM
+
+        for engine in (ENGINE_MUSIC, ENGINE_DEEZER, ENGINE_APPLE_MUSIC):
+            panel._apply_engine_controls(engine)
+            self.assertTrue(panel.kind_choice.IsEnabled())
+            self.assertEqual(
+                panel.kind_choice.GetSelection(),
+                search_kind.KINDS.index(search_kind.KIND_ALBUM),
+            )
+
+        # A book library or a torrent indexer has no album or artist field,
+        # so the control is switched off rather than left offering choices
+        # that could not change the answer.
+        for engine in (ENGINE_BOOKS, ENGINE_TORRENTS, ENGINE_ARCHIVE_AUDIO):
+            panel._apply_engine_controls(engine)
+            self.assertFalse(panel.kind_choice.IsEnabled())
+            self.assertEqual(
+                panel.kind_choice.GetSelection(),
+                search_kind.KINDS.index(search_kind.KIND_BEST),
+            )
+            panel.engine_choice.SetSelection(
+                panel.visible_engines.index(engine)
+            )
+            self.assertEqual(panel._selected_kind(), search_kind.KIND_BEST)
+
+    def test_search_type_choice_is_persistent_and_repeats_the_query(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("discovery")
+        panel.kind_choice.SetSelection(
+            search_kind.KINDS.index(search_kind.KIND_ALBUM)
+        )
+
+        with mock.patch.object(panel, "on_search") as search:
+            panel.on_kind_changed(None)
+
+        self.assertEqual(self.frame.config["search_kind"], search_kind.KIND_ALBUM)
+        search.assert_called_once_with(None)
+
+    def test_album_search_asks_only_the_sites_that_have_albums(self):
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        token = panel.token = object()
+
+        with (
+            mock.patch.object(musicdl_backend, "search") as musicdl_search,
+            mock.patch.object(panel, "_sideb_search") as sideb_search,
+            mock.patch.object(deezer_backend, "search", return_value=[]),
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search("discovery", ENGINE_MUSIC, token, stop, ["netease"],
+                          search_order.ORDER_RELEVANCE, search_kind.KIND_ALBUM)
+            # Wait for the Deezer worker this branch starts on its own.
+            for thread in threading.enumerate():
+                if thread.name == "search-deezer":
+                    thread.join(timeout=5)
+
+        # The musicdl sites and Side B match song titles only; asking them
+        # would answer an album search with several hundred tracks.
+        musicdl_search.assert_not_called()
+        sideb_search.assert_not_called()
+
+    def test_track_search_still_asks_every_music_site(self):
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        token = panel.token = object()
+
+        with (
+            mock.patch.object(
+                musicdl_backend, "search", return_value=([], [], [])
+            ) as musicdl_search,
+            mock.patch.object(panel, "_sideb_search") as sideb_search,
+            mock.patch.object(deezer_backend, "search", return_value=[]) as deezer,
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search("discovery", ENGINE_MUSIC, token, stop, ["netease"],
+                          search_order.ORDER_RELEVANCE, search_kind.KIND_TRACK)
+            for thread in threading.enumerate():
+                if thread.name == "search-deezer":
+                    thread.join(timeout=5)
+
+        musicdl_search.assert_called_once()
+        sideb_search.assert_called_once()
+        self.assertEqual(deezer.call_args.kwargs["kind"], search_kind.KIND_TRACK)
+
+    def test_search_status_says_which_sites_could_search_by_type(self):
+        # Album leaves the sites that cannot answer it out of the search...
+        self.assertEqual(
+            _kind_phrase(search_kind.KIND_ALBUM, ["Deezer"], ["Netease", "QQ"]),
+            "Only Deezer can search by album, so the other 2 sites were not "
+            "asked.",
+        )
+        # ...while the types that only narrow the matching still ask them.
+        self.assertEqual(
+            _kind_phrase(search_kind.KIND_ARTIST, ["Deezer"], ["Netease"]),
+            "1 site cannot search by artist, so it answered by best match.",
+        )
+        self.assertEqual(
+            _kind_phrase(search_kind.KIND_TRACK, [], ["Bandcamp"]),
+            "No site here can search by track title; showing best match.",
+        )
+        self.assertEqual(_kind_phrase(search_kind.KIND_BEST, [], ["Bandcamp"]), "")
+
+    def test_only_the_catalogue_sites_can_search_a_named_field(self):
+        able, unable = _kind_capable_sources(
+            ENGINE_MUSIC, ["netease", "Deezer", "Deezer (Side B)"],
+            search_kind.KIND_ALBUM,
+        )
+        self.assertEqual((able, unable),
+                         (["Deezer"], ["netease", "Deezer (Side B)"]))
+        # Best match is what every site does when asked for nothing, so
+        # nothing is ever named as unable to do it.
+        self.assertEqual(
+            _kind_capable_sources(
+                ENGINE_MUSIC, ["netease"], search_kind.KIND_BEST),
+            (["netease"], []),
+        )
+        self.assertEqual(
+            _kind_capable_sources(
+                ENGINE_APPLE_MUSIC, ["Apple Music"], search_kind.KIND_ALBUM),
+            (["Apple Music"], []),
+        )
+        self.assertEqual(
+            _kind_capable_sources(
+                ENGINE_BOOKS, ["Anna's Archive"], search_kind.KIND_ALBUM),
+            ([], ["Anna's Archive"]),
+        )
+
     def test_query_order_is_not_confused_with_a_books_original_year(self):
         self.assertEqual(
             _sort_for_order(ENGINE_BOOKS, search_order.ORDER_RECENT),
@@ -1377,6 +1510,101 @@ class GuiInteractionTests(unittest.TestCase):
         )
         self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
 
+    def test_album_row_is_resolved_to_its_tracks_before_queueing(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        album = {
+            "title": "Discovery",
+            "kind": "deezer_album",
+            "url": "https://www.deezer.com/album/7",
+            "format": "Album, 2 tracks",
+        }
+        panel.results = [album]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+
+        with mock.patch.object(panel, "_queue_album_items") as queue_albums:
+            panel.on_download_selected(None)
+
+        queue_albums.assert_called_once_with([album])
+        # Nothing reached the queue directly: an album has to be read first.
+        self.assertEqual(self.frame.queue.calls, [])
+
+    def test_album_download_queues_every_track_the_user_keeps(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        album = {
+            "title": "Discovery",
+            "kind": "deezer_album",
+            "url": "https://www.deezer.com/album/7",
+        }
+        tracks = [
+            {"title": f"Track {number}",
+             "url": f"https://www.deezer.com/track/{number}"}
+            for number in (1, 2, 3)
+        ]
+
+        with (
+            mock.patch.object(ItemPickerDialog, "ShowModal", return_value=wx.ID_OK),
+            mock.patch.object(
+                ItemPickerDialog, "selected_items", return_value=tracks[:2]
+            ),
+        ):
+            panel._album_tracks_ready(
+                panel.album_token, [(album, tracks)], []
+            )
+
+        self.assertEqual(
+            [(call[0], call[2]) for call in self.frame.queue.calls],
+            [("sideb", "Track 1"), ("sideb", "Track 2")],
+        )
+        self.assertEqual(self.frame.messages[-1], "Queued 2 downloads.")
+
+    def test_several_albums_are_queued_whole_without_a_picker(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_APPLE_MUSIC
+        resolved = [
+            ({"title": "First", "kind": "applemusic_album"},
+             [{"title": "One", "url": "https://music.apple.com/us/song/1"}]),
+            ({"title": "Second", "kind": "applemusic_album"},
+             [{"title": "Two", "url": "https://music.apple.com/us/song/2"}]),
+        ]
+
+        panel._album_tracks_ready(panel.album_token, resolved, [])
+
+        self.assertEqual(
+            [(call[0], call[2]) for call in self.frame.queue.calls],
+            [("applemusic", "One"), ("applemusic", "Two")],
+        )
+
+    def test_an_album_that_cannot_be_read_is_reported_not_silently_dropped(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        token = panel.album_token = object()
+
+        with mock.patch.object(
+            deezer_backend, "extract_flat", side_effect=RuntimeError("gone")
+        ), mock.patch.object(wx, "CallAfter") as call_after:
+            panel._resolve_album_tracks(
+                token,
+                [{"title": "Discovery", "kind": "deezer_album", "url": "u"}],
+            )
+
+        _method, _token, resolved, errors = call_after.call_args.args
+        self.assertEqual(resolved, [])
+        self.assertEqual(errors, ["Discovery: gone"])
+
+    def test_albums_cannot_be_previewed(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        panel.results = [{"title": "Discovery", "kind": "deezer_album"}]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+
+        panel.on_preview_selected(None)
+
+        self.assertIn("no single track to play", self.frame.messages[-1])
+
     def test_books_cannot_be_previewed(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_BOOKS
@@ -1407,6 +1635,79 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(config["justforfans_auth_file"], "justforfans.json")
         self.assertTrue(config.saved)
         dialog.Destroy()
+
+    def test_settings_opens_on_the_download_folder_not_the_ok_button(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+        # The dialog's default button takes the focus when it is shown, which
+        # is what used to put Settings on OK -- past every setting in it.
+        dialog.FindWindow(wx.ID_OK).SetFocus()
+
+        dialog.focus_first_control()
+
+        self.assertEqual(dialog.notebook.GetSelection(), 0)
+        self.assertEqual(dialog.notebook.GetPageText(0), "Downloads")
+        self.assertIs(
+            wx.Window.FindFocus(), dialog.dir_picker.GetTextCtrl()
+        )
+        # The edit box inside the picker carries the name too, so the
+        # control the focus lands in is not an unlabelled one.
+        self.assertEqual(
+            dialog.dir_picker.GetTextCtrl().GetName(), "Download folder"
+        )
+        dialog.Destroy()
+
+    def test_speak_status_checkbox_defaults_on_and_saves(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertTrue(dialog.speak_status_check.GetValue())
+        dialog.speak_status_check.SetValue(False)
+        dialog.apply()
+
+        self.assertFalse(config["speak_status"])
+        self.assertTrue(config.saved)
+        dialog.Destroy()
+
+    def test_status_messages_are_spoken_once_and_only_when_wanted(self):
+        holder = SimpleNamespace(
+            _closing=False,
+            config={"speak_status": True},
+            SetStatusText=mock.Mock(),
+        )
+        with mock.patch.object(speech, "announce") as spoken:
+            MainFrame.announce(holder, "12 results found.")
+            MainFrame.announce(holder, "Download failed.", speak=False)
+            holder.config["speak_status"] = False
+            MainFrame.announce(holder, "Settings saved.")
+
+        # The status bar still carries everything, so NVDA+End reads the
+        # last thing that happened whether or not it was said out loud.
+        self.assertEqual(
+            [call.args[0] for call in holder.SetStatusText.call_args_list],
+            ["12 results found.", "Download failed.", "Settings saved."],
+        )
+        spoken.assert_called_once_with("12 results found.")
+
+    def test_the_same_status_message_is_not_spoken_twice(self):
+        speech.reset()
+        self.addCleanup(speech.reset)
+        with mock.patch.object(speech, "speak", return_value=True) as spoke:
+            self.assertTrue(speech.announce("Still searching 5 sites."))
+            self.assertFalse(speech.announce("Still searching 5 sites."))
+            self.assertTrue(speech.announce("12 results found."))
+
+        self.assertEqual(
+            [call.args[0] for call in spoke.call_args_list],
+            ["Still searching 5 sites.", "12 results found."],
+        )
+
+    def test_speech_stays_silent_when_it_has_nobody_to_talk_to(self):
+        speech.reset()
+        self.addCleanup(speech.reset)
+        with mock.patch.dict(os.environ, {"BLINDDL_NO_SPEECH": "1"}):
+            self.assertFalse(speech.speak("Anything at all."))
+        self.assertFalse(speech.speak(""))
 
     def test_start_maximized_checkbox_saves(self):
         config = _SettingsConfig()

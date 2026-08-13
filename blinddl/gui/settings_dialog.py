@@ -66,6 +66,20 @@ BROWSER_COOKIE_CHOICES = [
 ENCRYPTION_CHOICES = torrent_engine.ENCRYPTION_CHOICES
 
 
+def _name_picker(picker, name):
+    """Name a folder picker and the edit box inside it.
+
+    A picker is a text box next to a Browse button, and only the picker as a
+    whole carries the name given to it. Without this the edit box the focus
+    actually lands in reads as an unlabelled one.
+    """
+    picker.SetName(name)
+    text = picker.GetTextCtrl() if hasattr(picker, "GetTextCtrl") else None
+    if text is not None:
+        text.SetName(name)
+    return picker
+
+
 def _row(sizer, label_ctrl, ctrl):
     box = wx.BoxSizer(wx.HORIZONTAL)
     box.Add(label_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
@@ -97,6 +111,29 @@ class SettingsDialog(wx.Dialog):
             8,
         )
         self.SetSizerAndFit(sizer)
+        # A dialog with a default button hands it the focus on open, so
+        # Settings used to start on OK -- past every setting in it. Start on
+        # the first control of the first page instead, so the dialog reads
+        # from the top and Tab moves forward through it rather than wrapping
+        # round. wxEVT_INIT_DIALOG arrives from ShowModal, after the default
+        # button has taken focus, which is the point at which taking it back
+        # sticks.
+        self.notebook.SetSelection(0)
+        self.Bind(wx.EVT_INIT_DIALOG, self._on_init_dialog)
+        self.focus_first_control()
+
+    def _on_init_dialog(self, event):
+        event.Skip()
+        self.focus_first_control()
+
+    def focus_first_control(self):
+        """Put the focus on the download folder box, the first setting."""
+        picker = self.dir_picker
+        # The picker is a text box next to a Browse button. Focusing the
+        # text box is what makes the path typable and readable straight
+        # away; focusing the picker itself would land on the button.
+        text = picker.GetTextCtrl() if hasattr(picker, "GetTextCtrl") else None
+        (text or picker).SetFocus()
 
     # -- pages ---------------------------------------------------------------
 
@@ -122,10 +159,14 @@ class SettingsDialog(wx.Dialog):
         config = self.config
 
         dir_label = wx.StaticText(page, label="&Download folder:")
-        self.dir_picker = wx.DirPickerCtrl(
-            page, path=config["download_dir"], message="Choose download folder"
+        self.dir_picker = _name_picker(
+            wx.DirPickerCtrl(
+                page,
+                path=config["download_dir"],
+                message="Choose download folder",
+            ),
+            "Download folder",
         )
-        self.dir_picker.SetName("Download folder")
 
         self.audio_only_check = wx.CheckBox(page, label="Download &audio only")
         self.audio_only_check.SetValue(bool(config["audio_only"]))
@@ -201,13 +242,15 @@ class SettingsDialog(wx.Dialog):
         torrent_dir_label = wx.StaticText(
             page, label="Torrent download &folder (blank = same as downloads):"
         )
-        self.torrent_dir_picker = wx.DirPickerCtrl(
-            page,
-            path=config["torrent_dir"],
-            message="Choose the folder torrents download into",
-            style=wx.DIRP_USE_TEXTCTRL | wx.DIRP_DIR_MUST_EXIST,
+        self.torrent_dir_picker = _name_picker(
+            wx.DirPickerCtrl(
+                page,
+                path=config["torrent_dir"],
+                message="Choose the folder torrents download into",
+                style=wx.DIRP_USE_TEXTCTRL | wx.DIRP_DIR_MUST_EXIST,
+            ),
+            "Torrent download folder",
         )
-        self.torrent_dir_picker.SetName("Torrent download folder")
 
         down_label = wx.StaticText(
             page, label="Download &limit, KB per second (0 = unlimited):"
@@ -741,6 +784,17 @@ class SettingsDialog(wx.Dialog):
             "Opens blindDL with the window filling the screen."
         )
 
+        self.speak_status_check = wx.CheckBox(
+            page, label="S&peak status messages as they appear"
+        )
+        self.speak_status_check.SetValue(bool(config["speak_status"]))
+        self.speak_status_check.SetHelpText(
+            "Says what the status bar says -- a search finishing, a download "
+            "failing -- through the screen reader and on a Braille display, "
+            "so it does not have to be checked with NVDA plus End. Messages "
+            "wait their turn rather than interrupting what is being read."
+        )
+
         update_label = (
             "&Check for BlindDL updates automatically"
             if getattr(sys, "frozen", False)
@@ -764,6 +818,7 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.tray_check, 0, wx.ALL, 8)
         sizer.Add(self.tray_minimize_check, 0, wx.ALL, 8)
         sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
+        sizer.Add(self.speak_status_check, 0, wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
         _row(sizer, cookies_label, self.cookies_choice)
         page.SetSizer(sizer)
@@ -1067,6 +1122,7 @@ class SettingsDialog(wx.Dialog):
         self.config["minimize_to_tray"] = self.tray_check.GetValue()
         self.config["tray_on_minimize"] = self.tray_minimize_check.GetValue()
         self.config["start_maximized"] = self.start_maximized_check.GetValue()
+        self.config["speak_status"] = self.speak_status_check.GetValue()
         self.config["auto_update"] = self.update_check.GetValue()
         self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
             self.cookies_choice.GetSelection()

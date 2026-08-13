@@ -58,6 +58,18 @@ for package in (
     binaries += package_binaries
     hiddenimports += package_hidden
 
+# accessible-output2 speaks the status bar. Its screen-reader bridges are
+# DLLs it loads by name from its own lib folder rather than modules anything
+# imports, so the whole package has to come along; the outputs themselves are
+# picked at runtime by trying each one, which import analysis cannot follow.
+# Windows-only, and blindDL falls back to NVDA's and JAWS' own APIs without
+# it, so a build on a platform that has no wheel simply leaves it out.
+if importlib.util.find_spec("accessible_output2") is not None:
+    ao2_datas, ao2_binaries, ao2_hidden = collect_all("accessible_output2")
+    datas += ao2_datas
+    binaries += ao2_binaries
+    hiddenimports += ao2_hidden
+
 # aioslsk keeps its share index and transfer list in a ``shelve``, and shelve
 # resolves its storage backend by importing a name held in a plain string
 # list.  Nothing in that is visible to PyInstaller's import analysis, so the

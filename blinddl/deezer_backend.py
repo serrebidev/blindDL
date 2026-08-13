@@ -21,7 +21,8 @@ import requests
 # Deezer itself defines Blowfish as the cipher for this stream format.
 from Crypto.Cipher import Blowfish  # nosec B413
 
-from . import search_order
+from . import search_kind, search_order
+from .search_kind import KIND_ALBUM, KIND_ARTIST, KIND_BEST, KIND_TRACK
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 from .ytdlp_backend import DownloadCancelled
 
@@ -58,6 +59,11 @@ _DEFAULT_FORMATS = ["FLAC", "MP3_320"]
 # lists per search.
 _SEARCH_LIMIT = 100
 _SEARCH_TARGET = 200
+# How many artists an artist search looks up before taking their tracks.
+# More than one, because "Bowie" is several artists and the first is not
+# always the one meant; few enough that the search stays one round trip
+# each rather than a dozen.
+_ARTIST_SEARCH_LIMIT = 5
 
 _sessions = {}  # arl -> authenticated HTTP session and streaming credentials
 _sessions_lock = threading.Lock()
@@ -325,19 +331,135 @@ def _track_to_item(data):
     }
 
 
-def supports_order(order):
-    """Deezer publishes a rank per track, and no release date to sort on."""
-    return search_order.normalize(order) != ORDER_RECENT
+def _album_to_item(data):
+    """One row for a whole album, which downloads as all of its tracks."""
+    artist = (data.get("artist") or {}).get("name", "")
+    tracks = int(data.get("nb_tracks") or 0)
+    return {
+        "id": f"deezer:album:{data['id']}",
+        # The queue never sees this kind: pressing Enter on an album row
+        # resolves it to its tracks first, and those are ordinary Deezer
+        # items. It is what tells the Search tab to do that resolving.
+        "kind": "deezer_album",
+        "title": data.get("title") or "Unknown album",
+        "artist": artist,
+        "album": data.get("title") or "",
+        "source": _SEARCH_SOURCE,
+        # An album's rows carry no single duration, so the Type column is
+        # where its size is said: "Album, 12 tracks".
+        "duration_s": 0,
+        "tracks": tracks,
+        "format": search_kind.album_type_label(tracks),
+        "rank": 0,
+        "url": data.get("link", f"https://www.deezer.com/album/{data['id']}"),
+    }
 
 
-def search(query, config=None, order=ORDER_RELEVANCE):
-    """Search Deezer tracks via the public API.  Returns normalized items.
+def supports_order(order, kind=KIND_BEST):
+    """Deezer publishes a rank per track, and no release date to sort on.
 
-    The API caps a track search at 100 results per request, so two pages are
+    Album search is the exception both ways: /search/album returns neither a
+    date nor a popularity figure, so an album search can only be answered by
+    best match.
+    """
+    order = search_order.normalize(order)
+    if order == ORDER_RECENT:
+        return False
+    return not (search_kind.is_album(kind) and order == ORDER_POPULAR)
+
+
+def supports_kind(kind):
+    """Deezer's field syntax and album endpoint cover every search type."""
+    return search_kind.normalize(kind) in search_kind.KINDS
+
+
+def _search_albums(query):
+    """Album rows for *query*, from Deezer's own album search endpoint."""
+    items = []
+    seen = set()
+    try:
+        for index in range(0, _SEARCH_TARGET, _SEARCH_LIMIT):
+            page = _api_get(
+                "/search/album",
+                {"q": query, "limit": _SEARCH_LIMIT, "index": index},
+            )
+            batch = page.get("data", [])
+            if not batch:
+                break
+            for album in batch:
+                item = _album_to_item(album)
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    items.append(item)
+            if len(batch) < _SEARCH_LIMIT:
+                break
+    except Exception:
+        # A failed page stops the crawl; whatever arrived is still shown.
+        pass
+    return items
+
+
+def _search_artist_tracks(query):
+    """Tracks by the artists whose *names* match *query*.
+
+    Deezer does have a documented ``artist:"..."`` query term, and it does
+    not work: it matches the words loosely and separately, so asking for
+    Daft Punk answers with Pan Da Punk and Manny Da Prince and never with
+    Daft Punk at all. Its artist endpoint is exact, so an artist search
+    looks the artist up there and then takes what they are known for.
+    """
+    try:
+        found = _api_get(
+            "/search/artist", {"q": query, "limit": _ARTIST_SEARCH_LIMIT}
+        ).get("data", [])
+    except Exception:
+        return []
+    items = []
+    seen = set()
+    for artist in found:
+        if len(items) >= _SEARCH_TARGET:
+            break
+        artist_name = artist.get("name") or ""
+        try:
+            top = _api_get(
+                f"/artist/{artist['id']}/top", {"limit": _SEARCH_LIMIT}
+            ).get("data", [])
+        except Exception:
+            # One artist that cannot be read must not lose the others.
+            continue
+        for track in top:
+            entry = dict(track)
+            # /artist/{id}/top names the artist on the request, not on each
+            # track, so the rows would otherwise arrive without one.
+            entry.setdefault("artist", {"name": artist_name})
+            item = _track_to_item(entry)
+            if item["id"] not in seen:
+                seen.add(item["id"])
+                items.append(item)
+    return items[:_SEARCH_TARGET]
+
+
+def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST):
+    """Search Deezer via the public API.  Returns normalized items.
+
+    *kind* is the Search tab's search type. Album asks Deezer's album
+    endpoint and returns one row per album, artist asks its artist endpoint
+    and returns what those artists are known for, and track title keeps only
+    the results whose title really does contain what was typed.
+
+    The API caps a search at 100 results per request, so two pages are
     fetched to reach the 200 blindDL lists. The API takes an `order`
     parameter and quietly disregards it on track search, so the ordering is
     done here on the rank each row carries.
     """
+    kind = search_kind.normalize(kind)
+    if kind == KIND_ALBUM:
+        return _search_albums(query)
+    if kind == KIND_ARTIST:
+        items = _search_artist_tracks(query)
+        if search_order.normalize(order) == ORDER_POPULAR:
+            items.sort(key=lambda item: -item["rank"])
+        return items
     items = []
     seen = set()
     try:
@@ -351,9 +473,17 @@ def search(query, config=None, order=ORDER_RELEVANCE):
                 break
             for track in batch:
                 item = _track_to_item(track)
-                if item["id"] not in seen:
-                    seen.add(item["id"])
-                    items.append(item)
+                if item["id"] in seen:
+                    continue
+                # Deezer's own ``track:"..."`` term matches the words of the
+                # query anywhere, including in the word "track" itself, so
+                # the narrowing a title search asks for is done here.
+                if kind == KIND_TRACK and not search_kind.matches(
+                    item["title"], query
+                ):
+                    continue
+                seen.add(item["id"])
+                items.append(item)
             if len(batch) < _SEARCH_LIMIT:
                 break
     except Exception:

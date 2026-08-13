@@ -1,4 +1,8 @@
 wxPython>=4.2; platform_system != "Linux"
+# Speaks status-bar messages through the running screen reader, and puts
+# them on a Braille display. Optional at runtime: blindDL falls back to
+# NVDA's and JAWS' own APIs when it is absent.
+accessible-output2>=0.17; platform_system == "Windows"
 # The updater keeps yt-dlp on the nightly (pre-release) builds; this is
 # just the baseline for a fresh install.
 yt-dlp[default]>=2025.1.1

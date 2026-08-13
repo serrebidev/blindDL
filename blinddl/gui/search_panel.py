@@ -27,6 +27,8 @@ from .. import (
     torrent_backend,
     ytdlp_backend,
 )
+from .. import search_kind
+from ..search_kind import KIND_ALBUM, KIND_BEST
 from ..search_order import ORDER_RECENT, ORDER_RELEVANCE
 from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
@@ -98,6 +100,15 @@ GENERAL_ENGINES = (
 # adult and Soulseek choices keep their historical numbers, so callers must
 # count the tuple rather than assume ENGINE_0..N.
 GENERAL_ENGINE_COUNT = len(GENERAL_ENGINES)
+# The engines whose results are music, and where "album" or "artist" is
+# therefore something to search for. A book library or a torrent indexer has
+# no such fields, so the Search type control is switched off for them rather
+# than offering choices that could not change the answer.
+KIND_ENGINES = (
+    ENGINE_MUSIC,
+    ENGINE_DEEZER,
+    ENGINE_APPLE_MUSIC,
+)
 ARCHIVE_ENGINE_CATEGORIES = {
     ENGINE_ARCHIVE_AUDIO: archive_backend.AUDIO_CATEGORIES,
     ENGINE_ARCHIVE_VIDEO: archive_backend.VIDEO_CATEGORIES,
@@ -277,7 +288,7 @@ def _sort_for_order(engine, order):
     return SORT_RELEVANCE
 
 
-def _order_capable_sources(engine, sources, order, config):
+def _order_capable_sources(engine, sources, order, config, kind=KIND_BEST):
     """Split *sources* into the ones that can answer *order* and the rest.
 
     Every engine keeps its own map of what its sites can sort by, so this
@@ -308,7 +319,7 @@ def _order_capable_sources(engine, sources, order, config):
             # popularity, which it publishes as a rank per track.
             return (
                 source == deezer_backend._SEARCH_SOURCE
-                and deezer_backend.supports_order(order)
+                and deezer_backend.supports_order(order, kind)
             )
         # SoundCloud, Bandcamp and Apple Music each offer one search and no
         # way to order it.
@@ -338,6 +349,77 @@ def _order_phrase(order, unable, total):
     return (
         f"{len(unable)} {site_word} cannot sort by {label}, so {pronoun} "
         f"answered by best match: {names}."
+    )
+
+
+def _music_source_label(source):
+    """A musicdl source read out the way its own site is named."""
+    if source in musicdl_backend.ALL_SOURCES:
+        return musicdl_backend.source_label(source)
+    return source
+
+
+def _is_album_item(item):
+    """Whether this row is a whole album rather than one track.
+
+    Album rows are resolved to their tracks before anything is queued, so
+    the queue never sees one; the download and preview paths ask this to
+    know that resolving is needed.
+    """
+    return str(item.get("kind") or "").endswith("_album")
+
+
+def _kind_capable_sources(engine, sources, kind):
+    """Split *sources* into the ones that can search by *kind* and the rest.
+
+    Only the two services with a real catalogue API behind them can match a
+    single named field. The music sites musicdl drives all have one search
+    box and nothing else, which is what they are then said to have answered.
+    """
+    kind = search_kind.normalize(kind)
+    if kind == KIND_BEST:
+        return list(sources), []
+
+    def can(source):
+        if engine in (ENGINE_MUSIC, ENGINE_DEEZER):
+            return (
+                source == deezer_backend._SEARCH_SOURCE
+                and deezer_backend.supports_kind(kind)
+            )
+        if engine == ENGINE_APPLE_MUSIC:
+            return applemusic_backend.supports_kind(kind)
+        return False
+
+    able = [source for source in sources if can(source)]
+    unable = [source for source in sources if not can(source)]
+    return able, unable
+
+
+def _kind_phrase(kind, able, unable):
+    """One sentence on which sites could search for what was asked.
+
+    Album is the type that changes what a result *is*, so the sites that
+    cannot answer it are left out of the search rather than filling the list
+    with tracks. The other types only change the matching, so every site is
+    still asked and the ones that could not narrow it are named.
+    """
+    kind = search_kind.normalize(kind)
+    if kind == KIND_BEST or not unable:
+        return ""
+    label = search_kind.label(kind).lower()
+    if not able:
+        return f"No site here can search by {label}; showing best match."
+    site_word = "site" if len(unable) == 1 else "sites"
+    names = ", ".join(able[:3])
+    if kind == KIND_ALBUM:
+        return (
+            f"Only {names} can search by {label}, so the other "
+            f"{len(unable)} {site_word} were not asked."
+        )
+    pronoun = "it" if len(unable) == 1 else "they"
+    return (
+        f"{len(unable)} {site_word} cannot search by {label}, so {pronoun} "
+        f"answered by best match."
     )
 
 
@@ -624,10 +706,17 @@ class SearchPanel(wx.Panel):
         self.current_order = search_order.normalize(
             self.frame.config.get("search_order", ORDER_RELEVANCE)
         )
+        self.current_kind = search_kind.normalize(
+            self.frame.config.get("search_kind", KIND_BEST)
+        )
         self.order_unable = []
         self.order_source_count = 0
+        self.kind_used = KIND_BEST
+        self.kind_able = []
+        self.kind_unable = []
         self.preview_token = None
         self.archive_token = None
+        self.album_token = None
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -658,6 +747,17 @@ class SearchPanel(wx.Panel):
         )
         self.engine_choice.SetSelection(0)
         self.engine_choice.Bind(wx.EVT_CHOICE, self.on_engine_changed)
+
+        kind_label = wx.StaticText(self, label="Search t&ype:")
+        self.kind_choice = wx.Choice(self, choices=search_kind.KIND_LABEL_LIST)
+        self.kind_choice.SetName("Search type")
+        self.kind_choice.SetHelpText(
+            "Best match searches everything. Track title and Artist match "
+            "only that field. Album lists whole albums, and Enter on one "
+            "downloads every track it contains."
+        )
+        self.kind_choice.SetSelection(search_kind.KINDS.index(self.current_kind))
+        self.kind_choice.Bind(wx.EVT_CHOICE, self.on_kind_changed)
 
         order_label = wx.StaticText(self, label="&Order:")
         self.order_choice = wx.Choice(self, choices=search_order.ORDER_LABEL_LIST)
@@ -701,6 +801,8 @@ class SearchPanel(wx.Panel):
         top = wx.BoxSizer(wx.HORIZONTAL)
         top.Add(engine_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.engine_choice, 0, wx.RIGHT, 12)
+        top.Add(kind_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        top.Add(self.kind_choice, 0, wx.RIGHT, 12)
         top.Add(order_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.order_choice, 0, wx.RIGHT, 12)
         top.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
@@ -746,6 +848,20 @@ class SearchPanel(wx.Panel):
         self.engine_choice.SetSelection(self.visible_engines.index(engine))
         self._apply_engine_controls(engine)
 
+    def _selected_kind(self):
+        """The search type this engine will actually be searched with.
+
+        An engine with no album or artist to speak of is searched by best
+        match whatever the control was last left on, which is also what the
+        control itself shows once it has been switched off.
+        """
+        if self._selected_engine() not in KIND_ENGINES:
+            return KIND_BEST
+        selection = self.kind_choice.GetSelection()
+        if 0 <= selection < len(search_kind.KINDS):
+            return search_kind.KINDS[selection]
+        return KIND_BEST
+
     def _apply_engine_controls(self, engine):
         """Name the sort choices and the preview button for one engine.
 
@@ -754,6 +870,14 @@ class SearchPanel(wx.Panel):
         reads "Author" and "Newest first" instead of options that mean
         nothing for a book.
         """
+        # The search type only means something for music. Switching it off
+        # elsewhere keeps the page honest: a choice that cannot change the
+        # answer should not be sitting there offering to.
+        searchable = engine in KIND_ENGINES
+        self.kind_choice.SetSelection(
+            search_kind.KINDS.index(self.current_kind if searchable else KIND_BEST)
+        )
+        self.kind_choice.Enable(searchable)
         labels = _sort_labels(engine)
         if [
             self.sort_choice.GetString(index)
@@ -781,6 +905,26 @@ class SearchPanel(wx.Panel):
         if mode < self.sort_choice.GetCount():
             self.sort_choice.SetSelection(mode)
         event.Skip()
+
+    def on_kind_changed(self, event):
+        """Save the search type and repeat an existing search with it."""
+        selection = self.kind_choice.GetSelection()
+        if not 0 <= selection < len(search_kind.KINDS):
+            selection = 0
+            self.kind_choice.SetSelection(selection)
+        self.current_kind = search_kind.KINDS[selection]
+        self.frame.config["search_kind"] = self.current_kind
+        save = getattr(self.frame.config, "save", None)
+        if save is not None:
+            save()
+        if self.query_text.GetValue().strip():
+            self.on_search(None)
+        else:
+            self.frame.announce(
+                f"Search type set to {search_kind.label(self.current_kind)}."
+            )
+        if event is not None:
+            event.Skip()
 
     def on_order_changed(self, event):
         """Save the query order and repeat an existing search with it."""
@@ -828,11 +972,16 @@ class SearchPanel(wx.Panel):
             self.frame.announce("Type a search first.")
             return
         engine = self._selected_engine()
+        kind = self._selected_kind()
+        # An album search asks for a different thing, not a differently
+        # matched one, so only the sites that can return albums go out. The
+        # rest would answer with tracks and bury the albums under them.
+        albums_only = search_kind.is_album(kind)
         if engine == ENGINE_MUSIC:
             sources = musicdl_backend.enabled_sources(
                 self.frame.config["disabled_music_sources"]
             )
-            if not sources:
+            if not sources and not albums_only:
                 self.frame.announce("No music sites selected. Use Tools, Search sites.")
                 return
         elif engine == ENGINE_BOOKS:
@@ -926,17 +1075,18 @@ class SearchPanel(wx.Panel):
         else:
             order_sources = list(sources)
         _able, unable = _order_capable_sources(
-            engine, order_sources, order, self.frame.config
+            engine, order_sources, order, self.frame.config, kind
         )
+        kind_able, kind_unable = _kind_capable_sources(engine, order_sources, kind)
         if engine == ENGINE_MUSIC:
-            unable = [
-                musicdl_backend.source_label(source)
-                if source in musicdl_backend.ALL_SOURCES
-                else source
-                for source in unable
-            ]
+            unable = [_music_source_label(source) for source in unable]
+            kind_able = [_music_source_label(source) for source in kind_able]
+            kind_unable = [_music_source_label(source) for source in kind_unable]
         self.order_unable = unable
         self.order_source_count = len(order_sources)
+        self.kind_used = kind
+        self.kind_able = kind_able
+        self.kind_unable = kind_unable
         self.search_btn.Disable()
 
         # Everything below is tagged with this token, so results still
@@ -963,6 +1113,11 @@ class SearchPanel(wx.Panel):
         if _is_soulseek_engine(engine):
             self.frame.announce(
                 f"Searching {ENGINE_LABELS[engine]} "
+                f"({self.frame.config['search_timeout_s']:g} seconds)..."
+            )
+        elif engine == ENGINE_MUSIC and albums_only:
+            self.frame.announce(
+                f"Searching {deezer_backend._SEARCH_SOURCE} for albums "
                 f"({self.frame.config['search_timeout_s']:g} seconds)..."
             )
         elif engine == ENGINE_MUSIC:
@@ -1013,12 +1168,13 @@ class SearchPanel(wx.Panel):
             self.frame.announce(f"Searching {ENGINE_LABELS[engine]}...")
         threading.Thread(
             target=self._search,
-            args=(query, engine, self.token, self.stop, sources, order),
+            args=(query, engine, self.token, self.stop, sources, order, kind),
             daemon=True,
         ).start()
 
-    def _search(self, query, engine, token, stop, sources, order=None):
+    def _search(self, query, engine, token, stop, sources, order=None, kind=KIND_BEST):
         order = search_order.normalize(order or self.current_order)
+        kind = search_kind.normalize(kind)
         asked = []
         try:
             if _is_soulseek_engine(engine):
@@ -1030,6 +1186,19 @@ class SearchPanel(wx.Panel):
                     stop_event=stop,
                 )
                 asked = [soulseek_backend.SOURCE]
+            elif engine == ENGINE_MUSIC and search_kind.is_album(kind):
+                # Deezer is the only one of the music sources with an album
+                # catalogue to search. The musicdl sites and Side B match
+                # song titles, so asking them here would answer an album
+                # search with several hundred tracks.
+                threading.Thread(
+                    target=self._deezer_search,
+                    args=(query, token, engine, stop, order, kind),
+                    daemon=True,
+                    name="search-deezer",
+                ).start()
+                asked = [deezer_backend._SEARCH_SOURCE]
+                items = []
             elif engine == ENGINE_MUSIC:
 
                 def on_site(source, items):
@@ -1043,7 +1212,7 @@ class SearchPanel(wx.Panel):
                 ).start()
                 threading.Thread(
                     target=self._deezer_search,
-                    args=(query, token, engine, stop, order),
+                    args=(query, token, engine, stop, order, kind),
                     daemon=True,
                     name="search-deezer",
                 ).start()
@@ -1128,10 +1297,12 @@ class SearchPanel(wx.Panel):
                 items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
                 items = applemusic_backend.search(
-                    query, self.frame.config, order=order
+                    query, self.frame.config, order=order, kind=kind
                 )
             elif engine == ENGINE_DEEZER:
-                items = deezer_backend.search(query, self.frame.config, order=order)
+                items = deezer_backend.search(
+                    query, self.frame.config, order=order, kind=kind
+                )
             elif _is_adult_engine(engine):
 
                 def on_adult_site(source, items):
@@ -1168,9 +1339,12 @@ class SearchPanel(wx.Panel):
             return
         wx.CallAfter(self._add_site, token, engine, sideb_backend.SIDEB_SOURCE, items)
 
-    def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE):
+    def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE,
+                       kind=KIND_BEST):
         try:
-            items = deezer_backend.search(query, self.frame.config, order=order)
+            items = deezer_backend.search(
+                query, self.frame.config, order=order, kind=kind
+            )
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
         if stop.is_set():
@@ -1483,19 +1657,21 @@ class SearchPanel(wx.Panel):
         order_phrase = _order_phrase(
             self.current_order, self.order_unable, self.order_source_count
         )
+        kind_phrase = _kind_phrase(
+            self.kind_used, self.kind_able, self.kind_unable
+        )
         if pending:
             # Deezer and friends can run for minutes; never call that "found
             # nothing" when the sites are still going.
             message = f"{self._result_count()} so far. {self._pending_phrase()}"
-            if order_phrase:
-                message += f" {order_phrase}"
-            self.frame.announce(message)
-            self.timer.Start(10000)
         else:
             message = f"{self._result_count()} found."
-            if order_phrase:
-                message += f" {order_phrase}"
-            self.frame.announce(message)
+        for phrase in (kind_phrase, order_phrase):
+            if phrase:
+                message += f" {phrase}"
+        self.frame.announce(message)
+        if pending:
+            self.timer.Start(10000)
         if self.results:
             self.results_list.SetFocus()
             self.results_list.Focus(0)
@@ -1586,6 +1762,96 @@ class SearchPanel(wx.Panel):
         self.frame.announce(
             addition_summary(added, [entry["title"] for entry in chosen])
         )
+
+    # -- whole albums --------------------------------------------------------
+
+    def _queue_album_items(self, albums):
+        """Read each album's track list, then queue or offer a choice."""
+        token = self.album_token = object()
+        if len(albums) == 1:
+            self.frame.announce(f"Reading track list: {albums[0]['title']}")
+        else:
+            self.frame.announce(f"Reading {len(albums)} album track lists...")
+        threading.Thread(
+            target=self._resolve_album_tracks,
+            args=(token, list(albums)),
+            daemon=True,
+            name="blinddl-album-tracks",
+        ).start()
+
+    def _resolve_album_tracks(self, token, albums):
+        resolved = []
+        errors = []
+        for album in albums:
+            try:
+                backend = (
+                    applemusic_backend
+                    if album.get("kind") == "applemusic_album"
+                    else deezer_backend
+                )
+                tracks, _title = backend.extract_flat(
+                    album["url"], self.frame.config
+                )
+            except Exception as exc:  # noqa: BLE001 - reported to the user
+                errors.append(f"{album['title']}: {exc}")
+                continue
+            if tracks:
+                resolved.append((album, tracks))
+            else:
+                errors.append(f"{album['title']}: no tracks listed")
+        wx.CallAfter(self._album_tracks_ready, token, resolved, errors)
+
+    def _album_tracks_ready(self, token, resolved, errors):
+        if self.closing or token is not self.album_token:
+            return
+        if not resolved:
+            self.frame.announce("Could not read that album.")
+            if errors:
+                wx.MessageBox(
+                    "Could not read that album:\n" + "\n".join(errors),
+                    "blindDL",
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+            return
+        if len(resolved) == 1 and len(resolved[0][1]) > 1:
+            # One album is a list worth reading before it fills the queue,
+            # the same way one Archive item is.
+            album, tracks = resolved[0]
+            dialog = ItemPickerDialog(self, tracks, album["title"])
+            try:
+                if dialog.ShowModal() != wx.ID_OK:
+                    self.frame.announce("Download cancelled.")
+                    return
+                chosen = dialog.selected_items()
+            finally:
+                dialog.Destroy()
+            self.results_list.SetFocus()
+            if not chosen:
+                self.frame.announce("Nothing selected.")
+                return
+            resolved = [(album, chosen)]
+        added = []
+        titles = []
+        with self.frame.queue.batch_additions():
+            for album, tracks in resolved:
+                apple = album.get("kind") == "applemusic_album"
+                for track in tracks:
+                    title = track.get("title") or album["title"]
+                    titles.append(title)
+                    if apple:
+                        added.append(
+                            self.frame.queue.add_applemusic(track["url"], title)
+                        )
+                    else:
+                        added.append(
+                            self.frame.queue.add_sideb(track["url"], title)
+                        )
+        message = addition_summary(added, titles)
+        if errors:
+            failed = "album" if len(errors) == 1 else "albums"
+            message += f" {len(errors)} {failed} could not be read."
+        self.frame.announce(message)
 
     def on_results_char(self, event):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
@@ -1860,6 +2126,12 @@ class SearchPanel(wx.Panel):
                 "Press Enter to download this file."
             )
             return
+        if _is_album_item(item):
+            self.frame.announce(
+                "An album has no single track to play. Press Enter to "
+                "choose which of its tracks to download."
+            )
+            return
         audio_only = self.result_engine in (
             ENGINE_MUSIC,
             ENGINE_DEEZER,
@@ -1920,6 +2192,22 @@ class SearchPanel(wx.Panel):
             # One Archive item can be a whole radio series. Ask which
             # episodes to take before filling the queue with hundreds.
             self._queue_archive_item(self.results[indices[0]])
+            return
+        # An album row is a whole release, so its track list has to be
+        # fetched before anything can be queued. That is a network call, so
+        # it happens off the GUI thread and the rest of the selection is
+        # queued straight away rather than waiting behind it.
+        albums = [
+            self.results[index] for index in indices
+            if _is_album_item(self.results[index])
+        ]
+        indices = [
+            index for index in indices
+            if not _is_album_item(self.results[index])
+        ]
+        if albums:
+            self._queue_album_items(albums)
+        if not indices:
             return
         with self.frame.queue.batch_additions():
             added = []
