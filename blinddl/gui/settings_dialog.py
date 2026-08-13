@@ -1036,66 +1036,44 @@ class SettingsDialog(wx.Dialog):
         import os
         import tempfile
 
-        import yt_dlp
-
-        browsers_to_try = [
-            "chrome",
-            "firefox",
-            "edge",
-            "brave",
-            "opera",
-            "vivaldi",
-            "librewolf",
-            "chromium",
-        ]
-        configured = self.config.get("cookies_from_browser", "")
-        if configured and configured not in browsers_to_try:
-            browsers_to_try.insert(0, configured)
-        elif configured:
-            browsers_to_try.remove(configured)
-            browsers_to_try.insert(0, configured)
+        from .. import browser_cookies
 
         descriptor, out = tempfile.mkstemp(suffix=".txt", prefix="am_cookies_")
         os.close(descriptor)
-        errors = []
-        for browser in browsers_to_try:
-            # Do not mistake a previous browser's partial export for this
-            # browser's successful result.
-            with open(out, "wb"):
-                pass
-            try:
-                opts = {
-                    "cookiesfrombrowser": (browser,),
-                    "cookiefile": out,
-                    "quiet": True,
-                    "noprogress": True,
-                    "skip_download": True,
-                    "extract_flat": True,
-                }
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.extract_info("https://music.apple.com", download=False)
-            except Exception as e:
-                errors.append(f"{browser}: {e}")
-                continue
-            if os.path.isfile(out) and os.path.getsize(out) > 0:
-                self.am_cookies_picker.SetPath(out)
-                self.config["apple_music_cookies"] = out
-                self.frame.announce(f"Apple Music cookies exported from {browser}.")
-                return
-            errors.append(f"{browser}: exported empty file")
-
         try:
-            os.remove(out)
-        except OSError:
-            pass
+            label = browser_cookies.export_apple_music_cookies(
+                out,
+                preferred=self.config.get("cookies_from_browser") or None,
+            )
+        except browser_cookies.CookieExportError as exc:
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+            wx.MessageBox(
+                "Could not export Apple Music cookies from any browser:\n\n"
+                + "\n".join(exc.errors),
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - still clean up the temp file
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+            wx.MessageBox(
+                f"Could not export Apple Music cookies: {exc}",
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
 
-        wx.MessageBox(
-            "Could not export Apple Music cookies from any browser:\n\n"
-            + "\n".join(errors),
-            "blindDL",
-            wx.OK | wx.ICON_ERROR,
-            self,
-        )
+        self.am_cookies_picker.SetPath(out)
+        self.config["apple_music_cookies"] = out
+        self.frame.announce(f"Apple Music cookies exported from {label}.")
 
     # -- saving --------------------------------------------------------------
 

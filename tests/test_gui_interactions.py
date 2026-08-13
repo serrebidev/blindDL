@@ -22,6 +22,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         adult_backend,
         applemusic_backend,
         archive_backend,
+        browser_cookies,
         deezer_backend,
         musicdl_backend,
         preview,
@@ -2244,12 +2245,16 @@ class GuiInteractionTests(unittest.TestCase):
 
         with (
             mock.patch("tempfile.mkstemp", return_value=(descriptor, path)),
-            mock.patch("yt_dlp.YoutubeDL", side_effect=RuntimeError("locked")),
-            mock.patch.object(wx, "MessageBox"),
+            mock.patch(
+                "blinddl.browser_cookies.export_apple_music_cookies",
+                side_effect=browser_cookies.CookieExportError(["firefox: locked"]),
+            ),
+            mock.patch.object(wx, "MessageBox") as message_box,
         ):
             dialog._on_am_copy_cookies(None)
 
         self.assertFalse(os.path.exists(path))
+        message_box.assert_called_once()
         dialog.Destroy()
 
     def test_soulseek_settings_save_credentials_sharing_and_extra_folders(self):
