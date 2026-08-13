@@ -826,13 +826,24 @@ class MainFrame(wx.Frame):
             self.announce, f"Downloading blindDL {update.version}..."
         )
         try:
-            package = updater.download_app_update(update, log)
+            package = updater.download_app_update(
+                update, log, progress=self._announce_update_progress
+            )
         except Exception as exc:  # noqa: BLE001 - the user was expecting this
             wx.CallAfter(
                 self.announce, f"Automatic update failed: {exc}"
             )
             return
         wx.CallAfter(self._update_downloaded, update, package)
+
+    def _announce_update_progress(self, line):
+        """Say one download-progress line from the updater's own thread.
+
+        An update that says "Downloading blindDL 1.2.3..." and then goes
+        quiet for two minutes cannot be told from one that has stalled,
+        so the percentages are spoken as they arrive.
+        """
+        wx.CallAfter(self.announce, line)
 
     def _update_downloaded(self, update, package):
         if self._closing:

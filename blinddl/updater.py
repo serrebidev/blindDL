@@ -84,6 +84,13 @@ WINGET_PACKAGES = {
 CREATE_NO_WINDOW = 0x08000000
 RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
 UPDATE_USER_AGENT = f"blindDL/{__version__}"
+DOWNLOAD_BLOCK = 256 * 1024
+# Download progress is spoken, not drawn, so it is reported in coarse steps:
+# a screen reader reading every percent of a hundred-megabyte package would
+# say nothing else until it finished.
+PROGRESS_PERCENT_STEP = 10
+# What a server that sends no Content-Length gets instead of percentages.
+PROGRESS_BYTES_STEP = 16 * 1024 * 1024
 
 
 class UpdateError(RuntimeError):
@@ -229,21 +236,71 @@ def check_for_app_update(log=lambda _line: None):
     return update
 
 
-def _download(url, destination, digest=None):
+def _format_size(size):
+    """Spoken size of a download: '9.4 MB', '112 MB'."""
+    megabytes = float(size) / (1024 * 1024)
+    return f"{megabytes:.1f} MB" if megabytes < 10 else f"{megabytes:.0f} MB"
+
+
+def _content_length(response):
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return 0
+    try:
+        return max(0, int(headers.get("Content-Length") or 0))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _progress_reporter(label, report, step=PROGRESS_PERCENT_STEP):
+    """Return a _download callback that reports whole steps of progress.
+
+    A download with nothing to say about itself is the one thing an update
+    cannot be: there is no window to look at, so silence and a stall are
+    indistinguishable. Each *step* percent is reported once, and a server
+    that sends no Content-Length gets megabytes instead of percentages.
+    """
+    state = {"percent": step, "bytes": PROGRESS_BYTES_STEP}
+
+    def on_progress(done, total):
+        if total > 0:
+            percent = min(100, int(done * 100 // total))
+            if percent < state["percent"]:
+                return
+            state["percent"] = percent - percent % step + step
+            report(f"{label}: {percent} percent of {_format_size(total)}.")
+        elif done >= state["bytes"]:
+            state["bytes"] = done - done % PROGRESS_BYTES_STEP + PROGRESS_BYTES_STEP
+            report(f"{label}: {_format_size(done)} downloaded.")
+
+    return on_progress
+
+
+def _download(url, destination, digest=None, on_progress=None):
     hasher = hashlib.sha256() if digest is not None else None
     with _open_url(url, timeout=120) as response, open(destination, "wb") as output:
+        total = _content_length(response) if on_progress is not None else 0
+        done = 0
         while True:
-            block = response.read(1024 * 1024)
+            block = response.read(DOWNLOAD_BLOCK)
             if not block:
                 break
             output.write(block)
+            done += len(block)
             if hasher is not None:
                 hasher.update(block)
+            if on_progress is not None:
+                on_progress(done, total)
     return hasher.hexdigest() if hasher is not None else ""
 
 
-def download_app_update(update, log=lambda _line: None):
-    """Download *update* and verify it against the release checksum file."""
+def download_app_update(update, log=lambda _line: None, progress=None):
+    """Download *update* and verify it against the release checksum file.
+
+    *progress* receives the download-progress lines as they happen; the
+    callers speak them. Without one they join the rest of the log, which
+    is read but never spoken.
+    """
     update_dir = Path(app_data_dir()) / "updates" / f"v{update.version}"
     update_dir.mkdir(parents=True, exist_ok=True)
     checksums_path = update_dir / update.checksum_name
@@ -260,7 +317,12 @@ def download_app_update(update, log=lambda _line: None):
         raise UpdateError("The release checksum does not list this package.")
     log(f"Downloading {update.package_name}...")
     partial = package_path.with_name(package_path.name + ".part")
-    actual = _download(update.package_url, partial, digest=True)
+    actual = _download(
+        update.package_url, partial, digest=True,
+        on_progress=_progress_reporter(
+            f"blindDL {update.version}", progress if progress is not None else log
+        ),
+    )
     if actual.lower() != expected:
         partial.unlink(missing_ok=True)
         raise UpdateError(

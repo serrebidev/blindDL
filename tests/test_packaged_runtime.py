@@ -125,7 +125,7 @@ def test_download_with_a_bad_checksum_is_deleted(tmp_path):
         checksum_url="https://example.invalid/checksums",
     )
 
-    def fake_download(url, destination, digest=None):
+    def fake_download(url, destination, digest=None, on_progress=None):
         if url == update.checksum_url:
             destination.write_text(
                 "0" * 64 + f"  {update.package_name}\n", encoding="utf-8"
@@ -140,6 +140,85 @@ def test_download_with_a_bad_checksum_is_deleted(tmp_path):
             updater.download_app_update(update)
 
     assert not list(tmp_path.rglob("*.part"))
+
+
+class _FakeResponse:
+    """Just enough of an HTTP response for _download to read."""
+
+    def __init__(self, payload, length=True):
+        self._payload = payload
+        self._offset = 0
+        self.headers = {"Content-Length": str(len(payload))} if length else {}
+
+    def read(self, size):
+        block = self._payload[self._offset:self._offset + size]
+        self._offset += len(block)
+        return block
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_a_download_reports_its_percentage_as_it_goes(tmp_path):
+    # A download that says nothing cannot be told from one that has stalled.
+    payload = b"x" * (updater.DOWNLOAD_BLOCK * 20)
+    lines = []
+    with mock.patch.object(updater, "_open_url",
+                           return_value=_FakeResponse(payload)):
+        updater._download(
+            "https://example.invalid/package", tmp_path / "package.bin",
+            on_progress=updater._progress_reporter("blindDL 9.9.9", lines.append),
+        )
+
+    percentages = [int(line.split(":")[1].split()[0]) for line in lines]
+    assert percentages == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    assert lines[-1] == "blindDL 9.9.9: 100 percent of 5.0 MB."
+
+
+def test_a_download_of_unknown_size_reports_megabytes(tmp_path):
+    payload = b"x" * (updater.PROGRESS_BYTES_STEP * 2)
+    lines = []
+    with mock.patch.object(updater, "_open_url",
+                           return_value=_FakeResponse(payload, length=False)):
+        updater._download(
+            "https://example.invalid/package", tmp_path / "package.bin",
+            on_progress=updater._progress_reporter("blindDL 9.9.9", lines.append),
+        )
+
+    assert lines == ["blindDL 9.9.9: 16 MB downloaded.",
+                     "blindDL 9.9.9: 32 MB downloaded."]
+
+
+def test_progress_lines_are_spoken_and_the_rest_is_only_logged(tmp_path):
+    update = updater.AppUpdate(
+        version="9.9.9",
+        page_url="https://example.invalid/release",
+        package_name="blindDL-v9.9.9-windows-x64.zip",
+        package_url="https://example.invalid/package",
+        checksum_name="SHA256SUMS-windows-x64.txt",
+        checksum_url="https://example.invalid/checksums",
+    )
+    spoken, logged = [], []
+
+    def fake_download(url, destination, digest=None, on_progress=None):
+        if url == update.checksum_url:
+            destination.write_text(
+                "0" * 64 + f"  {update.package_name}\n", encoding="utf-8")
+            return ""
+        destination.write_bytes(b"package")
+        assert on_progress is not None, "the package download must report progress"
+        on_progress(50 * 1024 * 1024, 100 * 1024 * 1024)
+        return "0" * 64
+
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_download", side_effect=fake_download):
+        updater.download_app_update(update, logged.append, progress=spoken.append)
+
+    assert spoken == ["blindDL 9.9.9: 50 percent of 100 MB."]
+    assert not any("percent" in line for line in logged)
 
 
 def test_update_transport_rejects_non_https_urls():

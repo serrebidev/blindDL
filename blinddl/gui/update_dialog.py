@@ -9,7 +9,7 @@ import threading
 
 import wx
 
-from .. import updater
+from .. import speech, updater
 
 
 class UpdateDialog(wx.Dialog):
@@ -49,6 +49,16 @@ class UpdateDialog(wx.Dialog):
         if self._alive and not self.IsBeingDeleted():
             self.log_text.AppendText(line)
 
+    def _progress(self, line):
+        """Log a download-progress line and say it out loud.
+
+        The log is a read-only text control: text arriving in it is not
+        read by a screen reader, so a download that only wrote there would
+        run in silence with no way to tell progress from a stall.
+        """
+        self._log(line)
+        speech.announce(line)
+
     def _run(self):
         try:
             if getattr(sys, "frozen", False):
@@ -87,7 +97,8 @@ class UpdateDialog(wx.Dialog):
 
     def _install(self):
         try:
-            package = updater.download_app_update(self.update, self._log)
+            package = updater.download_app_update(
+                self.update, self._log, progress=self._progress)
             exit_to_update = updater.install_app_update(
                 self.update, package, self._log)
         except Exception as exc:  # noqa: BLE001 - shown to the user

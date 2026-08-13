@@ -370,6 +370,19 @@ class GuiInteractionTests(unittest.TestCase):
         append.assert_not_called()
         dialog.Destroy()
 
+    def test_update_dialog_speaks_download_progress(self):
+        # The log is a read-only text control, which a screen reader does
+        # not read on its own: unspoken progress is no progress at all.
+        with mock.patch("blinddl.gui.update_dialog.threading.Thread"):
+            dialog = UpdateDialog(self.host)
+
+        with mock.patch("blinddl.gui.update_dialog.speech.announce") as announce:
+            dialog._progress("blindDL 9.9.9: 40 percent of 88 MB.")
+
+        announce.assert_called_once_with("blindDL 9.9.9: 40 percent of 88 MB.")
+        dialog._busy = False
+        dialog.Destroy()
+
     def test_window_is_never_hidden_without_an_installed_tray_icon(self):
         tray = SimpleNamespace(is_available=lambda: False)
         holder = SimpleNamespace(
@@ -428,6 +441,7 @@ class GuiInteractionTests(unittest.TestCase):
             config=config,
             announce=mock.Mock(),
             _auto_update_worker=mock.Mock(),
+            _announce_update_progress=mock.Mock(),
         )
         holder.config = _SavingConfig(config)
         for name, value in overrides.items():
