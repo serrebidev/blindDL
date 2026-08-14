@@ -20,6 +20,7 @@ from __future__ import annotations
 import httpx
 
 from sideb.models.track import Lyrics, Track
+from sideb.utils.http import default_ssl_context
 
 AUTH_URL = "https://auth.deezer.com/login/arl?jo=p&rto=c&i=c"
 GRAPHQL_URL = "https://pipe.deezer.com/api"
@@ -46,7 +47,12 @@ class DeezerLyrics:
 
     def __init__(self, *, arl: str, user_agent: str, timeout: float = 15.0, proxy: str | None = None) -> None:
         self._arl = arl
-        self._client = httpx.AsyncClient(headers={"User-Agent": user_agent}, timeout=timeout, proxy=proxy)
+        self._client = httpx.AsyncClient(
+            headers={"User-Agent": user_agent},
+            timeout=timeout,
+            proxy=proxy,
+            verify=default_ssl_context(),
+        )
         self._jwt: str | None = None
 
     async def aclose(self) -> None:

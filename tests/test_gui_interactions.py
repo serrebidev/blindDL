@@ -1110,6 +1110,8 @@ class GuiInteractionTests(unittest.TestCase):
         )
         frame.queue.counts.return_value = frame._last_counts
         frame.notebook.GetSelection.return_value = TAB_DOWNLOADS
+        frame._schedule_auto_clear = lambda: MainFrame._auto_clear_finished(
+            frame)
 
         MainFrame._on_item_update(
             frame, SimpleNamespace(status=STATUS_DONE, title="Got it",
@@ -1125,6 +1127,54 @@ class GuiInteractionTests(unittest.TestCase):
         MainFrame._on_item_update(
             frame, SimpleNamespace(status=STATUS_ERROR, title="Broke",
                                    seeding=False, error="404"))
+        frame.queue.remove_completed.assert_not_called()
+
+    def test_a_burst_of_finishes_clears_the_rows_once(self):
+        # Every clear rewrites the queue file, waits for the disk, and
+        # rebuilds both lists row by row. An album used to do that per track.
+        frame = SimpleNamespace(
+            _closing=False,
+            downloads_panel=mock.Mock(),
+            queue=mock.Mock(),
+            _last_counts=(0, 0, 0, 0),
+            notebook=mock.Mock(),
+            library_panel=mock.Mock(),
+            announce=mock.Mock(),
+            config={"auto_clear_finished": True},
+        )
+        frame.queue.counts.return_value = frame._last_counts
+        frame.notebook.GetSelection.return_value = TAB_DOWNLOADS
+        frame._auto_clear_timer = None
+        frame._schedule_auto_clear = lambda: MainFrame._schedule_auto_clear(
+            frame)
+        frame._auto_clear_finished = lambda: MainFrame._auto_clear_finished(
+            frame)
+
+        with mock.patch("blinddl.gui.mainframe.wx.CallLater") as call_later:
+            call_later.return_value = SimpleNamespace(
+                IsRunning=lambda: True, Restart=mock.Mock())
+            for number in range(12):
+                MainFrame._on_item_update(
+                    frame, SimpleNamespace(status=STATUS_DONE,
+                                           title=f"Track {number}",
+                                           seeding=False))
+
+        # One timer for the whole burst, restarted by the rest of it.
+        call_later.assert_called_once()
+        frame.queue.remove_completed.assert_not_called()
+
+        MainFrame._auto_clear_finished(frame)
+        frame.queue.remove_completed.assert_called_once_with()
+        frame.downloads_panel.refresh_all.assert_called_once_with()
+        # Every finish was still spoken as it happened.
+        self.assertEqual(frame.announce.call_count, 12)
+
+    def test_a_closing_window_does_not_clear_rows_from_a_late_timer(self):
+        frame = SimpleNamespace(
+            _closing=True, downloads_panel=mock.Mock(), queue=mock.Mock())
+
+        MainFrame._auto_clear_finished(frame)
+
         frame.queue.remove_completed.assert_not_called()
 
     def test_library_discovers_audio_and_video_recursively(self):
@@ -1331,6 +1381,28 @@ class GuiInteractionTests(unittest.TestCase):
                 )
 
         self.assertEqual(dedup.call_count, 500)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_rows_dedup_key_is_worked_out_once_however_often_it_flushes(self):
+        # The key costs two regular expressions, and the index it fills was
+        # rebuilt from nothing on every flush -- so a search that answered
+        # site by site re-keyed every row it had, over and over, on the
+        # thread drawing the list being read.
+        panel = SearchPanel(self.host, self.frame)
+        original = panel._dedup_key
+        with mock.patch.object(panel, "_dedup_key", wraps=original) as dedup:
+            for number in range(50):
+                panel._insert_deduped(
+                    {"title": f"Track {number}", "artist": "Artist"}
+                )
+            with mock.patch.object(panel, "_render_results"):
+                for _ in range(5):
+                    panel._flush_results()
+
+        self.assertEqual(dedup.call_count, 50)
+        panel.shutdown()
+        panel.Destroy()
 
     def test_provider_results_are_coalesced_before_rendering(self):
         panel = SearchPanel(self.host, self.frame)
@@ -2452,6 +2524,75 @@ class GuiInteractionTests(unittest.TestCase):
             [call.args[0] for call in spoke.call_args_list],
             ["Still searching 5 sites.", "12 results found."],
         )
+
+    def test_one_message_costs_one_look_for_the_screen_reader(self):
+        # Auto.speak() and Auto.braille() each walk every installed output
+        # asking whether it is running, and the walk costs milliseconds on
+        # the thread trying to talk. A search reports fifty sites.
+        speech.reset()
+        self.addCleanup(speech.reset)
+
+        class _Auto:
+            def __init__(self):
+                self.probes = 0
+                self.spoken = []
+                self.brailled = []
+
+            def get_first_available_output(self):
+                self.probes += 1
+                return self
+
+            def speak(self, text, interrupt=False):
+                self.spoken.append(text)
+                return True
+
+            def braille(self, text):
+                self.brailled.append(text)
+                return True
+
+        output = _Auto()
+        with mock.patch.object(speech, "_accessible_output",
+                               return_value=output):
+            for index in range(5):
+                speech.speak(f"Searching site {index}.")
+
+        self.assertEqual(output.probes, 1)
+        self.assertEqual(len(output.spoken), 5)
+        self.assertEqual(len(output.brailled), 5)
+
+    def test_an_output_that_cannot_be_resolved_is_still_spoken_to(self):
+        speech.reset()
+        self.addCleanup(speech.reset)
+
+        class _Plain:
+            def __init__(self):
+                self.spoken = []
+
+            def speak(self, text, interrupt=False):
+                self.spoken.append(text)
+                return True
+
+            def braille(self, text):
+                return True
+
+        output = _Plain()
+        with mock.patch.object(speech, "_accessible_output",
+                               return_value=output):
+            self.assertTrue(speech.speak("Twelve results found."))
+
+        self.assertEqual(output.spoken, ["Twelve results found."])
+
+    def test_jaws_is_not_hunted_for_on_every_sentence(self):
+        # The test underneath snapshots every process on the machine, and it
+        # costs the same whether or not JAWS is installed.
+        speech.reset()
+        self.addCleanup(speech.reset)
+        with mock.patch.object(speech, "_process_running",
+                               return_value=False) as running:
+            for _ in range(5):
+                self.assertFalse(speech._jaws_is_running())
+
+        running.assert_called_once()
 
     def test_speech_stays_silent_when_it_has_nobody_to_talk_to(self):
         speech.reset()

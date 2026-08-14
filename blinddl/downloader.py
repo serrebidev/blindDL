@@ -193,6 +193,9 @@ class DownloadQueue:
         self._batch_depth = 0
         self._batched_items = []
         self._known_statuses = {}
+        # Download key -> the rows carrying it, so adding a row is a lookup
+        # instead of a re-keying of everything already queued.
+        self._key_index = {}
         self._status_counts = {
             STATUS_DOWNLOADING: 0,
             STATUS_QUEUED: 0,
@@ -390,8 +393,11 @@ class DownloadQueue:
         changed = False
         with self._cond:
             key = self._download_key(item)
-            matches = [candidate for candidate in self.items
-                       if self._download_key(candidate) == key]
+            # Looked up, not scanned. Re-keying every queued row for every
+            # addition -- and a key can be a full JSON dump of the payload --
+            # made queueing a playlist quadratic, on the thread drawing the
+            # list, with the workers' own condition held throughout.
+            matches = list(self._key_index.get(key, ()))
             existing = next(
                 (candidate for candidate in matches
                  if candidate.status in ACTIVE_STATUSES),
@@ -436,6 +442,7 @@ class DownloadQueue:
             else:
                 item.add_action = ADD_QUEUED
                 self.items.append(item)
+                self._key_index.setdefault(key, []).append(item)
                 changed = True
 
             if self._batch_depth:
@@ -740,10 +747,13 @@ class DownloadQueue:
 
     def _rebuild_counts_locked(self):
         self._known_statuses.clear()
+        self._key_index.clear()
         for status in self._status_counts:
             self._status_counts[status] = 0
         for item in self.items:
             self._known_statuses[item.id] = item.status
+            self._key_index.setdefault(
+                self._download_key(item), []).append(item)
             if item.status in self._status_counts:
                 self._status_counts[item.status] += 1
 

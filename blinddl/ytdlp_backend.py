@@ -278,7 +278,12 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
         "best[protocol^=http][vcodec!=none][acodec!=none]/"
         "best[vcodec!=none][acodec!=none]/best"
     )
-    fallback_format = "bestaudio/best" if audio_only else "best"
+    # The second attempt has to ask for something the first one did not.
+    # Audio used to retry with the identical selector, which cost a whole
+    # second extraction -- JS challenge and all -- to fail exactly as it had
+    # already failed. A site with no audio-only stream can still answer
+    # "best", which is what that retry is for.
+    fallback_format = "best"
 
     opts = {
         "quiet": True,
@@ -295,14 +300,18 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
 
-    for attempt, fmt in enumerate((primary_format, fallback_format)):
+    attempts = [primary_format]
+    if fallback_format != primary_format:
+        attempts.append(fallback_format)
+    for attempt, fmt in enumerate(attempts):
         opts["format"] = fmt
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             break
         except yt_dlp.utils.ExtractorError as exc:
-            if attempt == 0 and "Requested format is not available" in str(exc):
+            if (attempt + 1 < len(attempts)
+                    and "Requested format is not available" in str(exc)):
                 continue
             raise
     else:

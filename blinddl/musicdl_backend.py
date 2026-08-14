@@ -32,6 +32,7 @@ import os
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 
 # musicdl configures an exclusive per-user FileHandler at import time. On
 # Windows that prevents a second blindDL process (including the frozen release
@@ -64,10 +65,21 @@ HTTP_TIMEOUT_S = 30
 # a single worker; otherwise the source-level pools can multiply this modest
 # fan-out into hundreds of runnable threads.
 SOURCE_SEARCH_THREADS = 1
+# Upper bound on the number of search pages one site is asked for. A source
+# that clamps its own page size below SEARCH_SIZE_PER_SOURCE does not answer
+# with fewer songs -- it answers with more requests, one page at a time:
+# XiaoBai and JBSou each built eighty, and every page then costs a couple of
+# further round trips per song it returns. Four pages is far more than a
+# result list fifty sites wide has room for.
+MAX_SEARCH_PAGES_PER_SOURCE = 4
 _lock = threading.Lock()
 _clients = None  # dict: source -> single-source MusicClient
 _http_timeout_installed = False
 _silenced = False
+_pool = None
+# The stop event of the search running on this thread, so a page can be the
+# last one when the user has moved on. musicdl has no cancel token of its own.
+_cancel = threading.local()
 def cache_dir():
     """Scratch space for musicdl's per-search bookkeeping."""
     path = os.path.join(app_data_dir(), "musicdl-cache")
@@ -159,6 +171,53 @@ _silence_musicdl()
 _silence_progress_bars()
 
 
+def _cap_search_pages(provider):
+    """Bound how many search pages one musicdl source requests."""
+    original = provider._constructsearchurls
+    if getattr(original, "_blinddl_capped", False):
+        return
+
+    def capped(*args, **kwargs):
+        return list(original(*args, **kwargs))[:MAX_SEARCH_PAGES_PER_SOURCE]
+
+    capped._blinddl_capped = True
+    provider._constructsearchurls = capped
+
+
+def _make_cancellable(provider):
+    """Let a superseded search stop between pages instead of finishing it.
+
+    musicdl walks a source's pages with no way to interrupt them, so a
+    search the user had already replaced kept fetching and parsing every
+    page that was left -- fifty sites at a time, while the search they were
+    waiting for competed with it for the processor.
+    """
+    original = provider._search
+    if getattr(original, "_blinddl_cancellable", False):
+        return
+
+    def cancellable(*args, **kwargs):
+        stop = getattr(_cancel, "stop", None)
+        if stop is not None and stop.is_set():
+            return None
+        return original(*args, **kwargs)
+
+    cancellable._blinddl_cancellable = True
+    provider._search = cancellable
+
+
+def _search_pool():
+    """One reused pool, so repeated searches cannot stack their threads."""
+    global _pool
+    with _lock:
+        if _pool is None:
+            _pool = ThreadPoolExecutor(
+                max_workers=max(1, len(ALL_SOURCES)),
+                thread_name_prefix="musicdl-search",
+            )
+        return _pool
+
+
 def _get_clients():
     global _clients
     with _lock:
@@ -184,6 +243,11 @@ def _get_clients():
                     )
                 except Exception:  # noqa: BLE001 - source needs cookies/config
                     continue
+                provider = getattr(
+                    clients[source], "music_clients", {}).get(source)
+                if provider is not None:
+                    _cap_search_pages(provider)
+                    _make_cancellable(provider)
             _silence_progress_bars()  # catches lazily imported sources
             _clients = clients
         return _clients
@@ -289,6 +353,9 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     found = {}  # source -> normalized items, filled in by the worker threads
     found_lock = threading.Lock()
     def search_one(source, client):
+        # Published for the page loop inside musicdl, which otherwise runs
+        # every page it lined up whether or not anyone still wants them.
+        _cancel.stop = stop
         if stop is not None and stop.is_set():
             return
         try:
@@ -317,15 +384,13 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
             except Exception:  # noqa: BLE001 - a bad callback is not the site's fault
                 pass
 
-    threads = []
-    for source, client in clients.items():
-        thread = threading.Thread(target=search_one, args=(source, client),
-                                  name=f"search-{source}", daemon=True)
-        thread.start()
-        threads.append(thread)
-
-    for thread in threads:
-        thread.join(max(0.0, deadline - time.monotonic()))
+    # One pool for the process, wide enough that a single search still asks
+    # every site at once. Raw threads meant a second search added another
+    # fifty-odd of them on top of the first search's, all parsing at once.
+    pool = _search_pool()
+    futures = [pool.submit(search_one, source, client)
+               for source, client in clients.items()]
+    futures_wait(futures, timeout=max(0.0, deadline - time.monotonic()))
 
     # Snapshot under the lock: a straggler finishing mid-iteration would
     # otherwise change the dict while we walk it.

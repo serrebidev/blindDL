@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 _lock = threading.Lock()
 _output = None
@@ -40,6 +41,19 @@ _say_attempted = False
 # The status bar repeats itself -- a tick that finds nothing new to report
 # rewrites the same sentence. Saying it again would be noise.
 _last_spoken = None
+# Which reader answered last, and when it was asked. Finding out costs a
+# walk through every installed output, so it is not asked again for every
+# sentence of a search that is reporting fifty sites.
+_resolved = None
+_resolved_at = 0.0
+# Short enough that a reader started after blindDL is picked up almost at
+# once; long enough that a burst of progress messages costs one look.
+RESOLVE_TTL = 2.0
+# The same idea for JAWS, whose "are you running" test takes a snapshot of
+# every process on the machine. JAWS does not start between two sentences.
+_jaws_running = False
+_jaws_checked_at = 0.0
+JAWS_PROBE_TTL = 1.0
 
 
 def speak(message, interrupt=False):
@@ -59,8 +73,14 @@ def speak(message, interrupt=False):
     spoken = False
     output = _accessible_output()
     if output is not None:
-        spoken = _ao2_speak(output, text, interrupt) or spoken
-        spoken = _ao2_braille(output, text) or spoken
+        # Auto.speak() and Auto.braille() each ask every installed output in
+        # turn whether it is running, so one message paid for two full
+        # sweeps -- and a sweep that has to reach the end of the list costs
+        # over twenty milliseconds on the thread trying to talk. Resolve the
+        # reader once and address it directly.
+        target = _resolved_output(output)
+        spoken = _ao2_speak(target, text, interrupt) or spoken
+        spoken = _ao2_braille(target, text) or spoken
         if spoken:
             return True
     if sys.platform == "darwin":
@@ -89,6 +109,7 @@ def reset():
     """Forget the last message, so it would be spoken again. For tests."""
     global _last_spoken, _output, _output_attempted
     global _nvda_dll, _nvda_attempted, _say_path, _say_attempted
+    global _resolved, _resolved_at, _jaws_running, _jaws_checked_at
     with _lock:
         _last_spoken = None
         _output = None
@@ -97,6 +118,10 @@ def reset():
         _nvda_attempted = False
         _say_path = None
         _say_attempted = False
+        _resolved = None
+        _resolved_at = 0.0
+        _jaws_running = False
+        _jaws_checked_at = 0.0
 
 
 # -- accessible-output2 ----------------------------------------------------
@@ -116,6 +141,33 @@ def _accessible_output():
         except Exception:  # noqa: BLE001 - library missing or no reader running
             _output = None
         return _output
+
+
+def _resolved_output(output):
+    """The concrete reader behind the Auto output, looked for now and then.
+
+    Falls back to *output* itself, which finds the reader on every call, so
+    nothing is ever left unspoken because this had nothing to hand. A reader
+    started after blindDL is picked up within RESOLVE_TTL seconds.
+    """
+    global _resolved, _resolved_at
+    finder = getattr(output, "get_first_available_output", None)
+    if finder is None:
+        return output
+    now = time.monotonic()
+    with _lock:
+        if _resolved is not None and now - _resolved_at < RESOLVE_TTL:
+            return _resolved
+    try:
+        found = finder()
+    except Exception:  # noqa: BLE001 - fall back to the probing Auto output
+        return output
+    if found is None:
+        return output
+    with _lock:
+        _resolved = found
+        _resolved_at = now
+    return found
 
 
 def _ao2_speak(output, text, interrupt):
@@ -251,7 +303,7 @@ def _speak_jaws(text, interrupt=False):
     The COM object exists on disk whether or not JAWS has been started, and
     creating it would launch nothing useful and report success.
     """
-    if not _process_running({"jfw.exe", "jaws.exe", "fusion.exe"}):
+    if not _jaws_is_running():
         return False
     for module_name in ("win32com.client", "comtypes.client"):
         try:
@@ -266,6 +318,25 @@ def _speak_jaws(text, interrupt=False):
             except Exception:  # noqa: BLE001 - try the other spelling/binding
                 continue
     return False
+
+
+def _jaws_is_running():
+    """Whether JAWS is up, asked at most once every JAWS_PROBE_TTL seconds.
+
+    The test underneath snapshots every process on the machine, which costs
+    milliseconds on the thread that is trying to speak -- and it costs them
+    whether or not JAWS is even installed.
+    """
+    global _jaws_running, _jaws_checked_at
+    now = time.monotonic()
+    with _lock:
+        if _jaws_checked_at and now - _jaws_checked_at < JAWS_PROBE_TTL:
+            return _jaws_running
+    running = _process_running({"jfw.exe", "jaws.exe", "fusion.exe"})
+    with _lock:
+        _jaws_running = running
+        _jaws_checked_at = now
+    return running
 
 
 def _process_running(names):

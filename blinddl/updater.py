@@ -125,6 +125,9 @@ DENO_TARGETS = {
     ("darwin", "arm64"): "deno-aarch64-apple-darwin",
 }
 _external_tools_lock = threading.Lock()
+# Packages this process has already tried to install. Cleared by an update
+# check, which is the user asking for another go.
+_install_attempted: set[str] = set()
 
 CREATE_NO_WINDOW = 0x08000000
 RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
@@ -684,6 +687,15 @@ def ensure_external_tools(log, package_ids=None, progress=None):
         missing = missing_external_tools(wanted)
         if not missing:
             return True
+        # A package manager that could not install Deno once will not manage
+        # it because the user searched again, and every music search asks.
+        # Without this, a machine with no WinGet spawned two installers per
+        # search, each one a heavy process that resolves a manifest over the
+        # network before failing the same way.
+        missing = [item for item in missing if item not in _install_attempted]
+        if not missing:
+            return False
+        _install_attempted.update(missing)
         ok = True
         if sys.platform == "win32":
             winget = _find_winget()
@@ -821,6 +833,9 @@ def _installed_versions():
 
 def update_winget_packages(log):
     """Upgrade external tools through the platform package manager."""
+    # An update check is the user asking for another go at whatever would
+    # not install, so a failed attempt stops standing in the way here.
+    _install_attempted.clear()
     if sys.platform == "win32":
         if not ensure_external_tools(log):
             return

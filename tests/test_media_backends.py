@@ -75,6 +75,25 @@ class ArchiveSearchTests(unittest.TestCase):
 
         self.assertEqual(asked, archive_backend.VIDEO_CATEGORIES)
 
+    def test_a_replaced_search_does_not_rank_what_it_cannot_deliver(self):
+        # Ranking is the expensive half of a site's answer -- hundreds of
+        # rows through difflib -- and a search the user has already replaced
+        # has nowhere to put it. The site's reply is discarded either way.
+        stop = threading.Event()
+        rows = [{"title": f"Row {index}", "creator": "", "source": "x"}
+                for index in range(5)]
+
+        def answer(source, query, **kwargs):
+            stop.set()
+            return rows
+
+        with mock.patch.object(archive_backend, "search_category",
+                               side_effect=answer), \
+                mock.patch.object(archive_backend, "_rank") as rank:
+            archive_backend.search("dragnet", timeout_s=5, stop=stop)
+
+        rank.assert_not_called()
+
     def test_switched_off_collections_are_left_out(self):
         enabled = archive_backend.enabled_sources(
             [archive_backend.CATEGORY_TV_NEWS],

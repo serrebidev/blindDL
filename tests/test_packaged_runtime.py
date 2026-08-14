@@ -4,6 +4,7 @@
 
 """Packaged builds bootstrap shared native tools without Python or pip."""
 
+import os
 import stat
 import zipfile
 from unittest import mock
@@ -11,6 +12,19 @@ from unittest import mock
 import pytest
 
 from blinddl import __version__, torrent_engine, updater
+
+
+@pytest.fixture(autouse=True)
+def _forget_install_attempts():
+    """Each test starts with nothing tried yet.
+
+    The installer remembers what it has already failed to install, so it
+    does not spawn a package manager per search for the rest of the session.
+    That memory is process-wide, and these tests share a process.
+    """
+    updater._install_attempted.clear()
+    yield
+    updater._install_attempted.clear()
 
 
 def _newer_version():
@@ -22,6 +36,55 @@ def _newer_version():
     """
     major, minor, patch = updater._version_tuple(__version__)
     return f"{major}.{minor}.{patch + 1}"
+
+
+def test_repeated_tool_checks_do_not_lengthen_path(monkeypatch, tmp_path):
+    # Every music and YouTube search asks whether Deno and Node are there
+    # yet. Each ask used to prepend the same directories again, until the
+    # environment handed to yt-dlp and ffmpeg no longer fitted in the
+    # 32,767 characters Windows allows.
+    from blinddl import runtime
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    monkeypatch.setattr(runtime, "_ON_PATH", set())
+    monkeypatch.setenv("PATH", "C:\\Windows" if os.name == "nt" else "/usr/bin")
+    with mock.patch.object(runtime.Path, "is_dir", return_value=True):
+        runtime.prepare_runtime_path()
+        after_first = os.environ["PATH"]
+        runtime.prepare_runtime_path()
+        runtime.prepare_runtime_path()
+
+    assert os.environ["PATH"] == after_first
+
+
+def test_a_tool_that_will_not_install_is_not_retried_every_search():
+    # A package manager that could not install Deno once will not manage it
+    # because the user searched again -- and each attempt is a heavy process
+    # that resolves a manifest over the network before failing.
+    wanted = ("DenoLand.Deno",)
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              return_value=list(wanted)), \
+            mock.patch.object(updater, "_find_winget",
+                              return_value="winget.exe"), \
+            mock.patch.object(updater, "_run", return_value=False) as run:
+        assert updater.ensure_external_tools(lambda _line: None, wanted) is False
+        assert updater.ensure_external_tools(lambda _line: None, wanted) is False
+
+    assert run.call_count == 1
+
+
+def test_an_update_check_gives_a_failed_install_another_go():
+    updater._install_attempted.add("DenoLand.Deno")
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "ensure_external_tools",
+                              return_value=True), \
+            mock.patch.object(updater, "_find_winget", return_value="winget.exe"), \
+            mock.patch.object(updater, "_run"):
+        updater.update_winget_packages(lambda _line: None)
+
+    assert not updater._install_attempted
 
 
 def test_frozen_tool_updates_use_winget():

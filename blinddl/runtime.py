@@ -7,13 +7,28 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
+# Directories this process has already put on PATH. Every music and YouTube
+# search asks whether Deno and Node have arrived yet, and each ask lands
+# here; without this, PATH grew by seven entries per search until the
+# environment handed to yt-dlp and ffmpeg no longer fitted in the 32,767
+# characters Windows allows -- and every shutil.which in between had a
+# longer list to walk.
+_ON_PATH: set[str] = set()
+
+
 def prepare_runtime_path() -> None:
-    """Put bundled and package-manager-installed media tools on PATH."""
+    """Put bundled and package-manager-installed media tools on PATH.
+
+    Safe to call as often as it is asked for: a directory is prepended once,
+    and a tool installed later still joins the front of PATH the next time
+    somebody looks for it.
+    """
     candidates: list[Path] = []
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
@@ -43,6 +58,13 @@ def prepare_runtime_path() -> None:
             ("OpenJS.NodeJS.LTS_*", "node.exe"),
         )
         for package_pattern, executable in package_tools:
+            # This walks a whole WinGet package tree -- thousands of entries
+            # for FFmpeg or Node -- and it exists only to make one tool
+            # findable. Once the tool can be found, there is nothing to look
+            # for; a tool installed later still fails this test until the
+            # walk has put it on PATH.
+            if shutil.which(os.path.splitext(executable)[0]):
+                continue
             matches = package_root.glob(f"{package_pattern}/**/{executable}")
             candidates.extend(path.parent for path in matches if path.is_file())
     else:
@@ -57,8 +79,14 @@ def prepare_runtime_path() -> None:
                 Path("/usr/local/bin"),
                 Path("/Applications/VLC.app/Contents/MacOS"),
             ])
-    available = [str(path) for path in candidates if path.is_dir()]
+    available: list[str] = []
+    for path in candidates:
+        entry = str(path)
+        if entry in _ON_PATH or entry in available or not path.is_dir():
+            continue
+        available.append(entry)
     if available:
+        _ON_PATH.update(available)
         os.environ["PATH"] = os.pathsep.join(available + [os.environ.get("PATH", "")])
 
 

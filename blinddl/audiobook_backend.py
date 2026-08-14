@@ -357,9 +357,14 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
         native = order if supports_order(source, order) else ORDER_RELEVANCE
         try:
             if source == SOURCE_ARCHIVE_AUDIO:
-                items = _rank(search_archive(query, order=order), query, native)
+                rows = search_archive(query, order=order)
             else:
-                items = _rank(search_audiobooker(source, query), query, native)
+                rows = search_audiobooker(source, query)
+            # Ranking is the expensive half, and a search the user has
+            # already replaced has nowhere to put the answer.
+            if stop is not None and stop.is_set():
+                return
+            items = _rank(rows, query, native)
         except Exception:  # noqa: BLE001 - one bad site must not kill the rest
             items = []
         with found_lock:

@@ -288,8 +288,12 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
         if stop is not None and stop.is_set():
             return
         try:
-            items = _rank(search_category(source, query, order=order), query,
-                          order)
+            docs = search_category(source, query, order=order)
+            # Ranking is the expensive half, and a search the user has
+            # already replaced has nowhere to put the answer.
+            if stop is not None and stop.is_set():
+                return
+            items = _rank(docs, query, order)
         except Exception:  # noqa: BLE001 - one bad category must not kill the rest
             items = []
         with found_lock:

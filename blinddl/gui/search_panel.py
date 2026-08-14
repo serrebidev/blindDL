@@ -513,6 +513,10 @@ _URL_EXTENSIONS = (
     ".fb2",
     ".cbz",
 )
+# Punctuation dropped before two rows are called the same song. Compiled
+# once: this runs on every result of every site, and a music search asks
+# fifty-seven of them.
+_DEDUP_PUNCTUATION = re.compile(r"[^\w\s]")
 
 
 def _result_type(item):
@@ -680,9 +684,10 @@ def _sorted_results(items, mode, engine=None):
     elif mode == SORT_SHORTEST:
 
         def shortest_sort_key(pair):
+            seconds = duration(pair[1])
             return (
-                duration(pair[1]) is None,
-                duration(pair[1]) or 0,
+                seconds is None,
+                seconds or 0,
                 text(pair[1], "title"),
                 pair[0],
             )
@@ -691,9 +696,10 @@ def _sorted_results(items, mode, engine=None):
     elif mode == SORT_LONGEST:
 
         def longest_sort_key(pair):
+            seconds = duration(pair[1])
             return (
-                duration(pair[1]) is None,
-                -(duration(pair[1]) or 0),
+                seconds is None,
+                -(seconds or 0),
                 text(pair[1], "title"),
                 pair[0],
             )
@@ -1033,11 +1039,16 @@ class SearchPanel(wx.Panel):
         if not 0 <= selection < len(search_kind.KINDS):
             selection = 0
             self.kind_choice.SetSelection(selection)
-        self.current_kind = search_kind.KINDS[selection]
-        self.frame.config["search_kind"] = self.current_kind
-        save = getattr(self.frame.config, "save", None)
-        if save is not None:
-            save()
+        chosen = search_kind.KINDS[selection]
+        # Arrowing this row fires one of these per step on Windows, and a
+        # save writes the whole config file and then waits for the disk.
+        # Only a value that really changed is worth making the reader wait.
+        if chosen != self.current_kind:
+            self.current_kind = chosen
+            self.frame.config["search_kind"] = self.current_kind
+            save = getattr(self.frame.config, "save", None)
+            if save is not None:
+                save()
         self._setting_changed(
             f"Search type set to {search_kind.label(self.current_kind)}."
         )
@@ -1050,11 +1061,13 @@ class SearchPanel(wx.Panel):
         if not 0 <= selection < len(search_order.ORDERS):
             selection = 0
             self.order_choice.SetSelection(selection)
-        self.current_order = search_order.ORDERS[selection]
-        self.frame.config["search_order"] = self.current_order
-        save = getattr(self.frame.config, "save", None)
-        if save is not None:
-            save()
+        chosen = search_order.ORDERS[selection]
+        if chosen != self.current_order:
+            self.current_order = chosen
+            self.frame.config["search_order"] = self.current_order
+            save = getattr(self.frame.config, "save", None)
+            if save is not None:
+                save()
 
         engine = self._selected_engine()
         sort_mode = _sort_for_order(engine, self.current_order)
@@ -1617,7 +1630,7 @@ class SearchPanel(wx.Panel):
             self.results, self.sort_choice.GetSelection(), self.result_engine
         )
         self._result_index = {
-            self._dedup_key(item): index for index, item in enumerate(self.results)
+            self._key_for(item): index for index, item in enumerate(self.results)
         }
         self._render_results(
             self.result_engine, selected=selected, focused=focused
@@ -1636,8 +1649,8 @@ class SearchPanel(wx.Panel):
         title = str(item.get("title") or "").strip().lower()
         artist = str(item.get("artist") or "").strip().lower()
         # Remove punctuation and extra whitespace for fuzzy matching.
-        title = re.sub(r"[^\w\s]", "", title)
-        artist = re.sub(r"[^\w\s]", "", artist)
+        title = _DEDUP_PUNCTUATION.sub("", title)
+        artist = _DEDUP_PUNCTUATION.sub("", artist)
         title = " ".join(title.split())
         artist = " ".join(artist.split())
         return f"{artist}\x00{title}"
@@ -1668,9 +1681,25 @@ class SearchPanel(wx.Panel):
             score += 20
         return score
 
+    def _key_for(self, item):
+        """The dedup key of one row, worked out once and kept on the row.
+
+        The key costs two regular expressions, and the index it fills is
+        rebuilt from nothing every time results are flushed to the list. A
+        row's title and artist do not change after it arrives, so the key
+        travels on the row beside ``_search_order`` instead of being derived
+        again for every row on every flush -- which is what turned an
+        all-sites music search into a quarter of a second of work on the
+        thread that was drawing the list being read.
+        """
+        key = item.get("_dedup_key")
+        if key is None:
+            key = item["_dedup_key"] = self._dedup_key(item)
+        return key
+
     def _insert_deduped(self, item):
         """Insert *item*, replacing a duplicate if this one is higher quality."""
-        key = self._dedup_key(item)
+        key = self._key_for(item)
         if not key:
             return False
         # Tests and integrations occasionally seed ``results`` directly.
@@ -1678,7 +1707,7 @@ class SearchPanel(wx.Panel):
         # index current in constant time.
         if len(self._result_index) != len(self.results):
             self._result_index = {
-                self._dedup_key(existing): index
+                self._key_for(existing): index
                 for index, existing in enumerate(self.results)
             }
         existing_index = self._result_index.get(key)
@@ -1804,7 +1833,7 @@ class SearchPanel(wx.Panel):
         mode = self.sort_choice.GetSelection()
         self.results = _sorted_results(self.results, mode, self.result_engine)
         self._result_index = {
-            self._dedup_key(item): index for index, item in enumerate(self.results)
+            self._key_for(item): index for index, item in enumerate(self.results)
         }
         self._render_results(self.result_engine, selected=selected, focused=focused)
         labels = _sort_labels(self.result_engine)

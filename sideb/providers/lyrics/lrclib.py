@@ -19,6 +19,7 @@ import re
 import httpx
 
 from sideb.models.track import Lyrics, Track
+from sideb.utils.http import default_ssl_context
 
 BASE_URL = "https://lrclib.net/api"
 
@@ -52,6 +53,7 @@ class LRCLIBLyrics:
             headers={"User-Agent": user_agent},
             timeout=timeout,
             proxy=proxy,
+            verify=default_ssl_context(),
         )
 
     async def aclose(self) -> None:

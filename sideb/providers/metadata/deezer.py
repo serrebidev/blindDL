@@ -13,6 +13,7 @@ from datetime import date, datetime
 import httpx
 
 from sideb.models.track import Album, Artist, Track
+from sideb.utils.http import default_ssl_context
 
 ProgressCB = Callable[[int, int, str], None]
 
@@ -64,6 +65,7 @@ class DeezerMetadata:
             headers={"User-Agent": user_agent},
             timeout=timeout,
             proxy=proxy,
+            verify=default_ssl_context(),
         )
         self._rate_limiter = RateLimiter(_RATE_LIMIT_CAP, _RATE_LIMIT_WINDOW)
 
@@ -243,6 +245,12 @@ class DeezerMetadata:
                 return data
             except (DeezerError, httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as e:
                 last_err = e
+                # No request follows the last attempt, so the eight seconds
+                # this used to wait bought nothing: a search that Deezer
+                # cannot answer held its thread and its socket that much
+                # longer before saying so.
+                if attempt == _RETRIES - 1:
+                    break
                 backoff = _RETRY_BACKOFF * (2 ** attempt)
                 await asyncio.sleep(backoff)
         raise last_err  # type: ignore[misc]

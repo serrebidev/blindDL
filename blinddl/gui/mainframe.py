@@ -46,6 +46,10 @@ UPDATE_TICK_MS = 30 * 60 * 1000
 # How often a downloaded update looks to see whether the queue has gone
 # quiet enough for blindDL to restart into it.
 UPDATE_IDLE_TICK_MS = 60 * 1000
+# How long the finished rows wait before they are cleared away. An album
+# finishes in a burst, and clearing writes the queue file and rebuilds both
+# lists; long enough to catch the burst, short enough not to be noticed.
+AUTO_CLEAR_DELAY_MS = 250
 
 TAB_URL = 0
 TAB_SEARCH = 1
@@ -399,9 +403,12 @@ class MainFrame(wx.Frame):
         if (item.status == STATUS_DONE and not item.seeding
                 and self.config["auto_clear_finished"]):
             # Only the clean finishes go. A failed or cancelled download
-            # keeps its row so the error stays readable.
-            self.queue.remove_completed()
-            self.downloads_panel.refresh_all()
+            # keeps its row so the error stays readable. An album finishes
+            # as a burst, and each clear-out rewrites the whole queue file,
+            # waits for the disk, and rebuilds both lists row by row -- so
+            # the burst is collapsed into one pass. What is spoken about the
+            # download is said below, at once, either way.
+            self._schedule_auto_clear()
         counts = self.queue.counts()
         if counts != self._last_counts:
             self._last_counts = counts
@@ -739,6 +746,7 @@ class MainFrame(wx.Frame):
             "_tray_hide_timer",
             "_update_timer",
             "_update_idle_timer",
+            "_auto_clear_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None and timer.IsRunning():
@@ -800,6 +808,22 @@ class MainFrame(wx.Frame):
         if self._closing:
             return
         self.announce(tools_dialog_result(ok), speak=False)
+
+    def _schedule_auto_clear(self):
+        """Clear the finished rows once the burst of them has stopped."""
+        timer = getattr(self, "_auto_clear_timer", None)
+        if timer is not None and timer.IsRunning():
+            timer.Restart(AUTO_CLEAR_DELAY_MS)
+            return
+        self._auto_clear_timer = wx.CallLater(
+            AUTO_CLEAR_DELAY_MS, self._auto_clear_finished
+        )
+
+    def _auto_clear_finished(self):
+        if self._closing:
+            return
+        self.queue.remove_completed()
+        self.downloads_panel.refresh_all()
 
     def _start_update_checks(self):
         """Check for an update now, then keep checking on the saved interval."""

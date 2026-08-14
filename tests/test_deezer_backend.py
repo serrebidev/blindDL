@@ -553,5 +553,41 @@ class SidebDeezerPreviewTests(unittest.TestCase):
         self.assertIsNone(url)
 
 
+class SidebSearchCostTests(unittest.TestCase):
+    def test_a_metadata_search_does_not_drag_in_the_downloader(self):
+        # Importing Side B's audio provider pulls in yt-dlp and ytmusicapi,
+        # about half a second of work that a search asking Deezer for
+        # metadata has no use for. It used to run on the first search.
+        import subprocess
+        import sys
+
+        probe = (
+            "import sys;"
+            "import sideb.providers.metadata.deezer;"
+            "print('yt_dlp' in sys.modules, 'ytmusicapi' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["False", "False"])
+
+    def test_the_audio_provider_is_still_reachable_by_name(self):
+        from sideb.providers import AudioProvider, YouTubeAudio, is_instrumental
+
+        self.assertEqual(YouTubeAudio.__name__, "YouTubeAudio")
+        self.assertEqual(AudioProvider.__name__, "AudioProvider")
+        self.assertTrue(is_instrumental("Song (Instrumental)"))
+
+    def test_one_tls_context_serves_every_side_b_client(self):
+        from sideb.utils.http import default_ssl_context
+
+        # Building one parses the whole certifi bundle: about 25 ms, and
+        # Side B builds its clients per search and per queued track.
+        self.assertIs(default_ssl_context(), default_ssl_context())
+
+
 if __name__ == "__main__":
     unittest.main()

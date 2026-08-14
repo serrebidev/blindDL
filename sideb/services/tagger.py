@@ -15,11 +15,16 @@ from mutagen.mp4 import MP4, MP4Cover
 from mutagen.oggopus import OggOpus
 
 from sideb.models.track import Track
+from sideb.utils.http import default_ssl_context
 
 
 class Tagger:
     def __init__(self, *, user_agent: str, timeout: float = 15.0) -> None:
-        self._client = httpx.AsyncClient(headers={"User-Agent": user_agent}, timeout=timeout)
+        self._client = httpx.AsyncClient(
+            headers={"User-Agent": user_agent},
+            timeout=timeout,
+            verify=default_ssl_context(),
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()

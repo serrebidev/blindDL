@@ -70,6 +70,13 @@ class _YtdlpShim:
 
 
 def _patch_sideb_ytdlp():
+    """Install the shim, on the paths that actually reach yt-dlp.
+
+    Importing sideb's audio module drags in yt-dlp and ytmusicapi, about half
+    a second of processor time. A search only ever asks Deezer for metadata,
+    so it is charged nothing; downloading and resolving a link, which is
+    where the shim matters, pay it as they always did.
+    """
     from sideb.providers.audio import youtube as yt_audio
 
     if not isinstance(yt_audio.yt_dlp, _YtdlpShim):
@@ -125,7 +132,6 @@ def _ensure_home():
     # Leftovers from an interrupted run are scratch, not music.
     shutil.rmtree(os.path.join(home, "tmp"), ignore_errors=True)
     os.chdir(home)
-    _patch_sideb_ytdlp()
     _home_ready = True
 
 
@@ -170,6 +176,7 @@ def extract_flat(url, config):
     the whole discography, matching sideb's own behaviour.
     """
     _ensure_home()
+    _patch_sideb_ytdlp()
     from sideb.app.main import Application
 
     async def _run():
@@ -214,6 +221,7 @@ def download(url, out_dir, config, event_cb=None):
     returns or raises.
     """
     _ensure_home()
+    _patch_sideb_ytdlp()
     os.makedirs(out_dir, exist_ok=True)
     from sideb.app.events_bus import EventBus
     from sideb.app.main import Application

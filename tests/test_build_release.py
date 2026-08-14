@@ -19,6 +19,37 @@ def test_release_build_uses_an_importable_libtorrent_without_pip():
     run.assert_not_called()
 
 
+def test_a_busy_disk_image_is_retried_instead_of_failing_the_release(tmp_path):
+    # "Resource busy" from hdiutil is Spotlight holding the bundle, not a
+    # broken build. Failing on it threw away every other platform's packages.
+    app = tmp_path / "blindDL.app"
+    dmg = tmp_path / "blindDL.dmg"
+    results = [SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]
+    with mock.patch.object(build_release.subprocess, "run",
+                           side_effect=results) as run, \
+            mock.patch.object(build_release, "detach_stale_volume") as detach, \
+            mock.patch.object(build_release.time, "sleep") as sleep:
+        build_release.create_dmg(app, dmg)
+
+    assert run.call_count == 2
+    assert run.call_args_list[0].args[0][:2] == ("hdiutil", "create")
+    detach.assert_called_once_with()
+    sleep.assert_called_once_with(15)
+
+
+def test_a_disk_image_that_never_builds_still_fails_the_release(tmp_path):
+    app = tmp_path / "blindDL.app"
+    dmg = tmp_path / "blindDL.dmg"
+    with mock.patch.object(build_release.subprocess, "run",
+                           return_value=SimpleNamespace(returncode=1)) as run, \
+            mock.patch.object(build_release, "detach_stale_volume"), \
+            mock.patch.object(build_release.time, "sleep"), \
+            pytest.raises(RuntimeError, match="in 4 attempts"):
+        build_release.create_dmg(app, dmg)
+
+    assert run.call_count == 4
+
+
 def test_release_build_explains_a_missing_python314_wheelhouse(
     tmp_path, monkeypatch
 ):

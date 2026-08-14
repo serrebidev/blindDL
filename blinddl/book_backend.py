@@ -663,6 +663,10 @@ def search(query, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
                 if "unexpected keyword argument 'order'" not in str(exc):
                     raise
                 rows = searcher(query)
+            # Ranking is the expensive half, and a search the user has
+            # already replaced has nowhere to put the answer.
+            if stop is not None and stop.is_set():
+                return
             items = _rank(rows, query,
                           order if supports_order(source, order)
                           else ORDER_RELEVANCE)

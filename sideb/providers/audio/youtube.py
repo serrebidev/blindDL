@@ -31,6 +31,11 @@ _YT_SUFFIX_RE = re.compile(
 
 _TRANSLATOR = str.maketrans("", "", string.punctuation)
 
+# Artist name -> YouTube Music channel id, for the whole process. The answer
+# does not change between tracks, and finding it costs a search, an artist
+# fetch and a playlist parse.
+_ARTIST_CHANNELS: dict[str, str | None] = {}
+
 
 def is_instrumental(title: str) -> bool:
     """Detect instrumental versions so they can be skipped entirely."""
@@ -90,7 +95,11 @@ class YouTubeAudio:
         self._user_agent = user_agent
         self._concurrent_fragments = concurrent_fragments
         self._yt = YTMusic()
-        self._artist_channel_cache: dict[str, str | None] = {}
+        # Shared, because callers build one of these per track: an
+        # instance-scoped memo never saw a second look-up, so every track of
+        # the same artist re-searched the channel and re-parsed a
+        # five-hundred entry playlist to find it.
+        self._artist_channel_cache = _ARTIST_CHANNELS
 
     async def aclose(self) -> None:
         return None

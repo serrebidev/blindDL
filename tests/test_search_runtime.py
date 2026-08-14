@@ -173,6 +173,84 @@ class SearchConcurrencyTests(unittest.TestCase):
         )
 
 
+class _StubProvider:
+    """A musicdl source, down to the two methods blindDL wraps."""
+
+    def __init__(self, pages=80):
+        self.pages = pages
+        self.searched = []
+
+    def _constructsearchurls(self, keyword="", rule=None, request_overrides=None):
+        return [f"https://example.invalid/search?page={index}"
+                for index in range(self.pages)]
+
+    def _search(self, keyword="", search_url="", request_overrides=None,
+                song_infos=None, progress=None):
+        self.searched.append(search_url)
+        return "searched"
+
+
+class SearchAmplificationTests(unittest.TestCase):
+    def test_a_source_is_asked_for_a_bounded_number_of_pages(self):
+        # A source that clamps its own page size answers a request for 200
+        # songs with twenty pages, not with fewer songs, and every page
+        # costs further round trips per song. Two sources built eighty each.
+        provider = _StubProvider()
+
+        musicdl_backend._cap_search_pages(provider)
+        urls = provider._constructsearchurls(keyword="query")
+
+        self.assertEqual(len(urls),
+                         musicdl_backend.MAX_SEARCH_PAGES_PER_SOURCE)
+
+    def test_a_source_that_answers_in_one_page_is_left_alone(self):
+        provider = _StubProvider(pages=1)
+
+        musicdl_backend._cap_search_pages(provider)
+
+        self.assertEqual(len(provider._constructsearchurls(keyword="q")), 1)
+
+    def test_capping_a_source_twice_does_not_stack_wrappers(self):
+        provider = _StubProvider()
+
+        musicdl_backend._cap_search_pages(provider)
+        wrapped = provider._constructsearchurls
+        musicdl_backend._cap_search_pages(provider)
+
+        self.assertIs(provider._constructsearchurls, wrapped)
+
+    def test_a_superseded_search_stops_between_pages(self):
+        # musicdl has no cancel token, so a search the user had replaced ran
+        # every page it had lined up before its results were thrown away.
+        provider = _StubProvider()
+        musicdl_backend._make_cancellable(provider)
+        stop = threading.Event()
+
+        try:
+            musicdl_backend._cancel.stop = stop
+            provider._search(search_url="first")
+            stop.set()
+            provider._search(search_url="second")
+        finally:
+            musicdl_backend._cancel.stop = None
+
+        self.assertEqual(provider.searched, ["first"])
+
+    def test_a_page_still_runs_when_nothing_asked_for_a_stop(self):
+        provider = _StubProvider()
+        musicdl_backend._make_cancellable(provider)
+
+        self.assertEqual(provider._search(search_url="only"), "searched")
+        self.assertEqual(provider.searched, ["only"])
+
+    def test_searches_share_one_pool_instead_of_stacking_threads(self):
+        pool = musicdl_backend._search_pool()
+
+        self.assertIs(musicdl_backend._search_pool(), pool)
+        self.assertGreaterEqual(pool._max_workers,
+                                len(musicdl_backend.ALL_SOURCES))
+
+
 class RuntimeShutdownTests(unittest.TestCase):
     def test_flush_tolerates_windowed_and_closed_streams(self):
         broken = mock.Mock()

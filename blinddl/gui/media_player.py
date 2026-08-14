@@ -299,6 +299,12 @@ class MediaPlayerPanel(wx.Panel):
             return
         if self._is_playing():
             self._pause()
+            # Nothing moves while paused, so the position clock has nothing
+            # left to read: it used to keep asking libVLC where it was, once
+            # a second, for as long as the player sat there -- including
+            # after the window was hidden to the tray. Seeking still writes
+            # the time itself, and resuming below starts the clock again.
+            self.timer.Stop()
             self.play_btn.SetLabel("&Play")
             self.frame.announce("Paused.")
         elif self._play():

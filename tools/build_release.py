@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 
@@ -214,19 +215,50 @@ def package_macos(app_version: str, arch: str) -> list[Path]:
         raise RuntimeError(f"macOS application bundle was not produced: {app}")
     run("codesign", "--force", "--deep", "--sign", "-", str(app))
     dmg = RELEASE / f"blindDL-v{app_version}-macos-{arch}.dmg"
-    run(
-        "hdiutil",
-        "create",
-        "-volname",
-        "blindDL",
-        "-srcfolder",
-        str(app),
-        "-ov",
-        "-format",
-        "UDZO",
-        str(dmg),
-    )
+    create_dmg(app, dmg)
     return [dmg]
+
+
+def create_dmg(app: Path, dmg: Path, attempts: int = 4) -> None:
+    """Build the disk image, waiting out a busy volume rather than failing.
+
+    ``hdiutil create`` answers "Resource busy" when something else still holds
+    the bundle -- on a hosted runner that is Spotlight indexing the tree
+    codesign has just rewritten, seconds before. It is a race, not a broken
+    build, and it threw away five finished platform builds and the whole
+    release the last time it lost.
+    """
+    command = (
+        "hdiutil", "create", "-volname", "blindDL", "-srcfolder", str(app),
+        "-ov", "-format", "UDZO", str(dmg),
+    )
+    for attempt in range(1, attempts + 1):
+        print("+", " ".join(command), flush=True)
+        completed = subprocess.run(command, cwd=ROOT, check=False)
+        if completed.returncode == 0:
+            return
+        if attempt == attempts:
+            raise RuntimeError(
+                f"hdiutil could not create {dmg.name} in {attempts} attempts"
+            )
+        detach_stale_volume()
+        delay = 15 * attempt
+        print(
+            f"hdiutil failed (attempt {attempt} of {attempts}); "
+            f"retrying in {delay} seconds",
+            flush=True,
+        )
+        time.sleep(delay)
+
+
+def detach_stale_volume(name: str = "blindDL") -> None:
+    """Unmount a leftover volume of our own from an earlier attempt."""
+    volume = Path("/Volumes") / name
+    if volume.exists():
+        print("+ hdiutil detach", volume, flush=True)
+        subprocess.run(
+            ("hdiutil", "detach", str(volume), "-force"), cwd=ROOT, check=False
+        )
 
 
 def package_linux_tar(app_version: str, arch: str) -> Path:
