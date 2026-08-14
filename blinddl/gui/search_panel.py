@@ -745,6 +745,7 @@ class SearchPanel(wx.Panel):
         self.shown_sources = set()
         self.asked = []  # sites this search went out to
         self.done = False  # True once the current search hit its deadline
+        self._soulseek_streaming = False  # a Soulseek search is running now
         self.started_at = 0.0
         self.closing = False
         self.next_result_order = 0
@@ -828,6 +829,13 @@ class SearchPanel(wx.Panel):
 
         self.search_btn = wx.Button(self, label="&Search")
         self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
+        self.stop_btn = wx.Button(self, label="&Stop search")
+        self.stop_btn.SetName("Stop Soulseek search")
+        self.stop_btn.SetHelpText(
+            "Stops the current Soulseek search. Results already found stay in the list."
+        )
+        self.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop_search)
+        self.stop_btn.Hide()
 
         # Every control on this row is a way of describing the search, so
         # Enter runs it from any of them, exactly as it does from the query
@@ -876,6 +884,7 @@ class SearchPanel(wx.Panel):
         top.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.sort_choice, 0, wx.RIGHT, 12)
         top.Add(self.search_btn, 0)
+        top.Add(self.stop_btn, 0, wx.LEFT, 8)
 
         sizer.Add(query_label, 0, wx.ALL, 8)
         sizer.Add(self.query_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
@@ -1210,10 +1219,19 @@ class SearchPanel(wx.Panel):
         self.results_list.SetItemCount(0)
         self._apply_engine_columns(engine)
 
+        # A Soulseek search never times out: it keeps finding peers until the
+        # user starts another search or presses Stop. Only it shows the Stop
+        # button, so the ordinary timed searches stay exactly as they were.
+        self._soulseek_streaming = _is_soulseek_engine(engine)
+        if self._soulseek_streaming:
+            self.asked = [soulseek_backend.SOURCE]
+            self.stop_btn.Show()
+        else:
+            self.stop_btn.Hide()
+
         if _is_soulseek_engine(engine):
             self.frame.announce(
-                f"Searching {ENGINE_LABELS[engine]} "
-                f"({self.frame.config['search_timeout_s']:g} seconds)..."
+                f"Searching {ENGINE_LABELS[engine]}. Results arrive as they come."
             )
         elif engine == ENGINE_MUSIC and albums_only:
             self.frame.announce(
@@ -1278,12 +1296,16 @@ class SearchPanel(wx.Panel):
         asked = []
         try:
             if _is_soulseek_engine(engine):
+                def on_soulseek_batch(batch):
+                    wx.CallAfter(self._add_soulseek_batch, token, batch)
+
                 items = soulseek_backend.search(
                     query,
                     self.frame.config,
                     _soulseek_media_kind(engine),
                     self.frame.config["search_timeout_s"],
                     stop_event=stop,
+                    on_batch=on_soulseek_batch,
                 )
                 asked = [soulseek_backend.SOURCE]
             elif engine == ENGINE_MUSIC and search_kind.is_album(kind):
@@ -1458,6 +1480,8 @@ class SearchPanel(wx.Panel):
             return
         self.search_btn.Enable()
         self.done = True
+        self._soulseek_streaming = False
+        self.stop_btn.Hide()
         self.frame.announce(f"Soulseek unavailable: {error}")
 
     def _search_failed(self, token, error):
@@ -1490,6 +1514,34 @@ class SearchPanel(wx.Panel):
             )
             if not self._pending():
                 self.timer.Stop()
+
+    def _add_soulseek_batch(self, token, batch):
+        """Fold one streaming Soulseek batch into the list. Runs on the GUI thread.
+
+        Rows are inserted silently: the render timer coalesces the work, and
+        announcing each batch would flood the screen reader while the search
+        is meant to keep running.
+        """
+        if self.closing or token is not self.token:
+            return
+        self.shown_sources.add(soulseek_backend.SOURCE)
+        changed = False
+        for item in batch:
+            changed = self._insert_deduped(item) or changed
+        if changed:
+            self.render_timer.StartOnce(100)
+
+    def on_stop_search(self, event=None):
+        """Stop the streaming Soulseek search without starting a new one."""
+        if not self._soulseek_streaming:
+            return
+        if self.stop is not None:
+            self.stop.set()
+        self._soulseek_streaming = False
+        self.stop_btn.Hide()
+        self.search_btn.Enable()
+        self.timer.Stop()
+        self.frame.announce("Search stopped.")
 
     def _on_destroy(self, event):
         """Silence anything still due to run against this panel.

@@ -1440,41 +1440,86 @@ class _Service:
     def stop_upload(self, key, timeout: float = 30.0):
         return self._submit(self._stop_upload(str(key))).result(timeout=timeout)
 
-    async def _search(self, snapshot, query, media_kind, timeout_s, stop_event):
+    async def _search(self, snapshot, query, media_kind, timeout_s, stop_event=None,
+                      on_batch=None):
         client = await self._configure(snapshot)
         request = await client.searches.search(query)
-        deadline = asyncio.get_running_loop().time() + max(0.25, float(timeout_s))
-        try:
-            while asyncio.get_running_loop().time() < deadline:
-                if stop_event is not None and stop_event.is_set():
-                    break
-                await asyncio.sleep(0.1)
-            extensions = MEDIA_EXTENSIONS.get(media_kind, MEDIA_EXTENSIONS["media"])
-            items = [
-                _result_item(result, file_data)
-                for result in request.results
-                for file_data in result.shared_items
-                if _file_extension(file_data) in extensions
-            ]
-            items.sort(
-                key=lambda item: (
-                    not item["has_free_slots"],
-                    item["queue_size"],
-                    -item["average_speed"],
-                    item["title"].casefold(),
-                )
+        extensions = MEDIA_EXTENSIONS.get(media_kind, MEDIA_EXTENSIONS["media"])
+
+        def sort_key(item):
+            return (
+                not item["has_free_slots"],
+                item["queue_size"],
+                -item["average_speed"],
+                item["title"].casefold(),
             )
-            return items[: max(1, snapshot["max_results"])]
+
+        if on_batch is None:
+            deadline = asyncio.get_running_loop().time() + max(0.25, float(timeout_s))
+            try:
+                while asyncio.get_running_loop().time() < deadline:
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    await asyncio.sleep(0.1)
+                items = [
+                    _result_item(result, file_data)
+                    for result in request.results
+                    for file_data in result.shared_items
+                    if _file_extension(file_data) in extensions
+                ]
+                items.sort(key=sort_key)
+                return items[: max(1, snapshot["max_results"])]
+            finally:
+                try:
+                    client.searches.remove_request(request)
+                except KeyError:
+                    pass
+
+        # Streaming search: hand each new result over as the peer answers,
+        # on this service thread, until the caller stops the search. The
+        # caller folds the batches into the UI a few at a time, so a long
+        # Soulseek search never dumps thousands of rows on a screen reader
+        # in one go.
+        seen = set()
+        try:
+            while stop_event is None or not stop_event.is_set():
+                batch = []
+                for result in request.results:
+                    for file_data in result.shared_items:
+                        if _file_extension(file_data) not in extensions:
+                            continue
+                        item = _result_item(result, file_data)
+                        key = (
+                            item["username"].casefold(),
+                            item["remote_path"].casefold(),
+                        )
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        batch.append(item)
+                if batch:
+                    batch.sort(key=sort_key)
+                    on_batch(batch)
+                await asyncio.sleep(0.25)
+            return []
         finally:
             try:
                 client.searches.remove_request(request)
             except KeyError:
                 pass
 
-    def search(self, query, config, media_kind, timeout_s, stop_event=None):
+    def search(self, query, config, media_kind, timeout_s, stop_event=None,
+               on_batch=None):
         snapshot = _config_snapshot(config)
         if not snapshot["enabled"]:
             return []
+        if on_batch is not None:
+            # A streaming search runs until the caller stops it.
+            return self._submit(
+                self._search(
+                    snapshot, query, media_kind, 0.0, stop_event, on_batch=on_batch
+                )
+            ).result()
         wait = max(10.0, float(timeout_s) + 30.0)
         return self._submit(
             self._search(snapshot, query, media_kind, timeout_s, stop_event)
@@ -1610,8 +1655,10 @@ def configure(config, timeout: float = 30.0):
     return _SERVICE.configure(config, timeout=timeout)
 
 
-def search(query, config, media_kind, timeout_s, stop_event=None):
-    return _SERVICE.search(query, config, media_kind, timeout_s, stop_event)
+def search(query, config, media_kind, timeout_s, stop_event=None, on_batch=None):
+    return _SERVICE.search(
+        query, config, media_kind, timeout_s, stop_event, on_batch=on_batch
+    )
 
 
 def download(item, config, progress_cb: Callable | None = None, cancel_event=None):

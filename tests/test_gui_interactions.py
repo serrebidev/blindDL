@@ -43,7 +43,12 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
-    from blinddl.gui.library_panel import LibraryPanel, discover_media
+    from blinddl.gui.library_panel import (
+        LibraryPanel,
+        discover_library,
+        discover_media,
+        library_roots,
+    )
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
     from blinddl.gui.messages_panel import MessagesPanel
     from blinddl.gui import media_player
@@ -1023,6 +1028,57 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in items], ["Audio", "Video"])
         self.assertEqual(items[1]["folder"], "Videos")
 
+    def test_library_roots_includes_shared_folders_and_dedupes(self):
+        roots = library_roots(
+            {
+                "download_dir": "C:\\Media",
+                "soulseek_shared_folders": ["D:\\Music", "C:\\Media", "", "D:\\Music"],
+            }
+        )
+        self.assertEqual([root["path"] for root in roots], ["C:\\Media", "D:\\Music"])
+
+    def test_library_discovers_every_file_and_subfolder_of_shared_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            media = root / "Media"
+            media.mkdir()
+            (media / "song.mp3").write_bytes(b"audio")
+            (media / "notes.txt").write_text("note", encoding="utf-8")
+            nested = media / "Nested"
+            nested.mkdir()
+            (nested / "deep.mkv").write_bytes(b"video")
+            shared = root / "Shared"
+            shared.mkdir()
+            (shared / "cover.jpg").write_bytes(b"image")
+            inner = shared / "Inner"
+            inner.mkdir()
+            (inner / "track.ogg").write_bytes(b"audio")
+
+            result = discover_library(
+                library_roots(
+                    {
+                        "download_dir": str(media),
+                        "soulseek_shared_folders": [str(shared)],
+                    }
+                )
+            )
+            media_items = discover_media(media)
+
+        names = result["names"]
+        by_folder = {
+            names[norm]: {record["name"]: record["kind"] for record in records}
+            for norm, records in result["files"].items()
+            if records
+        }
+        self.assertEqual(by_folder["Media"], {"notes.txt": "File", "song.mp3": "Audio"})
+        self.assertEqual(by_folder["Nested"], {"deep.mkv": "Video"})
+        self.assertEqual(by_folder["Shared"], {"cover.jpg": "File"})
+        self.assertEqual(by_folder["Inner"], {"track.ogg": "Audio"})
+        # The whole subfolder tree is indexed, not only the shared roots.
+        self.assertEqual([names[n] for n in result["dirs"][result["roots"][0]]], ["Nested"])
+        # discover_media still returns only media, for existing callers.
+        self.assertEqual(sorted(item["title"] for item in media_items), ["deep", "song"])
+
     def test_library_refresh_runs_off_thread_and_coalesces_requests(self):
         file_list = mock.Mock()
         file_list.GetFirstSelected.return_value = -1
@@ -1031,9 +1087,10 @@ class GuiInteractionTests(unittest.TestCase):
             _refreshing=False,
             _pending_refresh=None,
             _announce_refresh=False,
-            items=[],
             list=file_list,
             frame=SimpleNamespace(config={"download_dir": "C:\\Media"}),
+            _selected_norm=lambda: "",
+            _selected_entry=lambda: None,
             _discover=mock.Mock(),
         )
         panel._start_refresh = lambda: LibraryPanel._start_refresh(panel)
@@ -1044,7 +1101,10 @@ class GuiInteractionTests(unittest.TestCase):
         worker.assert_called_once()
         worker.return_value.start.assert_called_once_with()
         self.assertTrue(panel._refreshing)
-        self.assertEqual(panel._pending_refresh, ("C:\\Media", None))
+        roots, folder, file_path = panel._pending_refresh
+        self.assertEqual([root["path"] for root in roots], ["C:\\Media"])
+        self.assertEqual(folder, "")
+        self.assertIsNone(file_path)
 
     def test_search_queues_adult_api_result(self):
         panel = SearchPanel(self.host, self.frame)
@@ -1610,6 +1670,52 @@ class GuiInteractionTests(unittest.TestCase):
             ],
             ["Small", "Large"],
         )
+
+    def test_soulseek_search_streams_results_silently_and_stops(self):
+        self.frame.config["soulseek_enabled"] = True
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("ambient")
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_SOULSEEK_AUDIO)
+        )
+        panel.on_engine_changed(wx.CommandEvent())
+
+        with mock.patch.object(threading, "Thread") as worker:
+            panel.on_search(None)
+
+        # The search has no deadline and never mentions a timeout.
+        self.assertTrue(panel._soulseek_streaming)
+        self.assertIn("arrive as they come", self.frame.messages[-1])
+        self.assertNotIn("seconds", self.frame.messages[-1])
+
+        # A streamed batch lands in the list without an announcement, so the
+        # screen reader is not flooded while the search keeps running.
+        batch = [
+            {
+                "title": "Track",
+                "kind": "soulseek",
+                "username": "peer",
+                "remote_path": "Music\\Track.mp3",
+                "format": "MP3",
+                "file_size": "1.0 MB",
+                "size_bytes": 1024,
+                "has_free_slots": True,
+                "average_speed": 100,
+                "queue_size": 0,
+                "seeders": 1,
+                "leechers": 0,
+            }
+        ]
+        messages_before = len(self.frame.messages)
+        panel._add_soulseek_batch(panel.token, batch)
+        self.assertEqual(len(panel.results), 1)
+        self.assertEqual(len(self.frame.messages), messages_before)
+
+        with mock.patch.object(panel.stop, "set") as stop_set:
+            panel.on_stop_search(None)
+        stop_set.assert_called_once_with()
+        self.assertFalse(panel._soulseek_streaming)
+        self.assertEqual(self.frame.messages[-1], "Search stopped.")
 
     def test_deezer_choice_searches_and_downloads_only_deezer(self):
         panel = SearchPanel(self.host, self.frame)

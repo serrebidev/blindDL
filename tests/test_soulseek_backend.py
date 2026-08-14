@@ -619,6 +619,48 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["title"], "Second.pdf")
         self.assertIs(client.searches.removed, request)
 
+    async def test_streaming_search_delivers_batches_until_stopped(self):
+        request = SimpleNamespace(
+            results=[
+                SearchResult(
+                    ticket=1,
+                    username="peer",
+                    has_free_slots=True,
+                    avg_speed=100,
+                    queue_size=0,
+                    shared_items=[_file("Music\\Track.mp3", "mp3")],
+                ),
+            ]
+        )
+
+        class Searches:
+            async def search(self, query):
+                return request
+
+            def remove_request(self, removed):
+                self.removed = removed
+
+        client = SimpleNamespace(searches=Searches())
+        service = soulseek_backend._Service()
+        service._configure = mock.AsyncMock(return_value=client)
+        stop_event = threading.Event()
+        batches = []
+
+        def on_batch(batch):
+            batches.append(batch)
+            # The search would run forever; stop it after the first delivery.
+            stop_event.set()
+
+        items = await service._search(
+            {}, "query", "audio", 5.0, stop_event, on_batch=on_batch
+        )
+
+        self.assertEqual(items, [])
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0][0]["title"], "Track.mp3")
+        self.assertEqual(batches[0][0]["username"], "peer")
+        self.assertIs(client.searches.removed, request)
+
     async def test_private_and_room_messages_are_sent_and_exposed(self):
         calls = []
 
