@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
 import os
 import sys
 import threading
@@ -16,13 +17,18 @@ import wx
 import wx.media
 
 
-def _configure_bundled_vlc():
-    """Point python-vlc at the native runtime bundled by PyInstaller."""
+def _configure_vlc():
+    """Point python-vlc at a bundled or WinGet-installed native runtime."""
     roots = []
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
         roots.append(os.path.abspath(frozen_root))
     roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+    if sys.platform == "win32":
+        roots.extend(
+            os.path.join(os.environ.get(name, ""), "VideoLAN", "VLC")
+            for name in ("ProgramFiles", "ProgramFiles(x86)")
+        )
     for root in roots:
         if sys.platform == "win32":
             library = os.path.join(root, "libvlc.dll")
@@ -45,13 +51,24 @@ def _configure_bundled_vlc():
             return
 
 
-_configure_bundled_vlc()
+vlc = None
 
-try:
-    import vlc
-except (ImportError, NotImplementedError, OSError, SystemExit):
-    # Native libVLC is optional at runtime; wx.media remains available.
-    vlc = None
+
+def refresh_vlc_runtime():
+    """Load VLC after a background WinGet installation completes."""
+    global vlc
+    if vlc is not None:
+        return True
+    _configure_vlc()
+    try:
+        vlc = importlib.import_module("vlc")
+    except (ImportError, NotImplementedError, OSError, SystemExit):
+        # Native libVLC is optional at runtime; wx.media remains available.
+        vlc = None
+    return vlc is not None
+
+
+refresh_vlc_runtime()
 
 
 _shared_vlc_instance = None
@@ -62,7 +79,7 @@ PLAYBACK_TIMER_MS = 1000
 def _get_vlc_instance():
     """Create one libVLC runtime shared by every player surface."""
     global _shared_vlc_instance
-    if vlc is None:
+    if not refresh_vlc_runtime():
         return None
     with _shared_vlc_lock:
         if _shared_vlc_instance is None:

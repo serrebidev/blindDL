@@ -231,11 +231,8 @@ DEFAULTS = {
     # whatever the interval below says, so a release that landed while
     # blindDL was closed is found when it opens rather than hours later.
     "auto_update": True,
-    # Download and install a new blindDL release as soon as the check finds
-    # one, instead of saying it is available and waiting to be asked. Off by
-    # default: finishing an update restarts blindDL, and taking the window
-    # away is not something to do unasked. Even when on, it waits for the
-    # download queue to go quiet first.
+    # Legacy mirror of auto_update, retained so older saved configs remain
+    # readable. The General settings page now presents one unambiguous option.
     "auto_install_update": False,
     # Hours between automatic update checks after the one at startup.
     "update_check_hours": 12,

@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 def prepare_runtime_path() -> None:
-    """Put optional Deno/FFmpeg binaries bundled by PyInstaller on PATH."""
+    """Put bundled and package-manager-installed media tools on PATH."""
     candidates: list[Path] = []
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
@@ -26,6 +26,25 @@ def prepare_runtime_path() -> None:
             executable_dir.parent / "Resources" / "tools",
         ]
     )
+    if sys.platform == "win32":
+        local_appdata = Path(os.environ.get("LOCALAPPDATA", ""))
+        program_files = Path(os.environ.get("ProgramFiles", ""))
+        candidates.extend([
+            Path.home() / ".deno" / "bin",
+            local_appdata / "Microsoft" / "WinGet" / "Links",
+            local_appdata / "Microsoft" / "WindowsApps",
+            program_files / "nodejs",
+            program_files / "VideoLAN" / "VLC",
+        ])
+        package_root = local_appdata / "Microsoft" / "WinGet" / "Packages"
+        package_tools = (
+            ("DenoLand.Deno_*", "deno.exe"),
+            ("Gyan.FFmpeg.Essentials_*", "ffmpeg.exe"),
+            ("OpenJS.NodeJS.LTS_*", "node.exe"),
+        )
+        for package_pattern, executable in package_tools:
+            matches = package_root.glob(f"{package_pattern}/**/{executable}")
+            candidates.extend(path.parent for path in matches if path.is_file())
     available = [str(path) for path in candidates if path.is_dir()]
     if available:
         os.environ["PATH"] = os.pathsep.join(available + [os.environ.get("PATH", "")])

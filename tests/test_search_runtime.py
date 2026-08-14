@@ -36,8 +36,8 @@ class _BlockingClient:
 
 
 class SearchConcurrencyTests(unittest.TestCase):
-    def test_search_caps_the_initial_provider_burst(self):
-        total = musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES + 5
+    def test_search_starts_every_provider_concurrently(self):
+        total = 24
         state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
         release = threading.Event()
         clients = {}
@@ -53,27 +53,15 @@ class SearchConcurrencyTests(unittest.TestCase):
             finally:
                 finished.set()
 
-        with (mock.patch.object(musicdl_backend, "_clients", clients),
-              mock.patch.object(
-                  musicdl_backend, "_source_slot_lease_seconds",
-                  return_value=10.0,
-              )):
+        with mock.patch.object(musicdl_backend, "_clients", clients):
             worker = threading.Thread(target=run_search, daemon=True)
             worker.start()
             deadline = time.monotonic() + 1
-            while (state["active"] <
-                   musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES and
-                   time.monotonic() < deadline):
+            while state["active"] < total and time.monotonic() < deadline:
                 time.sleep(0.01)
 
-            self.assertEqual(
-                state["active"],
-                musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES,
-            )
-            self.assertEqual(
-                state["maximum"],
-                musicdl_backend.MAX_CONCURRENT_SOURCE_SEARCHES,
-            )
+            self.assertEqual(state["active"], total)
+            self.assertEqual(state["maximum"], total)
             release.set()
             worker.join(2)
 
@@ -94,11 +82,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             source = f"Test{index:02d}MusicClient"
             clients[source] = _BlockingClient(source, state, release)
 
-        with (mock.patch.object(musicdl_backend, "_clients", clients),
-              mock.patch.object(
-                  musicdl_backend, "_source_slot_lease_seconds",
-                  return_value=0.01,
-              )):
+        with mock.patch.object(musicdl_backend, "_clients", clients):
             _items, _answered, asked = musicdl_backend.search(
                 "query", timeout_s=2, stop=stop)
             stop.set()

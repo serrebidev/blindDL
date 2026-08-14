@@ -2,7 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Packaged builds must never depend on user-installed developer tools."""
+"""Packaged builds bootstrap shared native tools without Python or pip."""
 
 import stat
 import zipfile
@@ -24,23 +24,58 @@ def _newer_version():
     return f"{major}.{minor}.{patch + 1}"
 
 
-def test_frozen_tool_updates_do_not_invoke_a_system_package_manager():
-    lines = []
-    with mock.patch.object(updater.sys, "frozen", True, create=True), \
-            mock.patch.object(updater.subprocess, "run") as run:
-        updater.update_winget_packages(lines.append)
-    run.assert_not_called()
-    assert "built into blindDL" in lines[-1]
-
-
-def test_frozen_missing_deno_requests_reinstall_not_winget():
-    lines = []
-    with mock.patch.object(updater.sys, "frozen", True, create=True), \
-            mock.patch.object(updater.shutil, "which", return_value=None), \
+def test_frozen_tool_updates_use_winget():
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "ensure_external_tools", return_value=True), \
+            mock.patch.object(updater, "_find_winget", return_value="winget.exe"), \
             mock.patch.object(updater, "_run") as run:
-        assert updater.ensure_deno(lines.append) is False
-    run.assert_not_called()
-    assert "Reinstall or update blindDL" in lines[-1]
+        updater.update_winget_packages(lambda _line: None)
+    assert run.call_count == len(updater.WINGET_PACKAGES)
+    assert all(call.args[0][1] == "upgrade" for call in run.call_args_list)
+
+
+def test_frozen_missing_deno_is_installed_with_winget():
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "_tool_available", return_value=False), \
+            mock.patch.object(updater, "ensure_external_tools", return_value=True) as ensure:
+        assert updater.ensure_deno(lambda _line: None) is True
+    ensure.assert_called_once_with(mock.ANY, ("DenoLand.Deno",))
+
+
+def test_missing_external_tools_are_installed_silently_with_winget():
+    wanted = ("DenoLand.Deno", "Gyan.FFmpeg.Essentials")
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              side_effect=[list(wanted), []]), \
+            mock.patch.object(updater, "_find_winget",
+                              return_value="winget.exe"), \
+            mock.patch.object(updater, "_run", return_value=True) as run:
+        assert updater.ensure_external_tools(lambda _line: None, wanted)
+
+    assert run.call_count == 2
+    for call, package_id in zip(run.call_args_list, wanted, strict=True):
+        command = call.args[0]
+        assert command[:2] == ["winget.exe", "install"]
+        assert package_id in command
+        assert "--silent" in command
+        assert "--disable-interactivity" in command
+
+
+def test_installed_windows_update_uses_a_silent_restart_helper(tmp_path):
+    package = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
+    package.write_bytes(b"installer")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    helper = tmp_path / "finish-installed-update.ps1"
+    script = helper.read_text(encoding="utf-8")
+    assert "/VERYSILENT" in script
+    assert "/SUPPRESSMSGBOXES" in script
+    assert "Start-Process -FilePath $Target" in script
+    assert "powershell.exe" in popen.call_args.args[0][0]
 
 
 def test_frozen_missing_libtorrent_never_asks_for_python_or_pip():

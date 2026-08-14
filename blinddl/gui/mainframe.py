@@ -107,6 +107,11 @@ class MainFrame(wx.Frame):
         self._background_started = True
         self.queue.start()
         self.subs.start()
+        threading.Thread(
+            target=self._external_dependencies_worker,
+            daemon=True,
+            name="blinddl-external-tools",
+        ).start()
         self._start_update_checks()
         if self.config["soulseek_enabled"]:
             self._apply_soulseek_setting()
@@ -450,6 +455,7 @@ class MainFrame(wx.Frame):
         open_folder(path)
 
     def on_settings(self, event):
+        auto_update_was_enabled = bool(self.config["auto_update"])
         dialog = SettingsDialog(self, self.config)
         if dialog.ShowModal() == wx.ID_OK:
             dialog.apply()
@@ -462,6 +468,8 @@ class MainFrame(wx.Frame):
             self._apply_torrent_setting()
             self._apply_soulseek_setting()
             self.announce("Settings saved.")
+            if self.config["auto_update"] and not auto_update_was_enabled:
+                self._maybe_auto_update(force=True)
         dialog.Destroy()
 
     def _apply_torrent_setting(self):
@@ -602,8 +610,8 @@ class MainFrame(wx.Frame):
             "downloads the tracks you keep.\n"
             "Status messages are spoken as they appear; Settings, Window "
             "turns that off.\n"
-            "blindDL looks for a new release when it starts and every "
-            "12 hours, and can install one on its own; see Settings, "
+            "blindDL can download and install a new release when it starts "
+            "and every 12 hours; see Settings, "
             "Window. Help, Check for updates does it now.\n"
             "Torrent results open in your own BitTorrent client, or download "
             "here when Settings, Torrents says so. Add your Prowlarr or "
@@ -757,6 +765,28 @@ class MainFrame(wx.Frame):
 
     # -- automatic dependency updates -------------------------------------------
 
+    def _external_dependencies_worker(self):
+        """Install large native Windows tools without blocking the window."""
+        if sys.platform != "win32":
+            return
+        try:
+            missing = updater.missing_external_tools()
+            if not missing:
+                return
+            if updater.ensure_external_tools(lambda _line: None):
+                wx.CallAfter(
+                    self.announce,
+                    "Download and playback tools installed in the background.",
+                )
+            else:
+                wx.CallAfter(
+                    self.announce,
+                    "Some download tools could not be installed with WinGet. "
+                    "Use Help, Check for updates to try again.",
+                )
+        except Exception:  # noqa: BLE001 - background best effort
+            return
+
     def _start_update_checks(self):
         """Check for an update now, then keep checking on the saved interval."""
         self._update_timer = wx.Timer(self)
@@ -820,13 +850,6 @@ class MainFrame(wx.Frame):
         except Exception:  # noqa: BLE001 - a network blip must not nag
             return
         if update is None:
-            return
-        if not self.config["auto_install_update"]:
-            wx.CallAfter(
-                self.announce,
-                f"blindDL {update.version} is available. Use Help, Check "
-                "for updates to install it.",
-            )
             return
         wx.CallAfter(
             self.announce, f"Downloading blindDL {update.version}..."

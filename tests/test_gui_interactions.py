@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+from collections import deque
 from contextlib import nullcontext
 import logging
 import os
@@ -536,22 +537,39 @@ class GuiInteractionTests(unittest.TestCase):
             MainFrame._maybe_auto_update(holder, force=True)
         thread.assert_not_called()
 
-    def test_a_found_release_is_only_named_unless_auto_install_is_on(self):
-        holder = self._update_holder()
+    def test_a_found_release_is_downloaded_automatically(self):
+        holder = self._update_holder(_update_downloaded=mock.Mock())
         update = SimpleNamespace(version="9.9.9")
 
         with (
             mock.patch.object(updater, "check_for_app_update",
                               return_value=update),
-            mock.patch.object(updater, "download_app_update") as download,
+            mock.patch.object(updater, "download_app_update",
+                              return_value="package.exe") as download,
             mock.patch.object(wx, "CallAfter",
                               side_effect=lambda fn, *a: fn(*a)),
         ):
             MainFrame._check_for_release(holder, lambda _line: None)
 
-        download.assert_not_called()
-        self.assertIn("9.9.9", holder.announce.call_args.args[0])
-        self.assertIn("Help", holder.announce.call_args.args[0])
+        download.assert_called_once()
+        holder._update_downloaded.assert_called_once_with(update, "package.exe")
+
+    def test_provider_callbacks_are_coalesced_before_reaching_wx(self):
+        panel = SimpleNamespace(
+            closing=False,
+            _site_delivery_lock=threading.Lock(),
+            _site_deliveries=deque(),
+            _site_delivery_scheduled=False,
+            _drain_site_results=mock.Mock(),
+        )
+        with mock.patch.object(wx, "CallAfter") as call_after:
+            for index in range(20):
+                SearchPanel._queue_site_results(
+                    panel, object(), 0, f"Site {index}", [{"title": str(index)}]
+                )
+
+        call_after.assert_called_once_with(panel._drain_site_results)
+        self.assertEqual(len(panel._site_deliveries), 20)
 
     def test_a_check_that_cannot_reach_github_says_nothing(self):
         # This runs on its own every twelve hours; a passing network fault
@@ -730,6 +748,7 @@ class GuiInteractionTests(unittest.TestCase):
             queue=SimpleNamespace(start=mock.Mock()),
             subs=SimpleNamespace(start=mock.Mock()),
             config={"soulseek_enabled": True},
+            _external_dependencies_worker=mock.Mock(),
             _start_update_checks=mock.Mock(),
             _apply_soulseek_setting=mock.Mock(),
         )
@@ -894,7 +913,7 @@ class GuiInteractionTests(unittest.TestCase):
             ):
                 os.environ.pop("PYTHON_VLC_LIB_PATH", None)
                 os.environ.pop("PYTHON_VLC_MODULE_PATH", None)
-                media_player._configure_bundled_vlc()
+                media_player._configure_vlc()
                 self.assertEqual(
                     os.environ["PYTHON_VLC_LIB_PATH"],
                     str(root / "libvlc.dll"),
@@ -2281,26 +2300,15 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertIsNotNone(dialog.dir_picker.GetTextCtrl())
         dialog.Destroy()
 
-    def test_automatic_install_is_off_by_default_and_follows_the_check(self):
+    def test_automatic_update_is_one_setting(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)
 
-        # Checking is on by default; installing without being asked is not.
+        # The setting means check, download, verify, and install.
         self.assertTrue(dialog.update_check.GetValue())
-        self.assertFalse(dialog.auto_install_check.GetValue())
-        self.assertTrue(dialog.auto_install_check.IsEnabled())
-
-        # Nothing to install automatically if nothing is looking.
-        dialog.update_check.SetValue(False)
-        dialog.update_check.ProcessEvent(
-            wx.CommandEvent(wx.EVT_CHECKBOX.typeId, dialog.update_check.GetId())
-        )
-        self.assertFalse(dialog.auto_install_check.IsEnabled())
-
-        dialog.update_check.SetValue(True)
-        dialog.auto_install_check.SetValue(True)
         dialog.apply()
 
+        self.assertTrue(config["auto_update"])
         self.assertTrue(config["auto_install_update"])
         self.assertTrue(config.saved)
         dialog.Destroy()

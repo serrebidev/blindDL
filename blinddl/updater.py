@@ -8,13 +8,13 @@ Covers everything the app relies on:
 - Python packages (pip): yt-dlp, wxPython, python-vlc, ytmusicapi,
   and the rest of requirements.txt. Side B is not among them -- it is
   vendored in ./sideb and travels with blindDL's own releases.
-- Deno: the JavaScript runtime yt-dlp needs for YouTube extraction.
-- ffmpeg: needed for audio extraction and video merging.
+- Deno, FFmpeg/FFprobe, Node.js and VLC: installed through WinGet on Windows.
 
 Source checkouts can upgrade Deno and ffmpeg through winget when available.
-Frozen releases never modify system runtimes: all of their components update
-together with blindDL. All functions are synchronous and intended for worker
-threads; progress goes to a log callback. Nothing here runs at import time.
+Windows frozen releases install large native tools in the background instead
+of duplicating them in every BlindDL update. All functions are synchronous and
+intended for worker threads; progress goes to a log callback. Nothing here runs
+at import time.
 """
 
 import os
@@ -27,6 +27,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -76,10 +77,16 @@ GIT_PACKAGES = {
     "unofficial-api-for-youporn": "git+https://github.com/EchterAlsFake/unofficial-api-for-youporn",
 }
 WINGET_PACKAGES = {
-    "DenoLand.Deno": "Deno (JavaScript runtime for yt-dlp/YouTube)",
-    "Gyan.FFmpeg.Essentials": "ffmpeg (audio/video conversion)",
-    "yt-dlp.FFmpeg": "ffmpeg (audio/video conversion)",
+    "DenoLand.Deno": (
+        "Deno (JavaScript runtime for yt-dlp/YouTube)", ("deno",)),
+    "Gyan.FFmpeg.Essentials": (
+        "FFmpeg (audio/video conversion)", ("ffmpeg", "ffprobe")),
+    "OpenJS.NodeJS.LTS": (
+        "Node.js LTS (music-source JavaScript)", ("node",)),
+    "VideoLAN.VLC": (
+        "VLC media player (audio preview)", ("vlc",)),
 }
+_external_tools_lock = threading.Lock()
 
 CREATE_NO_WINDOW = 0x08000000
 RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
@@ -396,8 +403,32 @@ def install_app_update(update, package_path, log=lambda _line: None):
         if suffixes.endswith(".zip"):
             log("Staging the portable update; BlindDL will restart itself.")
             return _portable_windows_update(package_path, update.version)
-        log("Starting the BlindDL installer...")
-        subprocess.Popen([str(package_path)], **_subprocess_options())
+        log("Staging the silent BlindDL installer; BlindDL will restart itself.")
+        helper = package_path.parent / "finish-installed-update.ps1"
+        log_path = package_path.parent / "installed-update.log"
+        target = Path(sys.executable).resolve()
+        helper.write_text(
+            "param([int]$BlindDLPid,[string]$Installer,[string]$Target,"
+            "[string]$Log)\n"
+            "$ErrorActionPreference = 'Stop'\n"
+            "Wait-Process -Id $BlindDLPid -ErrorAction SilentlyContinue\n"
+            "try {\n"
+            "  $P = Start-Process -FilePath $Installer -ArgumentList "
+            "'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru\n"
+            "  if ($P.ExitCode -ne 0) { throw \"Installer exit $($P.ExitCode)\" }\n"
+            "  if (Test-Path -LiteralPath $Target) { "
+            "Start-Process -FilePath $Target }\n"
+            "} catch {\n"
+            "  $_ | Out-String | Set-Content -LiteralPath $Log -Encoding UTF8\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        subprocess.Popen([
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(helper), "-BlindDLPid", str(os.getpid()),
+            "-Installer", str(package_path), "-Target", str(target),
+            "-Log", str(log_path),
+        ], **_subprocess_options())
         return True
     if sys.platform == "darwin":
         log("Opening the update disk image. Replace BlindDL in Applications.")
@@ -442,6 +473,77 @@ def _run(cmd, log, timeout=1800):
     for line in output.strip().splitlines()[-15:]:
         log(f"  {line}")
     return proc.returncode == 0
+
+
+def _find_winget():
+    found = shutil.which("winget")
+    if found:
+        return found
+    if sys.platform == "win32":
+        candidate = (
+            Path(os.environ.get("LOCALAPPDATA", ""))
+            / "Microsoft" / "WindowsApps" / "winget.exe"
+        )
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _tool_available(tool):
+    from .runtime import prepare_runtime_path
+
+    prepare_runtime_path()
+    if tool != "vlc":
+        return shutil.which(tool) is not None
+    if shutil.which("vlc") is not None:
+        return True
+    roots = [
+        Path(os.environ.get(name, "")) / "VideoLAN" / "VLC"
+        for name in ("ProgramFiles", "ProgramFiles(x86)")
+    ]
+    return any((root / "libvlc.dll").is_file() for root in roots)
+
+
+def missing_external_tools(package_ids=None):
+    """Return WinGet package IDs whose executable payload is unavailable."""
+    wanted = package_ids or WINGET_PACKAGES
+    return [
+        package_id for package_id in wanted
+        if not all(_tool_available(tool) for tool in WINGET_PACKAGES[package_id][1])
+    ]
+
+
+def ensure_external_tools(log, package_ids=None):
+    """Silently install missing large Windows runtimes through WinGet."""
+    if sys.platform != "win32":
+        return True
+    wanted = tuple(package_ids or WINGET_PACKAGES)
+    with _external_tools_lock:
+        missing = missing_external_tools(wanted)
+        if not missing:
+            return True
+        winget = _find_winget()
+        if winget is None:
+            log("WinGet is unavailable; required download tools could not be installed.")
+            return False
+        ok = True
+        for package_id in missing:
+            description = WINGET_PACKAGES[package_id][0]
+            log(f"Installing {description} in the background...")
+            installed = _run([
+                winget, "install", "--id", package_id, "--exact",
+                "--source", "winget", "--silent",
+                "--accept-package-agreements", "--accept-source-agreements",
+                "--disable-interactivity",
+            ], log)
+            ok = installed and ok
+        still_missing = missing_external_tools(wanted)
+        if still_missing:
+            log("Still missing: " + ", ".join(
+                WINGET_PACKAGES[package_id][0] for package_id in still_missing
+            ))
+            return False
+        return ok
 
 
 def update_pip_packages(log):
@@ -499,17 +601,18 @@ def _installed_versions():
 
 def update_winget_packages(log):
     """Upgrade external tools through the platform package manager."""
-    if getattr(sys, "frozen", False):
-        log("Deno and FFmpeg are built into blindDL and update with the app.")
-        return
     if sys.platform == "win32":
-        if shutil.which("winget") is None:
-            log("winget not found; skipping Deno/ffmpeg updates.")
+        if not ensure_external_tools(log):
             return
-        for package_id, description in WINGET_PACKAGES.items():
+        winget = _find_winget()
+        if winget is None:
+            log("WinGet not found; skipping external-tool updates.")
+            return
+        for package_id, (description, _tools) in WINGET_PACKAGES.items():
             log(f"Checking {description}...")
             _run([
-                "winget", "upgrade", "--id", package_id, "--exact",
+                winget, "upgrade", "--id", package_id, "--exact",
+                "--source", "winget",
                 "--silent", "--accept-package-agreements",
                 "--accept-source-agreements", "--disable-interactivity",
             ], log)
@@ -521,18 +624,10 @@ def update_winget_packages(log):
 
 def ensure_deno(log):
     """Make sure Deno is installed at all (yt-dlp needs it for YouTube)."""
-    if shutil.which("deno") is not None:
+    if _tool_available("deno"):
         return True
-    if getattr(sys, "frozen", False):
-        log("The bundled Deno runtime is missing. Reinstall or update blindDL.")
-        return False
-    log("Deno is not installed; installing it now (required by yt-dlp for YouTube)...")
-    if sys.platform == "win32" and shutil.which("winget"):
-        return _run([
-            "winget", "install", "--id", "DenoLand.Deno", "--exact",
-            "--silent", "--accept-package-agreements",
-            "--accept-source-agreements", "--disable-interactivity",
-        ], log)
+    if sys.platform == "win32":
+        return ensure_external_tools(log, ("DenoLand.Deno",))
     if sys.platform == "darwin" and shutil.which("brew"):
         return _run(["brew", "install", "deno"], log)
     log("Deno is unavailable; install it from https://deno.com/runtime")

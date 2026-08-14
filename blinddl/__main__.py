@@ -72,6 +72,11 @@ def _self_test(output_path: str) -> int:
 
     check("soulseek", soulseek_runtime)
 
+    frozen_root = Path(getattr(sys, "_MEIPASS", ""))
+    windows_external_tools = (
+        sys.platform == "win32" and not (frozen_root / "libvlc.dll").is_file()
+    )
+
     def vlc_runtime():
         from .gui.media_player import vlc
 
@@ -87,7 +92,10 @@ def _self_test(output_path: str) -> int:
         finally:
             instance.release()
 
-    check("vlc", vlc_runtime)
+    if windows_external_tools:
+        results["vlc"] = "installed silently through WinGet on first run"
+    else:
+        check("vlc", vlc_runtime)
 
     def musicdl_sources():
         from .musicdl_backend import ALL_SOURCES
@@ -132,19 +140,24 @@ def _self_test(output_path: str) -> int:
         version = (completed.stdout or completed.stderr).splitlines()
         return f"{path}: {version[0] if version else 'started successfully'}"
 
-    for tool in ("deno", "ffmpeg", "ffprobe"):
-        check(tool, lambda tool=tool: executable_runtime(tool))
+    if windows_external_tools:
+        for tool in ("deno", "ffmpeg", "ffprobe", "node"):
+            results[tool] = "installed silently through WinGet on first run"
+    else:
+        for tool in ("deno", "ffmpeg", "ffprobe"):
+            check(tool, lambda tool=tool: executable_runtime(tool))
 
-    def node_runtime():
-        from nodejs_wheel.executable import node
+        def node_runtime():
+            path = shutil.which("node")
+            if not path:
+                raise RuntimeError("node was not found")
+            completed = subprocess.run(
+                [path, "--version"], capture_output=True, text=True,
+                timeout=15, check=True,
+            )
+            return completed.stdout.strip()
 
-        completed = node(
-            ["--version"], return_completed_process=True,
-            capture_output=True, text=True, timeout=15, check=True,
-        )
-        return completed.stdout.strip()
-
-    check("embedded_node", node_runtime)
+        check("embedded_node", node_runtime)
 
     report = {"ok": not failures, "results": results, "failures": failures}
     Path(output_path).write_text(

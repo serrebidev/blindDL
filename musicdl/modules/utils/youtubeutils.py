@@ -484,12 +484,25 @@ def applypotoken(stream_manifest, vid_info: dict, po_token: str):
 
 
 '''generatepotoken'''
-def generatepotoken(video_id: str):
-    import nodejs_wheel.executable
+def _nodepath():
+    system_node = shutil.which("node")
+    if system_node:
+        return system_node
+    try:
+        import nodejs_wheel.executable
+    except ImportError as exc:
+        raise RuntimeError("Node.js is not installed") from exc
     suffix = ".exe" if os.name == "nt" else ""
     bin_dir = nodejs_wheel.executable.ROOT_DIR if os.name == "nt" else os.path.join(nodejs_wheel.executable.ROOT_DIR, "bin")
+    bundled_node = os.path.join(bin_dir, "node" + suffix)
+    if not os.path.isfile(bundled_node):
+        raise RuntimeError("Node.js is not installed")
+    return bundled_node
+
+
+def generatepotoken(video_id: str):
     try:
-        result = subprocess.check_output([os.path.join(bin_dir, 'node' + suffix), str(Path(__file__).resolve().parent.parent / "js" / "youtube" / "botguard.js"), video_id], stderr=subprocess.PIPE).decode()
+        result = subprocess.check_output([_nodepath(), str(Path(__file__).resolve().parent.parent / "js" / "youtube" / "botguard.js"), video_id], stderr=subprocess.PIPE).decode()
         return result.replace("\n", "")
     except Exception as err:
         raise RuntimeError(err)
@@ -674,10 +687,7 @@ class NodeRunner:
     '''_nodepath'''
     @staticmethod
     def _nodepath():
-        import nodejs_wheel.executable
-        suffix = ".exe" if os.name == "nt" else ""
-        bin_dir = nodejs_wheel.executable.ROOT_DIR if os.name == "nt" else os.path.join(nodejs_wheel.executable.ROOT_DIR, "bin")
-        return os.path.join(bin_dir, 'node' + suffix)
+        return _nodepath()
     '''_exposed'''
     @staticmethod
     def _exposed(code: str, fun_name: str):

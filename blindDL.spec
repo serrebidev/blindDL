@@ -38,17 +38,21 @@ datas = [
 ]
 binaries = []
 hiddenimports = []
+BUNDLE_EXTERNAL_TOOLS = (
+    sys.platform != "win32"
+    or os.environ.get("BLINDDL_BUNDLE_EXTERNAL_TOOLS", "0") == "1"
+)
 
 # Keep optional-at-runtime backends and their complete dependency trees in the
 # standalone application.  PyInstaller can otherwise miss modules imported by
 # pydantic settings or UPnP adapters only after Soulseek is enabled.
 for package in (
     # YouTube needs more than yt_dlp's importable Python modules: extractor
-    # plugins, the EJS solver's minified JavaScript, WebSocket support, and
-    # musicdl's embedded Node executable all load dynamically at runtime.
+    # plugins, the EJS solver's minified JavaScript, and WebSocket support all
+    # load dynamically at runtime. Windows obtains the native JS runtimes
+    # through WinGet instead of duplicating them in every release archive.
     "yt_dlp",
     "yt_dlp_ejs",
-    "nodejs_wheel",
     "websockets",
     "curl_cffi",
     "mutagen",
@@ -65,6 +69,12 @@ for package in (
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
+
+if BUNDLE_EXTERNAL_TOOLS and importlib.util.find_spec("nodejs_wheel") is not None:
+    node_datas, node_binaries, node_hidden = collect_all("nodejs_wheel")
+    datas += node_datas
+    binaries += node_binaries
+    hiddenimports += node_hidden
 
 # accessible-output2 speaks the status bar. Its screen-reader bridges are
 # DLLs it loads by name from its own lib folder rather than modules anything
@@ -214,8 +224,8 @@ for distribution in (
     except Exception:
         pass
 
-tool_names = ["deno"]
-if os.environ.get("BLINDDL_BUNDLE_FFMPEG", "1") != "0":
+tool_names = ["deno"] if BUNDLE_EXTERNAL_TOOLS else []
+if BUNDLE_EXTERNAL_TOOLS and os.environ.get("BLINDDL_BUNDLE_FFMPEG", "1") != "0":
     tool_names += ["ffmpeg", "ffprobe"]
 def find_tool(tool_name):
     tool_path = shutil.which(tool_name)
@@ -270,6 +280,8 @@ for tool_name in tool_names:
 def collect_vlc_runtime():
     """Bundle native libVLC and plugins where release builders provide it."""
     if sys.platform == "win32":
+        if not BUNDLE_EXTERNAL_TOOLS:
+            return
         candidates = [
             Path(os.environ.get("BLINDDL_VLC_ROOT", "")),
             Path(os.environ.get("ProgramFiles", "")) / "VideoLAN" / "VLC",
@@ -303,7 +315,7 @@ def collect_vlc_runtime():
 
 
 collect_vlc_runtime()
-if sys.platform in ("win32", "darwin") and not any(
+if (sys.platform == "darwin" or BUNDLE_EXTERNAL_TOOLS) and not any(
     Path(source).name.lower() in {"libvlc.dll", "libvlc.dylib"}
     for source, _destination in binaries
 ):

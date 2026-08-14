@@ -821,36 +821,18 @@ class SettingsDialog(wx.Dialog):
         )
 
         update_label = (
-            "&Check for BlindDL updates automatically"
+            "&Automatically download and install BlindDL updates"
             if getattr(sys, "frozen", False)
             else "&Update download tools automatically"
         )
         self.update_check = wx.CheckBox(page, label=update_label)
         self.update_check.SetValue(bool(config["auto_update"]))
         self.update_check.SetHelpText(
-            "Checks when blindDL starts and every "
-            f"{int(config['update_check_hours'])} hours after that."
+            "Checks at startup and every "
+            f"{int(config['update_check_hours'])} hours after that. Released "
+            "builds download and verify an update automatically, wait for "
+            "active and queued downloads to finish, then install and restart."
         )
-
-        self.auto_install_check = wx.CheckBox(
-            page, label="&Install BlindDL updates as soon as they are found"
-        )
-        self.auto_install_check.SetValue(bool(config["auto_install_update"]))
-        self.auto_install_check.SetHelpText(
-            "Downloads and verifies the new release, then installs it and "
-            "restarts blindDL. It waits until nothing is downloading, and "
-            "anything still in the queue is picked up again afterwards. Off "
-            "means blindDL says a release is available and leaves it to you. "
-            "Applies to released builds; a source checkout updates its "
-            "download tools instead."
-        )
-
-        def enable_auto_install(_event=None):
-            # Nothing to install automatically if nothing is looking.
-            self.auto_install_check.Enable(self.update_check.GetValue())
-
-        self.update_check.Bind(wx.EVT_CHECKBOX, enable_auto_install)
-        enable_auto_install()
 
         cookies_label = wx.StaticText(page, label="Use cookies from &browser:")
         self.cookies_choice = self._choice(
@@ -892,7 +874,6 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
         sizer.Add(self.speak_status_check, 0, wx.ALL, 8)
         sizer.Add(self.update_check, 0, wx.ALL, 8)
-        sizer.Add(self.auto_install_check, 0, wx.ALL, 8)
         _row(sizer, cookies_label, self.cookies_choice)
         _row(sizer, cookies_file_label, cookies_file_box)
         page.SetSizer(sizer)
@@ -1253,7 +1234,9 @@ class SettingsDialog(wx.Dialog):
         self.config["start_maximized"] = self.start_maximized_check.GetValue()
         self.config["speak_status"] = self.speak_status_check.GetValue()
         self.config["auto_update"] = self.update_check.GetValue()
-        self.config["auto_install_update"] = self.auto_install_check.GetValue()
+        # Kept in saved configs for backward compatibility; automatic update
+        # is now one unambiguous setting.
+        self.config["auto_install_update"] = self.update_check.GetValue()
         self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
             self.cookies_choice.GetSelection()
         ][1]

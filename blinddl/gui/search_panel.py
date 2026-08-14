@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+from collections import deque
 
 import wx
 
@@ -26,6 +27,7 @@ from .. import (
     sideb_backend,
     soulseek_backend,
     torrent_backend,
+    updater,
     ytdlp_backend,
 )
 from .. import search_kind
@@ -749,6 +751,9 @@ class SearchPanel(wx.Panel):
         self.started_at = 0.0
         self.closing = False
         self.next_result_order = 0
+        self._site_delivery_lock = threading.Lock()
+        self._site_deliveries = deque()
+        self._site_delivery_scheduled = False
         self.current_order = search_order.normalize(
             self.frame.config.get("search_order", ORDER_RELEVANCE)
         )
@@ -766,9 +771,9 @@ class SearchPanel(wx.Panel):
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
-        # Many providers finish together. Coalesce their GUI work so the
-        # native list and accessibility tree are rebuilt at most ten times a
-        # second instead of once per provider.
+        # Many providers finish together. Their callbacks are delivered in
+        # small GUI batches and this timer rebuilds the accessibility tree
+        # only after that burst settles.
         self.render_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._flush_results, self.render_timer)
         # Both timers are owned by this panel, and wxGTK deletes a window some
@@ -1070,6 +1075,8 @@ class SearchPanel(wx.Panel):
             self.stop.set()
         self.timer.Stop()
         self.render_timer.Stop()
+        with self._site_delivery_lock:
+            self._site_deliveries.clear()
         self.player.shutdown()
 
     # -- search -----------------------------------------------------------
@@ -1215,6 +1222,8 @@ class SearchPanel(wx.Panel):
         self.next_result_order = 0
         self.timer.Stop()
         self.render_timer.Stop()
+        with self._site_delivery_lock:
+            self._site_deliveries.clear()
         # DeleteAllItems on a virtual list clears the rows without telling it
         # the count changed, which leaves the old count behind.
         self.results_list.SetItemCount(0)
@@ -1294,6 +1303,15 @@ class SearchPanel(wx.Panel):
         kind = search_kind.normalize(kind)
         asked = []
         try:
+            if engine == ENGINE_MUSIC:
+                updater.ensure_external_tools(
+                    lambda _line: None,
+                    ("DenoLand.Deno", "OpenJS.NodeJS.LTS"),
+                )
+            elif engine == ENGINE_YOUTUBE:
+                updater.ensure_external_tools(
+                    lambda _line: None, ("DenoLand.Deno",)
+                )
             if _is_soulseek_engine(engine):
                 def on_soulseek_batch(batch):
                     wx.CallAfter(self._add_soulseek_batch, token, batch)
@@ -1323,7 +1341,7 @@ class SearchPanel(wx.Panel):
             elif engine == ENGINE_MUSIC:
 
                 def on_site(source, items):
-                    wx.CallAfter(self._add_site, token, engine, source, items)
+                    self._queue_site_results(token, engine, source, items)
 
                 threading.Thread(
                     target=self._sideb_search,
@@ -1352,7 +1370,7 @@ class SearchPanel(wx.Panel):
             elif engine == ENGINE_BOOKS:
 
                 def on_library(source, items):
-                    wx.CallAfter(self._add_site, token, engine, source, items)
+                    self._queue_site_results(token, engine, source, items)
 
                 items, _answered, asked = book_backend.search(
                     query,
@@ -1367,7 +1385,7 @@ class SearchPanel(wx.Panel):
             elif engine == ENGINE_AUDIOBOOKS:
 
                 def on_audiobook_site(source, items):
-                    wx.CallAfter(self._add_site, token, engine, source, items)
+                    self._queue_site_results(token, engine, source, items)
 
                 items, _answered, asked = audiobook_backend.search(
                     query,
@@ -1382,7 +1400,7 @@ class SearchPanel(wx.Panel):
             elif engine == ENGINE_TORRENTS:
 
                 def on_indexer(source, items):
-                    wx.CallAfter(self._add_site, token, engine, source, items)
+                    self._queue_site_results(token, engine, source, items)
 
                 items, _answered, asked = torrent_backend.search(
                     query,
@@ -1398,7 +1416,7 @@ class SearchPanel(wx.Panel):
             elif _is_archive_engine(engine):
 
                 def on_collection(source, items):
-                    wx.CallAfter(self._add_site, token, engine, source, items)
+                    self._queue_site_results(token, engine, source, items)
 
                 items, _answered, asked = archive_backend.search(
                     query,
@@ -1427,7 +1445,7 @@ class SearchPanel(wx.Panel):
             elif _is_adult_engine(engine):
 
                 def on_adult_site(source, items):
-                    wx.CallAfter(self._add_site, token, engine, source, items)
+                    self._queue_site_results(token, engine, source, items)
 
                 items, _answered, asked = adult_backend.search(
                     query,
@@ -1458,7 +1476,9 @@ class SearchPanel(wx.Panel):
             items = []
         if stop.is_set():
             return
-        wx.CallAfter(self._add_site, token, engine, sideb_backend.SIDEB_SOURCE, items)
+        self._queue_site_results(
+            token, engine, sideb_backend.SIDEB_SOURCE, items
+        )
 
     def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE,
                        kind=KIND_BEST):
@@ -1470,8 +1490,8 @@ class SearchPanel(wx.Panel):
             items = []
         if stop.is_set():
             return
-        wx.CallAfter(
-            self._add_site, token, engine, deezer_backend._SEARCH_SOURCE, items
+        self._queue_site_results(
+            token, engine, deezer_backend._SEARCH_SOURCE, items
         )
 
     def _soulseek_failed(self, token, error):
@@ -1492,6 +1512,35 @@ class SearchPanel(wx.Panel):
         wx.MessageBox(
             f"Search failed:\n{error}", "blindDL", wx.OK | wx.ICON_ERROR, self
         )
+
+    def _queue_site_results(self, token, engine, source, items):
+        """Queue a provider response without flooding wx or NVDA with events."""
+        if self.closing:
+            return
+        schedule = False
+        with self._site_delivery_lock:
+            self._site_deliveries.append((token, engine, source, items))
+            if not self._site_delivery_scheduled:
+                self._site_delivery_scheduled = True
+                schedule = True
+        if schedule:
+            wx.CallAfter(self._drain_site_results)
+
+    def _drain_site_results(self):
+        """Deliver a few completed providers, then yield to screen-reader input."""
+        if self.closing:
+            return
+        batches = []
+        with self._site_delivery_lock:
+            while self._site_deliveries and len(batches) < 4:
+                batches.append(self._site_deliveries.popleft())
+            more = bool(self._site_deliveries)
+            if not more:
+                self._site_delivery_scheduled = False
+        for token, engine, source, items in batches:
+            self._add_site(token, engine, source, items)
+        if more:
+            wx.CallLater(25, self._drain_site_results)
 
     def _add_site(self, token, engine, source, items):
         """Append one site's results. Runs on the GUI thread."""

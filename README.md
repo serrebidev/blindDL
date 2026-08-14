@@ -13,7 +13,7 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Plays audio or video straight from a pasted URL, and previews search results before you commit to a download.
 - Searches dozens of music services from one box, and saves tracks tagged, with cover art and synced lyrics where a service provides them.
 - Finds free ebooks, audiobooks, and Internet Archive media — old-time radio, live concerts, movies, and classic TV — from the same search box.
-- Returns results as each site answers instead of waiting for the slowest one, and lets you choose which sites are searched.
+- Starts every selected music site concurrently on background threads, returns results as each site answers, and batches GUI updates so screen readers stay responsive.
 - Asks supported sites for best-match, newest, or most-popular results, while clearly naming sites that cannot provide the chosen order.
 - Opens multi-item links as a checked list, so you take everything or only the items you want.
 - Files a playlist, channel, artist page, album, or Internet Archive item into a folder named after it, so its tracks arrive together instead of loose among everything else. A single video still lands straight in the download folder.
@@ -22,10 +22,9 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.
-- Checks for new BlindDL releases on startup and every 12 hours, verifies the
-  download checksum, and starts the correct platform update from inside the
-  app — or installs it on its own, once your downloads have finished, if you
-  ask it to in Settings, Window.
+- When automatic updates are enabled, checks on startup and every 12 hours,
+  downloads and verifies the release, waits for queued transfers to finish,
+  installs it silently, and restarts BlindDL without a Download update step.
 - Searches music by track title, album, or artist, and downloads a whole album as every track on it.
 - Uses native controls, labeled fields, status-bar announcements, context menus, and complete keyboard operation.
 - Speaks its status-bar announcements through NVDA, JAWS, and friends, and shows them on a Braille display, so a finished search or a failed download arrives on its own. Turn it off in Settings, Window.
@@ -41,20 +40,21 @@ Grab the latest build from the [Releases page](https://github.com/serrebidev/bli
 1. Download `blindDL-Setup-vX.Y.Z-windows-x64.exe`.
 2. Run it to install BlindDL and add it to the Start Menu.
 
-The installer contains BlindDL's private Python runtime, libtorrent, Deno,
-FFmpeg, FFprobe, and VLC. You do not need to install Python, pip, a torrent
-client, media tools, or developer software.
+The installer contains BlindDL's private Python runtime, yt-dlp, libtorrent,
+and all Python application libraries. You do not need to install Python, pip,
+or a torrent client. On first run, the Windows build silently obtains Deno,
+FFmpeg, FFprobe, Node.js LTS, and VLC through WinGet in the background.
 
 **Windows portable**
 
 1. Download `blindDL-vX.Y.Z-windows-x64.zip`.
 2. Extract it anywhere and run `blindDL.exe` — no installation required.
 
-The portable ZIP contains the same complete runtime as the installer.
+The portable ZIP uses the same automatic background setup as the installer.
 
-Bundled components update together through BlindDL releases, so updating the
-app also updates yt-dlp, music and site backends, libtorrent, Deno, FFmpeg, and
-the media runtime. Release builds pull the current dependency and yt-dlp
+Bundled components update together through BlindDL releases. Large Windows
+media tools update through WinGet, so they are not duplicated inside every
+BlindDL update. Release builds pull the current dependency and yt-dlp
 pre-release versions before packaging them.
 
 **macOS**
@@ -75,7 +75,7 @@ The Debian packages are built on Ubuntu 24.04 for current Debian-family distribu
 1. Download the matching Linux `.tar.gz`.
 2. Extract it and run `./install.sh`.
 
-The installer sets BlindDL up for your user account and obtains native media libraries through apt, dnf, pacman, or zypper when needed. Packaged releases contain BlindDL's Python runtime and Deno; Windows and macOS builds also contain FFmpeg, FFprobe, libtorrent, and VLC.
+The installer sets BlindDL up for your user account and obtains native media libraries through apt, dnf, pacman, or zypper when needed. Packaged releases contain BlindDL's Python runtime. Windows obtains large native tools through WinGet; macOS packages contain their required media runtimes.
 
 ## Run from source
 
@@ -83,7 +83,7 @@ The installer sets BlindDL up for your user account and obtains native media lib
 2. Install dependencies: `pip install -r requirements.txt`
 3. Launch it: `python main.py`
 
-On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`, `ffmpeg`, `libvlc5`, `vlc-plugin-base`, and `git` first, then create the virtual environment with `--system-site-packages`. Windows and macOS release builds bundle the VLC playback runtime. On Windows, BlindDL can install Deno and FFmpeg with winget; on macOS, it uses Homebrew when available.
+On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`, `ffmpeg`, `libvlc5`, `vlc-plugin-base`, and `git` first, then create the virtual environment with `--system-site-packages`. On Windows, BlindDL installs Deno, FFmpeg, Node.js LTS, and VLC with WinGet; on macOS, it uses Homebrew when available.
 
 ## Searching
 

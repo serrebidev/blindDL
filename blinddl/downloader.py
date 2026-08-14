@@ -33,6 +33,7 @@ from . import (
     soulseek_backend,
     torrent_backend,
     torrent_engine,
+    updater,
     ytdlp_backend,
 )
 from .config import app_data_dir
@@ -981,6 +982,7 @@ class DownloadQueue:
             self._save_state()
             self._notify(item)
             try:
+                self._ensure_download_tools(item)
                 if item.kind == "ytdlp":
                     result = self._run_ytdlp(item)
                 elif item.kind == "sideb":
@@ -1031,6 +1033,27 @@ class DownloadQueue:
                 item.cancel_event.set()
             self._save_state()
             self._notify(item)
+
+    @staticmethod
+    def _ensure_download_tools(item):
+        """Wait in the queue worker if first-run WinGet setup is still active."""
+        packages = {
+            "ytdlp": ("DenoLand.Deno", "Gyan.FFmpeg.Essentials"),
+            "sideb": (
+                "DenoLand.Deno", "Gyan.FFmpeg.Essentials",
+                "OpenJS.NodeJS.LTS",
+            ),
+            "adult": ("DenoLand.Deno", "Gyan.FFmpeg.Essentials"),
+            "applemusic": ("Gyan.FFmpeg.Essentials",),
+            "musicdl": ("Gyan.FFmpeg.Essentials", "OpenJS.NodeJS.LTS"),
+        }.get(item.kind)
+        if packages and not updater.ensure_external_tools(
+            lambda _line: None, packages
+        ):
+            raise RuntimeError(
+                "Required media tools could not be installed through WinGet. "
+                "Open Help, Check for updates, then try again."
+            )
 
     def _out_dir(self, item):
         """Where this item's files go: its own folder when it came from one.

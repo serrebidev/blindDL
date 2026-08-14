@@ -39,38 +39,31 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Install Deno
-        run: python scripts/install_deno.py
       - name: Install build tools
         shell: bash
         run: |
-          # The Chocolatey feed intermittently answers 504 for one package or
-          # another, and choco still exits 0 with that package missing. The
-          # build only notices three steps later, when the spec refuses to
-          # make an incomplete release, so every tool it needs is proven here.
+          # Windows media runtimes are installed for users through WinGet and
+          # are deliberately absent from the archive. Only the installer
+          # compiler is a release-build dependency.
           export PATH="$PATH:/c/ProgramData/chocolatey/bin"
           have_tools() {
             python - <<'PY'
           import os, shutil, sys
           from pathlib import Path
 
-          absent = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
           program_files = os.environ.get("ProgramFiles", "")
           program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
-          if not Path(program_files, "VideoLAN", "VLC", "libvlc.dll").is_file():
-              absent.append("vlc")
-          if not (
+          found = (
               shutil.which("ISCC.exe")
               or Path(program_files_x86, "Inno Setup 6", "ISCC.exe").is_file()
               or Path(program_files, "Inno Setup 6", "ISCC.exe").is_file()
-          ):
-              absent.append("innosetup")
-          print("missing build tools:", ", ".join(absent) if absent else "none")
-          sys.exit(1 if absent else 0)
+          )
+          print("Inno Setup:", found or "missing")
+          sys.exit(0 if found else 1)
           PY
           }
           for attempt in 1 2 3 4 5; do
-            choco install ffmpeg innosetup vlc --no-progress -y || true
+            choco install innosetup --no-progress -y || true
             if have_tools; then exit 0; fi
             echo "Build tools incomplete on attempt $attempt; retrying."
             sleep 60
