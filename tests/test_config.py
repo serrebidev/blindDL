@@ -80,7 +80,9 @@ class ConfigLoadTests(unittest.TestCase):
             config_module.os.environ,
             {"BLINDDL_APP_DATA_DIR": str(isolated)},
         ):
-            self.assertEqual(Path(config_module.app_data_dir()), isolated.resolve())
+            self.assertEqual(
+                Path(config_module.app_data_dir()).resolve(), isolated.resolve()
+            )
         self.assertTrue(isolated.is_dir())
 
     def test_deezer_format_defaults_to_flac(self):
