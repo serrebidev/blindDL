@@ -480,7 +480,9 @@ class TorrentEngine:
 
     def _params_for(self, item, save_path, config):
         lt = self._lt
-        magnet = torrent_backend.magnet_for(item)
+        # Sources that publish the hash only on the book's own page (eBookelo,
+        # Audiobook Bay) resolve it here, at download time.
+        magnet = torrent_backend.resolve_magnet(item)
         if magnet:
             atp = lt.parse_magnet_uri(magnet)
         elif item.get("download_url"):

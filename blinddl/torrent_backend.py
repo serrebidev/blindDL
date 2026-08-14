@@ -60,6 +60,11 @@ SOURCE_LIMETORRENTS = "LimeTorrents"
 SOURCE_BITSEARCH = "BitSearch / SolidTorrents"
 SOURCE_KNABEN = "Knaben"
 SOURCE_ARCHIVE = "Internet Archive"
+# eBookelo and Audiobook Bay publish no magnets in their search pages: the
+# hash is only revealed on each book's own page, so the row keeps the page
+# URL and the magnet is resolved from it when the user actually downloads.
+SOURCE_EBOOKELO = "eBookelo"
+SOURCE_AUDIOBOOKBAY = "Audiobook Bay"
 ALL_SOURCES = [
     SOURCE_KNABEN,
     SOURCE_PIRATEBAY,
@@ -69,6 +74,8 @@ ALL_SOURCES = [
     SOURCE_LIMETORRENTS,
     SOURCE_BITSEARCH,
     SOURCE_ARCHIVE,
+    SOURCE_EBOOKELO,
+    SOURCE_AUDIOBOOKBAY,
 ]
 
 # Which indexers can be asked for an order, and which are simply already in
@@ -92,6 +99,10 @@ ORDER_SUPPORT = {
     SOURCE_LIMETORRENTS: frozenset({ORDER_RECENT, ORDER_POPULAR}),
     SOURCE_BITSEARCH: frozenset({ORDER_RECENT, ORDER_POPULAR}),
     SOURCE_ARCHIVE: frozenset({ORDER_RECENT, ORDER_POPULAR}),
+    # Book and audiobook sites answer their own relevance order and nothing
+    # else; _rank arranges their rows from there.
+    SOURCE_EBOOKELO: frozenset(),
+    SOURCE_AUDIOBOOKBAY: frozenset(),
 }
 
 # LimeTorrents puts its sort in the path: /search/all/<query>/<sort>/<page>/.
@@ -111,6 +122,12 @@ LIMETORRENTS_URL = "https://www.limetorrents.lol/search/all"
 # The origin. solidtorrents.to and bitsearch.to are both 301s onto it.
 BITSEARCH_URL = "https://bitsearch.eu/api/v1/search"
 KNABEN_URL = "https://api.knaben.org/v1"
+# eBookelo is a Spanish-language book site that indexes books in many
+# languages (each row says which), and serves every book as a torrent.
+EBOOKELO_URL = "https://ww2.ebookelo.com"
+# Audiobook Bay is the public torrent index for audiobooks; the hash is
+# published on each book's detail page, never in the search listing.
+AUDIOBOOKBAY_URL = "https://audiobookbay.lu"
 # The Archive publishes every public item as a torrent as well, and indexes
 # that file as a format of its own, so asking for the format is what keeps
 # the results to items BitTorrent can actually fetch.
@@ -357,6 +374,28 @@ def magnet_for(item):
     return f"magnet:?xt=urn:btih:{infohash}&{urlencode(query)}"
 
 
+def resolve_magnet(item, timeout=HTTP_TIMEOUT_S):
+    """The magnet that starts *item*, fetching it from the source if needed.
+
+    Most indexers publish the hash with the row, so magnet_for answers at
+    once. eBookelo and Audiobook Bay only reveal it on the book's own page,
+    so the magnet is resolved from that page the first time the row is
+    actually downloaded. Returns "" when the row has no hash anywhere.
+    """
+    magnet = magnet_for(item)
+    if magnet:
+        return magnet
+    source = str(item.get("source") or "")
+    try:
+        if source == SOURCE_EBOOKELO:
+            return _ebookelo_magnet(item, timeout=timeout)
+        if source == SOURCE_AUDIOBOOKBAY:
+            return _audiobookbay_magnet(item, timeout=timeout)
+    except Exception:  # noqa: BLE001 - a dead site must not kill the queue row
+        return ""
+    return ""
+
+
 def fetch_torrent_file(item, out_dir, timeout=HTTP_TIMEOUT_S):
     """Save one result's .torrent file and return the path.
 
@@ -391,7 +430,7 @@ def hand_off(item, out_dir=None):
     the tracker's own .torrent and opening that, which is the only thing that
     works for a private tracker. Returns what was opened.
     """
-    magnet = magnet_for(item)
+    magnet = resolve_magnet(item)
     if magnet:
         open_magnet(magnet)
         return magnet
@@ -698,6 +737,208 @@ def search_knaben(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
 
 
 
+# -- eBookelo ---------------------------------------------------------------
+
+# One search-result card: title, author, language, and the link to the book
+# page. The language is the flag's alt text on the site, and is what the
+# results list needs -- a Spanish-language site indexing books from everywhere
+# must not hide which language each copy is in.
+_EBOOKELO_CARD_RE = re.compile(
+    r'<div class="bookCard">(.*?)</div>\s*</div>', re.DOTALL)
+_EBOOKELO_LINK_RE = re.compile(
+    r'href="/ebook/(\d+)/([^"]*)"', re.DOTALL)
+_EBOOKELO_TITLE_RE = re.compile(r'<h3 class="title">(.*?)</h3>', re.DOTALL)
+_EBOOKELO_AUTHOR_RE = re.compile(r'<span class="autor">(.*?)</span>',
+                                 re.DOTALL)
+_EBOOKELO_LANG_RE = re.compile(
+    r'<span class="flag ([a-z]+)"></span>\s*<span>(.*?)</span>',
+    re.DOTALL)
+
+# The site writes languages in Spanish; the results list should say them the
+# way the reader is thinking. Unknown codes keep the site's own word.
+_EBOOKELO_LANGUAGES = {
+    "espa": "Spanish", "ingl": "English", "fran": "French",
+    "alem": "German", "ital": "Italian", "port": "Portuguese",
+    "rus": "Russian", "japa": "Japanese", "chin": "Chinese",
+    "arab": "Arabic", "hola": "Dutch", "suec": "Swedish",
+    "noru": "Norwegian", "dane": "Danish", "finn": "Finnish",
+    "pol": "Polish", "chec": "Czech", "huna": "Hungarian",
+    "grie": "Greek", "turc": "Turkish", "kore": "Korean",
+    "lati": "Latin", "cata": "Catalan", "gallego": "Galician",
+    "vasc": "Basque", "eusk": "Basque", "persa": "Persian",
+    "hind": "Hindi", "indones": "Indonesian", "ucra": "Ukrainian",
+}
+
+
+def _ebookelo_language(flag):
+    """The language one eBookelo flag stands for, or "" when unknown."""
+    return _EBOOKELO_LANGUAGES.get(str(flag or "").casefold(), "")
+
+
+def _ebookelo_magnet(item, timeout=HTTP_TIMEOUT_S):
+    """The magnet of one eBookelo book, from its download page.
+
+    eBookelo's search and book pages carry no magnet at all; the download
+    page for a chosen format answers with a page whose hidden field holds the
+    magnet (and whose script redirects a browser to it). That page is what
+    this resolves, once, when the user actually picks the book.
+    """
+    book_id = str(item.get("identifier") or "").strip()
+    if not book_id:
+        return ""
+    response = _http().get(f"{EBOOKELO_URL}/download/{book_id}/magnet",
+                           timeout=timeout)
+    response.raise_for_status()
+    found = re.search(r'name="magnet"\s+value="([^"]*)"', response.text)
+    if not found:
+        return ""
+    return html.unescape(found.group(1)).strip()
+
+
+def search_ebookelo(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
+    """Search eBookelo's book index, which serves every book as a torrent.
+
+    The search page is server-rendered -- no JavaScript needed -- and answers
+    one page of results with title, author and language for each book. The
+    magnet is not there; it lives on each book's own download page, resolved
+    when the row is downloaded (see _ebookelo_magnet).
+    """
+    path = "/".join(part for part in (EBOOKELO_URL, "search",
+                                      quote(query), "page", "1") if part)
+    response = _http().get(path, timeout=timeout)
+    response.raise_for_status()
+    items = []
+    for card in _EBOOKELO_CARD_RE.finditer(response.text):
+        body = card.group(1)
+        link = _EBOOKELO_LINK_RE.search(body)
+        if not link:
+            continue
+        book_id, slug = link.group(1), link.group(2)
+        title_match = _EBOOKELO_TITLE_RE.search(body)
+        if not title_match:
+            continue
+        title = _text(title_match.group(1))
+        author_match = _EBOOKELO_AUTHOR_RE.search(body)
+        author = _text(author_match.group(1)) if author_match else ""
+        lang_match = _EBOOKELO_LANG_RE.search(body)
+        language = ""
+        if lang_match:
+            language = _ebookelo_language(lang_match.group(1))
+            if not language:
+                language = _text(lang_match.group(2))
+        items.append(_item(
+            SOURCE_EBOOKELO, "", title,
+            uploader=author,
+            format=language or "",
+            identifier=book_id,
+            url=f"{EBOOKELO_URL}/ebook/{book_id}/{slug}",
+            download_url=f"{EBOOKELO_URL}/download/{book_id}/magnet",
+        ))
+    return items
+
+
+# -- Audiobook Bay ----------------------------------------------------------
+
+_AUDIOBOOKBAY_TITLE_RE = re.compile(
+    r'<h2><a href="([^"]*)"[^>]*>(.*?)</a>', re.DOTALL)
+_AUDIOBOOKBAY_LANG_RE = re.compile(r"Language:\s*([^<]*)")
+_AUDIOBOOKBAY_SIZE_RE = re.compile(
+    r"File Size:\s*<span[^>]*>([\d.]+)</span>\s*(MB|GB|KB)s?", re.I)
+_AUDIOBOOKBAY_FORMAT_RE = re.compile(
+    r"Format:\s*<span[^>]*>([^<]*)</span>", re.I)
+
+# The detail page names its hash and trackers in table cells, in the order
+# the torrent itself lists them -- hash first, then each tracker.
+_AUDIOBOOKBAY_HASH_RE = re.compile(
+    r"<td>Info Hash:</td>\s*<td>\s*([0-9a-fA-F]{40})\s*</td>")
+_AUDIOBOOKBAY_TRACKER_RE = re.compile(
+    r"<td>Tracker:</td>\s*<td>([^<]*)</td>")
+
+
+def _size_to_bytes(value, unit):
+    """One "292.27 MB"-style figure as bytes, or 0 when unreadable."""
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    multiplier = {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}.get(
+        str(unit).strip().upper(), 0)
+    return int(number * multiplier)
+
+
+def _audiobookbay_magnet(item, timeout=HTTP_TIMEOUT_S):
+    """Build the magnet of one Audiobook Bay row from its detail page.
+
+    The search listing carries no hash; each book's page names it in a table
+    next to the trackers that book's swarm uses. Those two, plus the open
+    trackers blindDL adds to every bare hash, make the magnet.
+    """
+    url = str(item.get("url") or "").strip()
+    if not url.startswith("http"):
+        url = f"{AUDIOBOOKBAY_URL}{url}"
+    response = _http().get(url, timeout=timeout)
+    response.raise_for_status()
+    text = response.text
+    found = _AUDIOBOOKBAY_HASH_RE.search(text)
+    if not found:
+        return ""
+    infohash = found.group(1).lower()
+    trackers = [match.group(1).strip()
+                for match in _AUDIOBOOKBAY_TRACKER_RE.finditer(text)]
+    query = [("dn", str(item.get("title") or "").strip())]
+    for tracker in trackers:
+        query.append(("tr", tracker))
+    for tracker in TRACKERS:
+        if tracker not in trackers:
+            query.append(("tr", tracker))
+    return f"magnet:?xt=urn:btih:{infohash}&{urlencode(query)}"
+
+
+def search_audiobookbay(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
+    """Search Audiobook Bay's public index of torrented audiobooks.
+
+    The listing is a WordPress search: one page of posts, each carrying the
+    title, language, format and file size. The hash is only on the book's own
+    page, resolved at download time (see _audiobookbay_magnet).
+    """
+    response = _http().get(AUDIOBOOKBAY_URL, params={"s": query},
+                           timeout=timeout)
+    response.raise_for_status()
+    items = []
+    # Each post is one <div class="post"> block. Splitting on the opening tag
+    # is safer than a closing-tag pattern: the posts contain nested divs, and
+    # the first closing tag that looks right would cut a post in half.
+    for body in response.text.split('<div class="post">')[1:]:
+        title_match = _AUDIOBOOKBAY_TITLE_RE.search(body)
+        if not title_match:
+            continue
+        link = title_match.group(1)
+        title = _text(title_match.group(2))
+        if not link.startswith("http"):
+            link = f"{AUDIOBOOKBAY_URL}{link}"
+        lang_match = _AUDIOBOOKBAY_LANG_RE.search(body)
+        language = _text(lang_match.group(1)) if lang_match else ""
+        size_match = _AUDIOBOOKBAY_SIZE_RE.search(body)
+        size_bytes = 0
+        if size_match:
+            size_bytes = _size_to_bytes(size_match.group(1),
+                                        size_match.group(2))
+        fmt_match = _AUDIOBOOKBAY_FORMAT_RE.search(body)
+        audiobook_format = _text(fmt_match.group(1)) if fmt_match else ""
+        # The language is the thing that decides between two copies of the
+        # same book, so it leads the format column.
+        listed = " · ".join(part for part in (language, audiobook_format)
+                            if part)
+        items.append(_item(
+            SOURCE_AUDIOBOOKBAY, "", title,
+            format=listed,
+            size_bytes=size_bytes,
+            url=link,
+            download_url=link,
+        ))
+    return items
+
+
 # -- user feeds: Torznab, Newznab and Prowlarr's own API ---------------------
 
 _TORZNAB_NS = "{http://torznab.com/schemas/2015/feed}"
@@ -871,6 +1112,8 @@ _SEARCHERS = {
     SOURCE_LIMETORRENTS: search_limetorrents,
     SOURCE_BITSEARCH: search_bitsearch,
     SOURCE_ARCHIVE: search_archive,
+    SOURCE_EBOOKELO: search_ebookelo,
+    SOURCE_AUDIOBOOKBAY: search_audiobookbay,
 }
 # Indexers that cannot be given the query, so an unmatched row is noise.
 _STRICT_SOURCES = {SOURCE_EZTV}

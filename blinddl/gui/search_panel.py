@@ -830,9 +830,9 @@ class SearchPanel(wx.Panel):
         self.search_btn = wx.Button(self, label="&Search")
         self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
         self.stop_btn = wx.Button(self, label="&Stop search")
-        self.stop_btn.SetName("Stop Soulseek search")
+        self.stop_btn.SetName("Stop search")
         self.stop_btn.SetHelpText(
-            "Stops the current Soulseek search. Results already found stay in the list."
+            "Stops the current search. Results already found stay in the list."
         )
         self.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop_search)
         self.stop_btn.Hide()
@@ -1220,14 +1220,12 @@ class SearchPanel(wx.Panel):
         self._apply_engine_columns(engine)
 
         # A Soulseek search never times out: it keeps finding peers until the
-        # user starts another search or presses Stop. Only it shows the Stop
-        # button, so the ordinary timed searches stay exactly as they were.
+        # user starts another search or presses Stop. Every search shows the
+        # Stop button, so a slow source can be cut off whatever the category.
         self._soulseek_streaming = _is_soulseek_engine(engine)
         if self._soulseek_streaming:
             self.asked = [soulseek_backend.SOURCE]
-            self.stop_btn.Show()
-        else:
-            self.stop_btn.Hide()
+        self.stop_btn.Show()
 
         if _is_soulseek_engine(engine):
             self.frame.announce(
@@ -1488,6 +1486,7 @@ class SearchPanel(wx.Panel):
         if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
+        self.stop_btn.Hide()
         self.frame.announce("Search failed.")
         wx.MessageBox(
             f"Search failed:\n{error}", "blindDL", wx.OK | wx.ICON_ERROR, self
@@ -1532,11 +1531,12 @@ class SearchPanel(wx.Panel):
             self.render_timer.StartOnce(100)
 
     def on_stop_search(self, event=None):
-        """Stop the streaming Soulseek search without starting a new one."""
-        if not self._soulseek_streaming:
-            return
+        """Stop the current search without starting a new one."""
         if self.stop is not None:
             self.stop.set()
+        # Ignore results still in flight from the stopped search.
+        self.token = None
+        self.done = True
         self._soulseek_streaming = False
         self.stop_btn.Hide()
         self.search_btn.Enable()
@@ -1799,6 +1799,7 @@ class SearchPanel(wx.Panel):
         if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
+        self.stop_btn.Hide()
         # yt-dlp hands back everything at once; music results arrived per site.
         source = soulseek_backend.SOURCE if _is_soulseek_engine(engine) else ""
         self._add_site(token, engine, source, items)
