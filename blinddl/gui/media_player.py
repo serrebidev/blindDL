@@ -18,7 +18,7 @@ import wx.media
 
 
 def _configure_vlc():
-    """Point python-vlc at a bundled or WinGet-installed native runtime."""
+    """Point python-vlc at a bundled or OS-installed native runtime."""
     roots = []
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
@@ -29,14 +29,21 @@ def _configure_vlc():
             os.path.join(os.environ.get(name, ""), "VideoLAN", "VLC")
             for name in ("ProgramFiles", "ProgramFiles(x86)")
         )
+    elif sys.platform == "darwin":
+        roots.extend([
+            "/Applications/VLC.app/Contents/MacOS",
+            os.path.expanduser("~/Applications/VLC.app/Contents/MacOS"),
+        ])
     for root in roots:
         if sys.platform == "win32":
             library = os.path.join(root, "libvlc.dll")
             plugins = os.path.join(root, "plugins")
         elif sys.platform == "darwin":
-            library = os.path.join(root, "vlc", "lib", "libvlc.dylib")
-            core = os.path.join(root, "vlc", "lib", "libvlccore.dylib")
-            plugins = os.path.join(root, "vlc", "plugins")
+            bundled = os.path.join(root, "vlc")
+            vlc_root = bundled if os.path.isdir(bundled) else root
+            library = os.path.join(vlc_root, "lib", "libvlc.dylib")
+            core = os.path.join(vlc_root, "lib", "libvlccore.dylib")
+            plugins = os.path.join(vlc_root, "plugins")
             if not os.path.isfile(core):
                 continue
             try:

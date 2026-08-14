@@ -45,6 +45,18 @@ def prepare_runtime_path() -> None:
         for package_pattern, executable in package_tools:
             matches = package_root.glob(f"{package_pattern}/**/{executable}")
             candidates.extend(path.parent for path in matches if path.is_file())
+    else:
+        candidates.extend([
+            Path.home() / ".deno" / "bin",
+            Path.home() / ".local" / "bin",
+            Path("/usr/local/bin"),
+        ])
+        if sys.platform == "darwin":
+            candidates.extend([
+                Path("/opt/homebrew/bin"),
+                Path("/usr/local/bin"),
+                Path("/Applications/VLC.app/Contents/MacOS"),
+            ])
     available = [str(path) for path in candidates if path.is_dir()]
     if available:
         os.environ["PATH"] = os.pathsep.join(available + [os.environ.get("PATH", "")])

@@ -8,11 +8,11 @@ Covers everything the app relies on:
 - Python packages (pip): yt-dlp, wxPython, python-vlc, ytmusicapi,
   and the rest of requirements.txt. Side B is not among them -- it is
   vendored in ./sideb and travels with blindDL's own releases.
-- Deno, FFmpeg/FFprobe, Node.js and VLC: installed through WinGet on Windows.
+- Deno, FFmpeg/FFprobe, Node.js and VLC: installed through WinGet, Homebrew,
+  or the Linux system package manager.
 
-Source checkouts can upgrade Deno and ffmpeg through winget when available.
-Windows frozen releases install large native tools in the background instead
-of duplicating them in every BlindDL update. All functions are synchronous and
+Frozen releases install large native tools in the background instead of
+duplicating them in every BlindDL update. All functions are synchronous and
 intended for worker threads; progress goes to a log callback. Nothing here runs
 at import time.
 """
@@ -85,6 +85,44 @@ WINGET_PACKAGES = {
         "Node.js LTS (music-source JavaScript)", ("node",)),
     "VideoLAN.VLC": (
         "VLC media player (audio preview)", ("vlc",)),
+}
+HOMEBREW_PACKAGES = {
+    "DenoLand.Deno": ("deno", False),
+    "Gyan.FFmpeg.Essentials": ("ffmpeg", False),
+    "OpenJS.NodeJS.LTS": ("node", False),
+    "VideoLAN.VLC": ("vlc", True),
+}
+LINUX_PACKAGES = {
+    "apt-get": {
+        "Gyan.FFmpeg.Essentials": "ffmpeg",
+        "OpenJS.NodeJS.LTS": "nodejs",
+        "VideoLAN.VLC": "vlc",
+    },
+    "dnf": {
+        "Gyan.FFmpeg.Essentials": "ffmpeg",
+        "OpenJS.NodeJS.LTS": "nodejs",
+        "VideoLAN.VLC": "vlc",
+    },
+    "pacman": {
+        "Gyan.FFmpeg.Essentials": "ffmpeg",
+        "OpenJS.NodeJS.LTS": "nodejs",
+        "VideoLAN.VLC": "vlc",
+    },
+    "zypper": {
+        "Gyan.FFmpeg.Essentials": "ffmpeg",
+        "OpenJS.NodeJS.LTS": "nodejs",
+        "VideoLAN.VLC": "vlc",
+    },
+}
+DENO_CHANNEL_URL = "https://dl.deno.land/release-latest.txt"
+DENO_RELEASE_URL = "https://dl.deno.land/release/{version}/{asset}.zip"
+DENO_TARGETS = {
+    ("windows", "amd64"): "deno-x86_64-pc-windows-msvc",
+    ("windows", "arm64"): "deno-aarch64-pc-windows-msvc",
+    ("linux", "amd64"): "deno-x86_64-unknown-linux-gnu",
+    ("linux", "arm64"): "deno-aarch64-unknown-linux-gnu",
+    ("darwin", "amd64"): "deno-x86_64-apple-darwin",
+    ("darwin", "arm64"): "deno-aarch64-apple-darwin",
 }
 _external_tools_lock = threading.Lock()
 
@@ -489,6 +527,93 @@ def _find_winget():
     return None
 
 
+def _find_brew():
+    found = shutil.which("brew")
+    if found:
+        return found
+    for candidate in (Path("/opt/homebrew/bin/brew"), Path("/usr/local/bin/brew")):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _find_linux_package_manager():
+    for manager in LINUX_PACKAGES:
+        found = shutil.which(manager)
+        if found:
+            return manager, found
+    return None, None
+
+
+def _linux_elevation(log):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return []
+    sudo = shutil.which("sudo")
+    if sudo:
+        try:
+            probe = subprocess.run(
+                [sudo, "-n", "true"], capture_output=True, timeout=10,
+                **_subprocess_options(),
+            )
+            if probe.returncode == 0:
+                return [sudo, "-n"]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    pkexec = shutil.which("pkexec")
+    if pkexec:
+        log("The operating system may request permission to install media tools.")
+        return [pkexec]
+    log("No non-interactive administrator helper is available.")
+    return None
+
+
+def _install_deno_user(log):
+    """Install Deno under the current user's home without Python or admin rights."""
+    arches = {
+        "amd64": "amd64", "x86_64": "amd64", "x64": "amd64",
+        "aarch64": "arm64", "arm64": "arm64",
+    }
+    system = platform.system().lower()
+    arch = arches.get(platform.machine().lower())
+    asset = DENO_TARGETS.get((system, arch))
+    if not asset:
+        log(f"No automatic Deno package exists for {system} {platform.machine()}.")
+        return False
+    try:
+        with _open_url(DENO_CHANNEL_URL, timeout=120) as response:
+            version = response.read().decode("utf-8").strip()
+        if version.lstrip("v").split(".")[0] != "2":
+            log(f"Deno's release channel returned unsupported version {version}.")
+            return False
+        url = DENO_RELEASE_URL.format(version=version, asset=asset)
+        destination = Path.home() / ".deno" / "bin"
+        destination.mkdir(parents=True, exist_ok=True)
+        archive = destination / "deno-download.zip"
+        log(f"Installing Deno {version} for the current user...")
+        with _open_url(url, timeout=180) as response:
+            archive.write_bytes(response.read())
+        with zipfile.ZipFile(archive) as bundle:
+            name = next(
+                (item for item in bundle.namelist()
+                 if Path(item).name in {"deno", "deno.exe"}),
+                None,
+            )
+            if name is None:
+                raise UpdateError("The Deno archive did not contain its executable.")
+            binary = destination / Path(name).name
+            binary.write_bytes(bundle.read(name))
+            binary.chmod(
+                binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            )
+        archive.unlink(missing_ok=True)
+        from .runtime import prepare_runtime_path
+        prepare_runtime_path()
+        return _tool_available("deno")
+    except (OSError, UpdateError, URLError, zipfile.BadZipFile) as exc:
+        log(f"Could not install Deno for the current user: {exc}")
+        return False
+
+
 def _tool_available(tool):
     from .runtime import prepare_runtime_path
 
@@ -497,15 +622,26 @@ def _tool_available(tool):
         return shutil.which(tool) is not None
     if shutil.which("vlc") is not None:
         return True
-    roots = [
-        Path(os.environ.get(name, "")) / "VideoLAN" / "VLC"
-        for name in ("ProgramFiles", "ProgramFiles(x86)")
-    ]
-    return any((root / "libvlc.dll").is_file() for root in roots)
+    if sys.platform == "win32":
+        roots = [
+            Path(os.environ.get(name, "")) / "VideoLAN" / "VLC"
+            for name in ("ProgramFiles", "ProgramFiles(x86)")
+        ]
+        return any((root / "libvlc.dll").is_file() for root in roots)
+    if sys.platform == "darwin":
+        return any(path.is_file() for path in (
+            Path("/Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib"),
+            Path.home() / "Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib",
+        ))
+    try:
+        import ctypes.util
+        return ctypes.util.find_library("vlc") is not None
+    except (ImportError, OSError):
+        return False
 
 
 def missing_external_tools(package_ids=None):
-    """Return WinGet package IDs whose executable payload is unavailable."""
+    """Return native package IDs whose executable payload is unavailable."""
     wanted = package_ids or WINGET_PACKAGES
     return [
         package_id for package_id in wanted
@@ -514,29 +650,73 @@ def missing_external_tools(package_ids=None):
 
 
 def ensure_external_tools(log, package_ids=None):
-    """Silently install missing large Windows runtimes through WinGet."""
-    if sys.platform != "win32":
-        return True
+    """Install missing native runtimes with the current OS package manager."""
     wanted = tuple(package_ids or WINGET_PACKAGES)
     with _external_tools_lock:
         missing = missing_external_tools(wanted)
         if not missing:
             return True
-        winget = _find_winget()
-        if winget is None:
-            log("WinGet is unavailable; required download tools could not be installed.")
-            return False
         ok = True
-        for package_id in missing:
-            description = WINGET_PACKAGES[package_id][0]
-            log(f"Installing {description} in the background...")
-            installed = _run([
-                winget, "install", "--id", package_id, "--exact",
-                "--source", "winget", "--silent",
-                "--accept-package-agreements", "--accept-source-agreements",
-                "--disable-interactivity",
-            ], log)
-            ok = installed and ok
+        if sys.platform == "win32":
+            winget = _find_winget()
+            if winget is None:
+                log("WinGet is unavailable; required download tools could not be installed.")
+                return False
+            for package_id in missing:
+                description = WINGET_PACKAGES[package_id][0]
+                log(f"Installing {description} in the background...")
+                ok = _run([
+                    winget, "install", "--id", package_id, "--exact",
+                    "--source", "winget", "--silent",
+                    "--accept-package-agreements", "--accept-source-agreements",
+                    "--disable-interactivity",
+                ], log) and ok
+        elif sys.platform == "darwin":
+            brew = _find_brew()
+            for package_id in missing:
+                description = WINGET_PACKAGES[package_id][0]
+                package, is_cask = HOMEBREW_PACKAGES[package_id]
+                log(f"Installing {description} in the background...")
+                if brew:
+                    command = [brew, "install"]
+                    if is_cask:
+                        command.append("--cask")
+                    ok = _run([*command, package], log) and ok
+                elif package_id == "DenoLand.Deno":
+                    ok = _install_deno_user(log) and ok
+                else:
+                    log("Homebrew is unavailable; this native tool could not be installed.")
+                    ok = False
+        elif sys.platform.startswith("linux"):
+            if "DenoLand.Deno" in missing:
+                ok = _install_deno_user(log) and ok
+            native = [item for item in missing if item != "DenoLand.Deno"]
+            if native:
+                manager, executable = _find_linux_package_manager()
+                elevation = _linux_elevation(log)
+                if not manager or not executable or elevation is None:
+                    log("A supported Linux package manager is unavailable.")
+                    ok = False
+                else:
+                    packages = list(dict.fromkeys(
+                        LINUX_PACKAGES[manager][item] for item in native
+                    ))
+                    if manager == "apt-get":
+                        ok = _run([*elevation, executable, "update"], log) and ok
+                        command = [*elevation, executable, "install", "-y",
+                                   "--no-install-recommends", *packages]
+                    elif manager == "dnf":
+                        command = [*elevation, executable, "install", "-y", *packages]
+                    elif manager == "pacman":
+                        command = [*elevation, executable, "-S", "--needed",
+                                   "--noconfirm", *packages]
+                    else:
+                        command = [*elevation, executable, "--non-interactive",
+                                   "install", *packages]
+                    ok = _run(command, log) and ok
+        else:
+            log(f"Automatic native-tool installation is unsupported on {sys.platform}.")
+            return False
         still_missing = missing_external_tools(wanted)
         if still_missing:
             log("Still missing: " + ", ".join(
@@ -616,22 +796,24 @@ def update_winget_packages(log):
                 "--silent", "--accept-package-agreements",
                 "--accept-source-agreements", "--disable-interactivity",
             ], log)
-    elif sys.platform == "darwin" and shutil.which("brew"):
-        _run(["brew", "upgrade", "deno", "ffmpeg"], log)
+    elif sys.platform == "darwin" and _find_brew():
+        brew = _find_brew()
+        _run([brew, "upgrade", "deno", "ffmpeg", "node"], log)
+        _run([brew, "upgrade", "--cask", "vlc"], log)
+    elif sys.platform.startswith("linux"):
+        ensure_external_tools(log)
+        deno = shutil.which("deno")
+        if deno:
+            _run([deno, "upgrade"], log)
     else:
-        log("Deno and ffmpeg are managed by the installed package on this system.")
+        log("Native tools are managed by the installed package on this system.")
 
 
 def ensure_deno(log):
     """Make sure Deno is installed at all (yt-dlp needs it for YouTube)."""
     if _tool_available("deno"):
         return True
-    if sys.platform == "win32":
-        return ensure_external_tools(log, ("DenoLand.Deno",))
-    if sys.platform == "darwin" and shutil.which("brew"):
-        return _run(["brew", "install", "deno"], log)
-    log("Deno is unavailable; install it from https://deno.com/runtime")
-    return False
+    return ensure_external_tools(log, ("DenoLand.Deno",))
 
 
 def run_full_update(log, include_winget=True):

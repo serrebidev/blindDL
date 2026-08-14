@@ -114,28 +114,6 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Install Deno
-        run: python scripts/install_deno.py
-      - name: Install native tools
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          if brew tap | grep -qx 'aws/tap'; then
-            brew untap aws/tap
-          fi
-          brew install ffmpeg
-          # As on Windows, the build refuses to package without libVLC, so a
-          # flaky cask download is caught here rather than three steps later.
-          for attempt in 1 2 3; do
-            brew install --cask vlc || true
-            if [ -f /Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib ]; then
-              break
-            fi
-            echo "VLC is missing after attempt $attempt; retrying."
-            sleep 30
-          done
-          test -f /Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib
       - name: Install Python dependencies
         run: |
           install() {
@@ -171,8 +149,6 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
-    env:
-      BLINDDL_BUNDLE_FFMPEG: "0"
     steps:
       - name: Install system build dependencies
         run: |
@@ -181,11 +157,9 @@ jobs:
             ca-certificates curl git unzip \
             python3 python3-dev python3-pip python3-venv python3-wxgtk4.0 \
             python3-wxgtk-media4.0 \
-            binutils patchelf dpkg-dev ffmpeg libvlc5 vlc-plugin-base \
+            binutils patchelf dpkg-dev \
             libgtk-3-0t64 libnotify4 xvfb xauth
       - uses: actions/checkout@v7
-      - name: Install Deno
-        run: python3 scripts/install_deno.py
       - name: Install Python dependencies
         run: |
           python3 -m venv --system-site-packages .venv

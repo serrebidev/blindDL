@@ -73,9 +73,11 @@ def _self_test(output_path: str) -> int:
     check("soulseek", soulseek_runtime)
 
     frozen_root = Path(getattr(sys, "_MEIPASS", ""))
-    windows_external_tools = (
-        sys.platform == "win32" and not (frozen_root / "libvlc.dll").is_file()
+    bundled_vlc = (
+        (frozen_root / "libvlc.dll").is_file()
+        or (frozen_root / "vlc" / "lib" / "libvlc.dylib").is_file()
     )
+    external_tools = bool(getattr(sys, "frozen", False) and not bundled_vlc)
 
     def vlc_runtime():
         from .gui.media_player import vlc
@@ -92,8 +94,8 @@ def _self_test(output_path: str) -> int:
         finally:
             instance.release()
 
-    if windows_external_tools:
-        results["vlc"] = "installed silently through WinGet on first run"
+    if external_tools:
+        results["vlc"] = "installed automatically through the OS on first run"
     else:
         check("vlc", vlc_runtime)
 
@@ -140,9 +142,9 @@ def _self_test(output_path: str) -> int:
         version = (completed.stdout or completed.stderr).splitlines()
         return f"{path}: {version[0] if version else 'started successfully'}"
 
-    if windows_external_tools:
+    if external_tools:
         for tool in ("deno", "ffmpeg", "ffprobe", "node"):
-            results[tool] = "installed silently through WinGet on first run"
+            results[tool] = "installed automatically through the OS on first run"
     else:
         for tool in ("deno", "ffmpeg", "ffprobe"):
             check(tool, lambda tool=tool: executable_runtime(tool))

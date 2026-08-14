@@ -14,7 +14,13 @@ from . import APP_NAME
 
 
 def app_data_dir():
-    path = user_config_dir(APP_NAME, appauthor=False, roaming=True)
+    # Release self-tests and managed deployments can isolate state without
+    # changing the user's real roaming profile. This is read at call time so
+    # a frozen process respects the environment supplied by its launcher.
+    path = os.environ.get("BLINDDL_APP_DATA_DIR") or user_config_dir(
+        APP_NAME, appauthor=False, roaming=True
+    )
+    path = os.path.abspath(os.path.expanduser(path))
     os.makedirs(path, exist_ok=True)
     return path
 

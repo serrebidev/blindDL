@@ -83,7 +83,7 @@ The installer sets BlindDL up for your user account and obtains native media lib
 2. Install dependencies: `pip install -r requirements.txt`
 3. Launch it: `python main.py`
 
-On Debian-family Linux, install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`, `ffmpeg`, `libvlc5`, `vlc-plugin-base`, and `git` first, then create the virtual environment with `--system-site-packages`. On Windows, BlindDL installs Deno, FFmpeg, Node.js LTS, and VLC with WinGet; on macOS, it uses Homebrew when available.
+On Debian-family Linux, source developers install `python3-wxgtk4.0`, `python3-wxgtk-media4.0`, and `git` first, then create the virtual environment with `--system-site-packages`. Released builds need no Python: BlindDL provisions Deno, FFmpeg, Node.js LTS, and VLC in a background worker through WinGet on Windows, Homebrew on macOS, or the Linux system package manager. The Linux `.deb` declares the native packages as dependencies and the portable installer installs them automatically. Deno has a user-local fallback that needs no administrator access. An operating-system authorization prompt can still appear when Linux or macOS requires permission to install system software.
 
 ## Searching
 

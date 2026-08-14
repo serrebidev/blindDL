@@ -64,13 +64,24 @@ class ConfigLoadTests(unittest.TestCase):
 
         self.assertEqual(config["update_check_hours"], 48)
 
-    def test_updates_are_not_installed_behind_the_users_back(self):
-        # Finishing an update restarts blindDL, so it is opt-in even though
-        # checking for one is not.
+    def test_automatic_updates_are_enabled_by_default(self):
+        # auto_install_update is a legacy compatibility key; auto_update now
+        # controls the complete scheduled download/install/restart workflow.
         config = self._load({})
 
         self.assertTrue(config["auto_update"])
         self.assertFalse(config["auto_install_update"])
+
+    def test_environment_can_isolate_application_state(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        isolated = Path(temporary.name) / "managed-state"
+        with mock.patch.dict(
+            config_module.os.environ,
+            {"BLINDDL_APP_DATA_DIR": str(isolated)},
+        ):
+            self.assertEqual(Path(config_module.app_data_dir()), isolated.resolve())
+        self.assertTrue(isolated.is_dir())
 
     def test_deezer_format_defaults_to_flac(self):
         config = self._load({})

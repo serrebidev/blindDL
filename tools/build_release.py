@@ -70,9 +70,11 @@ def verify_application() -> None:
     else:
         executable = DIST / "blindDL" / "blindDL"
     report_path = BUILD / "frozen-self-test.json"
+    report_path.unlink(missing_ok=True)
     self_test_data = BUILD / "self-test-data"
     self_test_data.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
+    environment["BLINDDL_APP_DATA_DIR"] = str(self_test_data / "app-data")
     if sys.platform == "win32":
         environment["APPDATA"] = str(self_test_data / "roaming")
         environment["LOCALAPPDATA"] = str(self_test_data / "local")
@@ -90,6 +92,9 @@ def verify_application() -> None:
         environment["XDG_CONFIG_HOME"] = str(self_test_data / "config")
         environment["XDG_CACHE_HOME"] = str(self_test_data / "cache")
         environment["XDG_STATE_HOME"] = str(self_test_data / "state")
+        # Native media tools are intentionally supplied by Homebrew or the
+        # Linux package manager on the user's machine, not by the application.
+        environment["PATH"] = "/usr/bin:/bin"
     print("+", executable, "--self-test", report_path, flush=True)
     completed = subprocess.run(
         [str(executable), "--self-test", str(report_path)],
@@ -242,7 +247,7 @@ def package_deb(app_version: str) -> Path:
         f"Architecture: {deb_arch}\n"
         f"Installed-Size: {installed_kib}\n"
         f"Maintainer: serrebidev\n"
-        f"Depends: ffmpeg, libvlc5, vlc-plugin-base, python3-wxgtk-media4.0, libgtk-3-0 | libgtk-3-0t64, libnotify4 | libnotify4t64\n"
+        f"Depends: ffmpeg, nodejs, libvlc5, vlc-plugin-base, python3-wxgtk-media4.0, libgtk-3-0 | libgtk-3-0t64, libnotify4 | libnotify4t64\n"
         f"Homepage: https://github.com/serrebidev/blindDL\n"
         f"Description: Accessible cross-platform media downloader\n"
         f" blindDL provides keyboard and screen-reader accessible media search,\n"

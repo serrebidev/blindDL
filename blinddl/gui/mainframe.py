@@ -766,9 +766,7 @@ class MainFrame(wx.Frame):
     # -- automatic dependency updates -------------------------------------------
 
     def _external_dependencies_worker(self):
-        """Install large native Windows tools without blocking the window."""
-        if sys.platform != "win32":
-            return
+        """Install large native tools without blocking the accessible UI."""
         try:
             missing = updater.missing_external_tools()
             if not missing:
@@ -781,7 +779,7 @@ class MainFrame(wx.Frame):
             else:
                 wx.CallAfter(
                     self.announce,
-                    "Some download tools could not be installed with WinGet. "
+                    "Some download tools could not be installed automatically. "
                     "Use Help, Check for updates to try again.",
                 )
         except Exception:  # noqa: BLE001 - background best effort

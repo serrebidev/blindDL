@@ -61,6 +61,59 @@ def test_missing_external_tools_are_installed_silently_with_winget():
         assert "--disable-interactivity" in command
 
 
+def test_missing_macos_tools_are_installed_with_homebrew():
+    wanted = ("Gyan.FFmpeg.Essentials", "VideoLAN.VLC")
+    with mock.patch.object(updater.sys, "platform", "darwin"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              side_effect=[list(wanted), []]), \
+            mock.patch.object(updater, "_find_brew",
+                              return_value="/opt/homebrew/bin/brew"), \
+            mock.patch.object(updater, "_run", return_value=True) as run:
+        assert updater.ensure_external_tools(lambda _line: None, wanted)
+
+    assert run.call_args_list[0].args[0] == [
+        "/opt/homebrew/bin/brew", "install", "ffmpeg"
+    ]
+    assert run.call_args_list[1].args[0] == [
+        "/opt/homebrew/bin/brew", "install", "--cask", "vlc"
+    ]
+
+
+def test_missing_linux_tools_are_installed_in_one_package_manager_call():
+    wanted = ("Gyan.FFmpeg.Essentials", "OpenJS.NodeJS.LTS", "VideoLAN.VLC")
+    with mock.patch.object(updater.sys, "platform", "linux"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              side_effect=[list(wanted), []]), \
+            mock.patch.object(updater, "_find_linux_package_manager",
+                              return_value=("apt-get", "/usr/bin/apt-get")), \
+            mock.patch.object(updater, "_linux_elevation",
+                              return_value=["/usr/bin/pkexec"]), \
+            mock.patch.object(updater, "_run", return_value=True) as run:
+        assert updater.ensure_external_tools(lambda _line: None, wanted)
+
+    assert run.call_args_list[0].args[0] == [
+        "/usr/bin/pkexec", "/usr/bin/apt-get", "update"
+    ]
+    install = run.call_args_list[1].args[0]
+    assert install[:5] == [
+        "/usr/bin/pkexec", "/usr/bin/apt-get", "install", "-y",
+        "--no-install-recommends",
+    ]
+    assert install[5:] == ["ffmpeg", "nodejs", "vlc"]
+
+
+def test_macos_deno_falls_back_to_a_user_install_without_homebrew():
+    wanted = ("DenoLand.Deno",)
+    with mock.patch.object(updater.sys, "platform", "darwin"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              side_effect=[list(wanted), []]), \
+            mock.patch.object(updater, "_find_brew", return_value=None), \
+            mock.patch.object(updater, "_install_deno_user",
+                              return_value=True) as install:
+        assert updater.ensure_external_tools(lambda _line: None, wanted)
+    install.assert_called_once()
+
+
 def test_installed_windows_update_uses_a_silent_restart_helper(tmp_path):
     package = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
     package.write_bytes(b"installer")

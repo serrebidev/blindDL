@@ -38,10 +38,7 @@ datas = [
 ]
 binaries = []
 hiddenimports = []
-BUNDLE_EXTERNAL_TOOLS = (
-    sys.platform != "win32"
-    or os.environ.get("BLINDDL_BUNDLE_EXTERNAL_TOOLS", "0") == "1"
-)
+BUNDLE_EXTERNAL_TOOLS = os.environ.get("BLINDDL_BUNDLE_EXTERNAL_TOOLS", "0") == "1"
 
 # Keep optional-at-runtime backends and their complete dependency trees in the
 # standalone application.  PyInstaller can otherwise miss modules imported by
@@ -50,7 +47,8 @@ for package in (
     # YouTube needs more than yt_dlp's importable Python modules: extractor
     # plugins, the EJS solver's minified JavaScript, and WebSocket support all
     # load dynamically at runtime. Windows obtains the native JS runtimes
-    # through WinGet instead of duplicating them in every release archive.
+    # through the operating system instead of duplicating them in every
+    # release archive.
     "yt_dlp",
     "yt_dlp_ejs",
     "websockets",
@@ -299,6 +297,8 @@ def collect_vlc_runtime():
         if (root / "COPYING.txt").is_file():
             datas.append((str(root / "COPYING.txt"), "."))
     elif sys.platform == "darwin":
+        if not BUNDLE_EXTERNAL_TOOLS:
+            return
         root = Path(os.environ.get(
             "BLINDDL_VLC_ROOT", "/Applications/VLC.app/Contents/MacOS"))
         lib_dir = root / "lib"
@@ -315,7 +315,7 @@ def collect_vlc_runtime():
 
 
 collect_vlc_runtime()
-if (sys.platform == "darwin" or BUNDLE_EXTERNAL_TOOLS) and not any(
+if BUNDLE_EXTERNAL_TOOLS and not any(
     Path(source).name.lower() in {"libvlc.dll", "libvlc.dylib"}
     for source, _destination in binaries
 ):
