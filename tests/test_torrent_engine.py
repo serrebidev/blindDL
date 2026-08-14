@@ -202,6 +202,25 @@ class ProgressTests(unittest.TestCase):
             _Status(state="downloading_metadata", rate=0))
         self.assertEqual(info["state"], "Fetching torrent details")
 
+    def test_pausing_never_deletes_partial_torrent_data(self):
+        current = mock.Mock()
+        torrent = mock.Mock()
+        current.add.return_value = torrent
+        cancel = threading.Event()
+        pause = threading.Event()
+        cancel.set()
+        pause.set()
+        config = {"torrent_delete_partial": True}
+
+        with mock.patch.object(torrent_engine, "engine", return_value=current):
+            with self.assertRaises(torrent_engine.TorrentDownloadCancelled):
+                torrent_engine.download(
+                    {"title": "Paused"}, "output", config,
+                    cancel_event=cancel, keep_partial_event=pause,
+                )
+
+        current.remove.assert_called_once_with(torrent, delete_files=False)
+
 
 class RatioTests(unittest.TestCase):
     def test_ratio_is_measured_against_the_torrent_not_this_session(self):

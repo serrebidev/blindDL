@@ -13,6 +13,7 @@ node with its whole subfolder tree, and every file is shown, not only media.
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -299,11 +300,11 @@ class LibraryPanel(wx.Panel):
         list_box = wx.BoxSizer(wx.VERTICAL)
         self.path_label = wx.StaticText(self, label="Folder contents:")
         list_box.Add(self.path_label, 0, wx.BOTTOM, 4)
-        self.list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        self.list = wx.ListCtrl(self, style=wx.LC_REPORT)
         self.list.SetName("Library folder contents")
         self.list.SetHelpText(
-            "Enter opens a folder or plays the selected file. Context Menu "
-            "opens actions."
+            "Select one or more folders or files. Enter opens the focused "
+            "item. Context Menu opens actions."
         )
         for index, heading in enumerate(("Name", "Type", "Size")):
             self.list.InsertColumn(index, heading)
@@ -544,6 +545,18 @@ class LibraryPanel(wx.Panel):
         row = self.list.GetFirstSelected()
         return self._visible[row] if 0 <= row < len(self._visible) else None
 
+    def _selected_rows(self):
+        rows = []
+        row = self.list.GetFirstSelected()
+        while row != -1:
+            rows.append(row)
+            row = self.list.GetNextSelected(row)
+        return rows
+
+    def _selected_entries(self):
+        return [self._visible[row] for row in self._selected_rows()
+                if 0 <= row < len(self._visible)]
+
     # -- actions -------------------------------------------------------------
 
     def on_list_activated(self, event):
@@ -557,10 +570,14 @@ class LibraryPanel(wx.Panel):
             self._open_file(entry)
 
     def on_play_selected(self, event):
-        entry = self._selected_entry()
-        if entry is None:
+        entries = self._selected_entries()
+        if not entries:
             self.frame.announce("Select a library folder or file first.")
             return
+        if len(entries) != 1:
+            self.frame.announce("Select one library item to open or play.")
+            return
+        entry = entries[0]
         if entry["type"] == "folder":
             self._select_folder(entry["norm"])
         else:
@@ -588,42 +605,139 @@ class LibraryPanel(wx.Panel):
         open_file(path)
 
     def on_context_menu(self, event):
-        position = event.GetPosition()
-        if position != wx.DefaultPosition:
-            row, _flags = self.list.HitTest(self.list.ScreenToClient(position))
-            if row >= 0:
-                self.list.Select(row)
-                self.list.Focus(row)
-        entry = self._selected_entry()
+        self._target_context_item(event)
+        entries = self._selected_entries()
+        entry = entries[0] if len(entries) == 1 else None
         menu = wx.Menu()
-        if entry is not None and entry["type"] == "folder":
-            open_item = menu.Append(wx.ID_ANY, "&Open folder")
-            menu.Bind(
-                wx.EVT_MENU,
-                lambda event, norm=entry["norm"]: self._select_folder(norm),
-                open_item,
-            )
-        else:
-            play = menu.Append(
-                wx.ID_ANY,
-                "&Open"
-                if (entry is not None and entry["kind"] == KIND_BOOK)
-                else "&Play",
-            )
-            open_location = menu.Append(wx.ID_ANY, "Open file &location")
-            play.Enable(entry is not None)
-            open_location.Enable(entry is not None)
-            menu.Bind(wx.EVT_MENU, self.on_play_selected, play)
-            menu.Bind(wx.EVT_MENU, self._on_open_location, open_location)
+        open_item = menu.Append(wx.ID_ANY, "&Play or open")
+        show_location = menu.Append(wx.ID_ANY, "Show in &folder")
+        copy_paths = menu.Append(wx.ID_ANY, "Copy &path")
+        menu.AppendSeparator()
+        delete = menu.Append(wx.ID_ANY, "&Delete selected...")
+        menu.AppendSeparator()
         refresh_item = menu.Append(wx.ID_ANY, "&Refresh library")
+        select_all = menu.Append(wx.ID_ANY, "Select &all")
+        clear = menu.Append(wx.ID_ANY, "Clear &selection")
+        open_item.Enable(entry is not None)
+        show_location.Enable(entry is not None)
+        copy_paths.Enable(bool(entries))
+        delete.Enable(bool(entries) and all(self._can_delete(item)
+                                            for item in entries))
+        clear.Enable(bool(entries))
+        select_all.Enable(
+            self.list.GetSelectedItemCount() < self.list.GetItemCount())
+        menu.Bind(wx.EVT_MENU, self.on_play_selected, open_item)
+        menu.Bind(wx.EVT_MENU, self._on_open_location, show_location)
+        menu.Bind(wx.EVT_MENU, self._on_copy_paths, copy_paths)
+        menu.Bind(wx.EVT_MENU, self._on_delete, delete)
         menu.Bind(wx.EVT_MENU, self.on_refresh, refresh_item)
+        menu.Bind(wx.EVT_MENU, self._on_select_all, select_all)
+        menu.Bind(wx.EVT_MENU, self._on_clear_selection, clear)
         self.list.PopupMenu(menu)
         menu.Destroy()
 
+    def _target_context_item(self, event):
+        position = event.GetPosition()
+        if position == wx.DefaultPosition:
+            if not self._selected_rows():
+                focused = self.list.GetFocusedItem()
+                if focused >= 0:
+                    self.list.Select(focused)
+            return
+        row, _flags = self.list.HitTest(self.list.ScreenToClient(position))
+        if row < 0 or self.list.IsSelected(row):
+            return
+        for selected in self._selected_rows():
+            self.list.Select(selected, False)
+        self.list.Focus(row)
+        self.list.Select(row)
+
     def _on_open_location(self, event):
-        entry = self._selected_entry()
-        if entry is not None and entry["type"] == "file":
-            open_folder(os.path.dirname(entry["path"]))
+        entries = self._selected_entries()
+        if len(entries) == 1:
+            entry = entries[0]
+            path = entry["path"]
+            open_folder(path if entry["type"] == "folder"
+                        else os.path.dirname(path))
+
+    def _on_copy_paths(self, event):
+        entries = self._selected_entries()
+        if not entries:
+            return
+        if wx.TheClipboard.Open():
+            try:
+                wx.TheClipboard.SetData(wx.TextDataObject(
+                    os.linesep.join(entry["path"] for entry in entries)
+                ))
+            finally:
+                wx.TheClipboard.Close()
+            self.frame.announce(
+                f"Copied {len(entries)} path{'s' if len(entries) != 1 else ''}.")
+
+    def _can_delete(self, entry):
+        path = _norm(entry.get("path", ""))
+        if not path or path in self._root_norms:
+            return False
+        for root in self.roots:
+            try:
+                if os.path.commonpath((root, path)) == root:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    def _on_delete(self, event):
+        entries = [entry for entry in self._selected_entries()
+                   if self._can_delete(entry)]
+        if not entries:
+            self.frame.announce("No selected library items can be deleted.")
+            return
+        answer = wx.MessageBox(
+            f"Permanently delete {len(entries)} selected library "
+            f"item{'s' if len(entries) != 1 else ''}?",
+            "Delete library items", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            self,
+        )
+        if answer != wx.YES:
+            return
+
+        def work():
+            deleted = 0
+            first_error = ""
+            for entry in entries:
+                path = entry["path"]
+                try:
+                    if entry["type"] == "folder" and not os.path.islink(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                    deleted += 1
+                except OSError as exc:
+                    first_error = first_error or str(exc)
+
+            def finish():
+                suffix = f" First error: {first_error}" if first_error else ""
+                self.frame.announce(
+                    f"Deleted {deleted} library item"
+                    f"{'s' if deleted != 1 else ''}.{suffix}"
+                )
+                self.refresh(announce=False)
+            wx.CallAfter(finish)
+
+        threading.Thread(target=work, daemon=True,
+                         name="blinddl-library-delete").start()
+
+    def _on_select_all(self, event):
+        for row in range(self.list.GetItemCount()):
+            self.list.Select(row)
+        count = self.list.GetSelectedItemCount()
+        self.frame.announce(
+            f"Selected {count} library item{'s' if count != 1 else ''}.")
+
+    def _on_clear_selection(self, event):
+        for row in self._selected_rows():
+            self.list.Select(row, False)
+        self.frame.announce("Selection cleared.")
 
     def shutdown(self):
         self._alive = False

@@ -43,6 +43,14 @@ hiddenimports = []
 # standalone application.  PyInstaller can otherwise miss modules imported by
 # pydantic settings or UPnP adapters only after Soulseek is enabled.
 for package in (
+    # YouTube needs more than yt_dlp's importable Python modules: extractor
+    # plugins, the EJS solver's minified JavaScript, WebSocket support, and
+    # musicdl's embedded Node executable all load dynamically at runtime.
+    "yt_dlp",
+    "yt_dlp_ejs",
+    "nodejs_wheel",
+    "websockets",
+    "curl_cffi",
     "mutagen",
     "audiobooker",
     "mediavocab",
@@ -213,6 +221,10 @@ def find_tool(tool_name):
     tool_path = shutil.which(tool_name)
     if tool_path or sys.platform != "win32":
         return tool_path
+    if tool_name == "deno":
+        deno = Path.home() / ".deno" / "bin" / "deno.exe"
+        if deno.is_file():
+            return str(deno)
     package_root = Path(ORIGINAL_LOCALAPPDATA) / "Microsoft" / "WinGet" / "Packages"
     matches = sorted(package_root.glob(f"*/**/{tool_name}.exe"))
     return str(matches[-1]) if matches else None

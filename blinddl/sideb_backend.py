@@ -231,7 +231,7 @@ def download(url, out_dir, config, event_cb=None):
 
     summary = asyncio.run(_run())
     if summary.succeeded:
-        return
+        return str(summary.succeeded[0].filepath or "")
     if summary.failed:
         raise RuntimeError(f"Side B: {summary.failed[0].error}")
     reason = (summary.skipped[0].skipped_reason

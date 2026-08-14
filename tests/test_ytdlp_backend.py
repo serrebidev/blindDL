@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: MIT
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest import mock
 
 import yt_dlp
@@ -182,6 +184,31 @@ class YtDlpBackendTests(unittest.TestCase):
             _YoutubeDL.instances[0].downloaded,
             ["https://example.invalid/video"],
         )
+
+    def test_download_returns_the_finished_path_for_queue_actions(self):
+        class _FinishedDL(_YoutubeDL):
+            def download(self, urls):
+                super().download(urls)
+                path = str(Path(self.options["test_output"]) / "video.mp4")
+                Path(path).write_bytes(b"video")
+                self.options["postprocessor_hooks"][0]({
+                    "status": "finished", "filepath": path,
+                })
+
+        with tempfile.TemporaryDirectory() as folder:
+            class _ConfiguredFinishedDL(_FinishedDL):
+                def __init__(self, options):
+                    options["test_output"] = folder
+                    super().__init__(options)
+
+            with mock.patch.object(
+                    ytdlp_backend.yt_dlp, "YoutubeDL", _ConfiguredFinishedDL):
+                result = ytdlp_backend.download(
+                    "https://example.invalid/video", folder,
+                    audio_only=False,
+                )
+
+        self.assertEqual(result, str(Path(folder) / "video.mp4"))
 
     def test_video_preview_resolves_one_progressive_stream(self):
         with mock.patch.object(

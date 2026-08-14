@@ -16,6 +16,7 @@ import enum
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -38,12 +39,18 @@ from .config import app_data_dir
 
 STATUS_QUEUED = "Queued"
 STATUS_DOWNLOADING = "Downloading"
+STATUS_PAUSED = "Paused"
 STATUS_DONE = "Done"
 STATUS_ERROR = "Error"
 STATUS_CANCELLED = "Cancelled"
 
-ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_DOWNLOADING)
+ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_DOWNLOADING, STATUS_PAUSED)
 FINISHED_STATUSES = (STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED)
+
+PAUSABLE_KINDS = frozenset({
+    "adult", "applemusic", "archive", "audiobook", "book", "soulseek",
+    "torrent", "ytdlp",
+})
 
 ADD_QUEUED = "queued"
 ADD_RESUMED = "resumed"
@@ -141,11 +148,16 @@ class DownloadItem:
         self.speed = ""
         self.eta = ""
         self.error = ""
+        self.result_path = ""
         # Finished in-app torrents continue uploading after their download
         # row says Done.  Persisting this flag lets the engine reattach them
         # from libtorrent's resume data after a restart.
         self.seeding = False
         self.cancel_event = threading.Event()
+        # Torrent cancellation may delete partial data according to Settings;
+        # pausing must always preserve it, so this intent is separate.
+        self.pause_event = threading.Event()
+        self.pause_requested = False
         self._last_notify = 0.0
         # Transient result of the most recent attempt to add this item.  It is
         # intentionally not persisted; callers can use it to announce whether
@@ -183,6 +195,7 @@ class DownloadQueue:
         self._status_counts = {
             STATUS_DOWNLOADING: 0,
             STATUS_QUEUED: 0,
+            STATUS_PAUSED: 0,
             STATUS_DONE: 0,
             STATUS_ERROR: 0,
             STATUS_CANCELLED: 0,
@@ -415,6 +428,7 @@ class DownloadQueue:
                 existing.eta = ""
                 existing.seeding = False
                 existing.cancel_event.clear()
+                existing.pause_requested = False
                 existing.add_action = ADD_RESUMED
                 item = existing
                 changed = True
@@ -525,10 +539,125 @@ class DownloadQueue:
         if item is None:
             return
         item.cancel_event.set()
-        if item.status == STATUS_QUEUED:
+        item.pause_requested = False
+        item.pause_event.clear()
+        if item.status in (STATUS_QUEUED, STATUS_PAUSED):
             item.status = STATUS_CANCELLED
             self._save_state()
             self._notify(item)
+
+    def pause(self, item_id):
+        """Pause a queued or cancellable running download for later resume."""
+        item = self._find(item_id)
+        if item is None or item.status not in (STATUS_QUEUED, STATUS_DOWNLOADING):
+            return False
+        if item.status == STATUS_DOWNLOADING and item.kind not in PAUSABLE_KINDS:
+            return False
+        with self._cond:
+            # Recheck under the worker's lock so a queued item cannot start
+            # between the eligibility check and this transition.
+            if item.status not in (STATUS_QUEUED, STATUS_DOWNLOADING):
+                return False
+            item.pause_requested = True
+            item.pause_event.set()
+            item.cancel_event.set()
+            queued = item.status == STATUS_QUEUED
+            if queued:
+                item.status = STATUS_PAUSED
+        if queued:
+            self._save_state()
+            self._notify(item)
+        return True
+
+    def resume(self, item_id):
+        """Resume a paused download, preserving backend partial data."""
+        item = self._find(item_id)
+        if item is None or item.status != STATUS_PAUSED:
+            return False
+        with self._cond:
+            item.pause_requested = False
+            item.pause_event.clear()
+            item.cancel_event.clear()
+            item.status = STATUS_QUEUED
+            item.error = ""
+            self._cond.notify_all()
+        self._save_state()
+        self._notify(item)
+        return True
+
+    def retry(self, item_id):
+        """Restart a finished download, preserving reusable partial data."""
+        item = self._find(item_id)
+        if item is None or item.status not in FINISHED_STATUSES or item.seeding:
+            return False
+        with self._cond:
+            item.pause_requested = False
+            item.pause_event.clear()
+            item.cancel_event.clear()
+            item.status = STATUS_QUEUED
+            item.error = ""
+            item.speed = ""
+            item.eta = ""
+            item.percent = 0.0
+            self._cond.notify_all()
+        self._save_state()
+        self._notify(item)
+        return True
+
+    def remove(self, item_id, delete_data=False):
+        """Remove a non-running queue row and optionally its known result."""
+        item = self._find(item_id)
+        if item is None or item.status == STATUS_DOWNLOADING or item.seeding:
+            return False
+        if delete_data and not self._delete_result(item):
+            return False
+        with self._cond:
+            try:
+                self.items.remove(item)
+            except ValueError:
+                return False
+            self._rebuild_counts_locked()
+        self._save_state()
+        return True
+
+    def can_delete_data(self, item):
+        return bool(self._safe_result_path(item))
+
+    def _safe_result_path(self, item):
+        value = str(getattr(item, "result_path", "") or "").strip()
+        if not value:
+            return ""
+        target = os.path.abspath(value)
+        roots = []
+        download_root = str(self.config.get("download_dir") or "").strip()
+        if download_root:
+            roots.append(os.path.abspath(download_root))
+        torrent_root = str(self.config.get("torrent_dir") or "").strip()
+        if torrent_root:
+            roots.append(os.path.abspath(torrent_root))
+        for root in roots:
+            try:
+                if (root and target != root
+                        and os.path.commonpath((root, target)) == root):
+                    return target
+            except ValueError:
+                continue
+        return ""
+
+    def _delete_result(self, item):
+        target = self._safe_result_path(item)
+        if not target:
+            return False
+        try:
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return True
 
     def remove_finished(self):
         with self._cond:
@@ -601,7 +730,8 @@ class DownloadQueue:
         with self._cond:
             return (
                 self._status_counts[STATUS_DOWNLOADING],
-                self._status_counts[STATUS_QUEUED],
+                self._status_counts[STATUS_QUEUED]
+                + self._status_counts[STATUS_PAUSED],
                 self._status_counts[STATUS_DONE],
                 self._status_counts[STATUS_ERROR]
                 + self._status_counts[STATUS_CANCELLED],
@@ -689,6 +819,7 @@ class DownloadQueue:
             "status": item.status,
             "percent": item.percent,
             "error": item.error,
+            "result_path": item.result_path,
             "seeding": item.seeding,
         }
         try:
@@ -724,6 +855,7 @@ class DownloadQueue:
         item.id = str(record.get("id") or uuid.uuid4().hex)
         item.percent = max(0.0, min(100.0, float(record.get("percent") or 0)))
         item.error = str(record.get("error") or "")
+        item.result_path = str(record.get("result_path") or "")
         item.seeding = bool(record.get("seeding", False))
         status = str(record.get("status") or STATUS_QUEUED)
         if payload_type == "unavailable":
@@ -741,7 +873,12 @@ class DownloadQueue:
             # transfer again. Upgrade that saved error row on the next launch.
             item.status = STATUS_QUEUED
             item.error = ""
-        elif status in ACTIVE_STATUSES:
+        elif status == STATUS_PAUSED:
+            item.status = STATUS_PAUSED
+            item.pause_requested = True
+            item.pause_event.set()
+            item.cancel_event.set()
+        elif status in (STATUS_QUEUED, STATUS_DOWNLOADING):
             item.status = STATUS_QUEUED
         elif status == STATUS_DONE and item.kind == "torrent" and item.seeding \
                 and resume_seeds:
@@ -845,25 +982,27 @@ class DownloadQueue:
             self._notify(item)
             try:
                 if item.kind == "ytdlp":
-                    self._run_ytdlp(item)
+                    result = self._run_ytdlp(item)
                 elif item.kind == "sideb":
-                    self._run_sideb(item)
+                    result = self._run_sideb(item)
                 elif item.kind == "adult":
-                    self._run_adult(item)
+                    result = self._run_adult(item)
                 elif item.kind == "book":
-                    self._run_book(item)
+                    result = self._run_book(item)
                 elif item.kind == "audiobook":
-                    self._run_audiobook(item)
+                    result = self._run_audiobook(item)
                 elif item.kind == "archive":
-                    self._run_archive(item)
+                    result = self._run_archive(item)
                 elif item.kind == "soulseek":
-                    self._run_soulseek(item)
+                    result = self._run_soulseek(item)
                 elif item.kind == "torrent":
-                    self._run_torrent(item)
+                    result = self._run_torrent(item)
                 elif item.kind == "applemusic":
-                    self._run_applemusic(item)
+                    result = self._run_applemusic(item)
                 else:
-                    self._run_musicdl(item)
+                    result = self._run_musicdl(item)
+                if isinstance(result, (str, os.PathLike)):
+                    item.result_path = os.fspath(result)
                 item.percent = 100.0
                 item.status = STATUS_DONE
                 # Every completed blindDL download lives in the default
@@ -876,15 +1015,20 @@ class DownloadQueue:
                     archive_backend.ArchiveDownloadCancelled,
                     soulseek_backend.SoulseekDownloadCancelled,
                     torrent_engine.TorrentDownloadCancelled):
-                item.status = STATUS_CANCELLED
+                item.status = (STATUS_PAUSED if item.pause_requested
+                               else STATUS_CANCELLED)
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
-                if item.cancel_event.is_set():
+                if item.pause_requested:
+                    item.status = STATUS_PAUSED
+                elif item.cancel_event.is_set():
                     item.status = STATUS_CANCELLED
                 else:
                     item.status = STATUS_ERROR
                     item.error = str(exc)
             item.speed = ""
             item.eta = ""
+            if item.status == STATUS_PAUSED:
+                item.cancel_event.set()
             self._save_state()
             self._notify(item)
 
@@ -908,7 +1052,7 @@ class DownloadQueue:
             item.update_from_ytdlp(d)
             self._notify(item, throttle=True)
 
-        ytdlp_backend.download(
+        return ytdlp_backend.download(
             item.payload,
             self._out_dir(item),
             audio_only=item.audio_only,
@@ -923,7 +1067,12 @@ class DownloadQueue:
     def _run_musicdl(self, item):
         # musicdl exposes no progress callbacks; the item stays in the
         # indeterminate "Downloading" state until it returns.
-        musicdl_backend.download(item.payload, self._out_dir(item))
+        downloaded = musicdl_backend.download(item.payload, self._out_dir(item))
+        if isinstance(downloaded, (list, tuple)) and len(downloaded) == 1:
+            path = getattr(downloaded[0], "save_path", "")
+            if path:
+                return os.fspath(path)
+        return ""
 
     def _run_sideb(self, item):
         # An ARL unlocks Deezer's original MP3 320/FLAC stream. Only fall back
@@ -932,8 +1081,7 @@ class DownloadQueue:
         # visible so a broken ARL does not fail silently.
         if (self.config["deezer_arl"] or "").strip():
             try:
-                self._run_deezer(item)
-                return
+                return self._run_deezer(item)
             except deezer_backend.DeezerQualityError:
                 pass
 
@@ -951,12 +1099,12 @@ class DownloadQueue:
                 item.percent = 100.0
                 self._notify(item)
 
-        sideb_backend.download(
+        return sideb_backend.download(
             item.payload, self._out_dir(item), self.config,
             event_cb=on_event)
 
     def _run_applemusic(self, item):
-        applemusic_backend.download(
+        return applemusic_backend.download(
             item.payload, self._out_dir(item), self.config,
             cancel_event=item.cancel_event)
 
@@ -979,7 +1127,7 @@ class DownloadQueue:
                             max(total_bytes - downloaded, 0) / rate)
             self._notify(item, throttle=True)
 
-        adult_backend.download(
+        return adult_backend.download(
             item.payload, self._out_dir(item), progress_cb=progress,
             cancel_event=item.cancel_event, video_format=item.video_format)
 
@@ -997,7 +1145,7 @@ class DownloadQueue:
                         max(total - downloaded, 0) / rate)
             self._notify(item, throttle=True)
 
-        book_backend.download(
+        return book_backend.download(
             item.payload, self._out_dir(item), self.config,
             progress_cb=progress, cancel_event=item.cancel_event)
 
@@ -1015,7 +1163,7 @@ class DownloadQueue:
                         max(total - downloaded, 0) / rate)
             self._notify(item, throttle=True)
 
-        audiobook_backend.download(
+        return audiobook_backend.download(
             item.payload, self._out_dir(item), progress_cb=progress,
             cancel_event=item.cancel_event)
 
@@ -1033,7 +1181,7 @@ class DownloadQueue:
                         max(total - downloaded, 0) / rate)
             self._notify(item, throttle=True)
 
-        archive_backend.download(
+        return archive_backend.download(
             item.payload, self._out_dir(item), progress_cb=progress,
             cancel_event=item.cancel_event)
 
@@ -1059,10 +1207,10 @@ class DownloadQueue:
         attempt = 0
         while True:
             try:
-                soulseek_backend.download(
+                result = soulseek_backend.download(
                     item.payload, self.config, progress_cb=progress,
                     cancel_event=item.cancel_event)
-                return
+                return result
             except soulseek_backend.SoulseekSettingsChanged:
                 if item.cancel_event.is_set():
                     raise soulseek_backend.SoulseekDownloadCancelled() from None
@@ -1096,8 +1244,7 @@ class DownloadQueue:
 
     def _run_torrent(self, item):
         if self.config.get("torrent_engine") and torrent_engine.available():
-            self._run_torrent_engine(item)
-            return
+            return self._run_torrent_engine(item)
         # With the engine off, blindDL does not move torrent bytes; the user's
         # own client does. Handing over the magnet is the whole job, so this
         # finishes at once and the queue row records that the link went out.
@@ -1128,10 +1275,12 @@ class DownloadQueue:
 
         item.speed = "Starting torrent"
         self._notify(item)
-        torrent_engine.download(
+        result = torrent_engine.download(
             item.payload, self._out_dir(item), self.config,
-            progress_cb=progress, cancel_event=item.cancel_event)
+            progress_cb=progress, cancel_event=item.cancel_event,
+            keep_partial_event=item.pause_event)
         item.seeding = True
+        return result
 
     def _run_deezer(self, item):
         started = time.monotonic()
@@ -1146,6 +1295,6 @@ class DownloadQueue:
                 item.eta = ytdlp_backend.format_duration(remaining / rate)
             self._notify(item, throttle=True)
 
-        deezer_backend.download(
+        return deezer_backend.download(
             item.payload, self._out_dir(item), self.config,
             progress_cb=progress, cancel_event=item.cancel_event)

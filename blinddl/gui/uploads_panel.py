@@ -11,10 +11,12 @@ past every completed transfer to reach it answers something else.
 """
 
 import threading
+import os
 
 import wx
 
 from .. import soulseek_backend, torrent_engine
+from ..runtime import open_folder
 
 
 def _size(value):
@@ -42,12 +44,15 @@ class UploadsPanel(wx.Panel):
         active_label = wx.StaticText(self, label="&Uploads:")
         self.list = self._make_list(
             "Uploads and torrent seeding",
-            "Shows files other people are downloading from your Soulseek shares and torrents you seed. Context Menu stops selected uploads."
+            "Shows files other people are downloading from your Soulseek "
+            "shares and torrents you seed. Select one or more items; Context "
+            "Menu opens actions."
         )
         finished_label = wx.StaticText(self, label="&Finished uploads:")
         self.finished_list = self._make_list(
             "Finished uploads",
-            "Uploads that completed, failed or were stopped."
+            "Uploads that completed, failed or were stopped. Select one or "
+            "more items; Context Menu opens actions."
         )
         sizer.Add(active_label, 0, wx.LEFT | wx.TOP, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.ALL, 8)
@@ -178,12 +183,179 @@ class UploadsPanel(wx.Panel):
     def on_menu(self, event):
         control = (self.finished_list if event.GetEventObject() is
                    self.finished_list else self.list)
+        self._target_context_item(event, control)
+        selected = self._selected(control)
         menu = wx.Menu()
+        resume = menu.Append(wx.ID_ANY, "&Start or resume selected uploads")
+        pause = menu.Append(wx.ID_ANY, "&Pause selected uploads")
         stop = menu.Append(wx.ID_ANY, "&Stop selected uploads")
-        stop.Enable(any(row.get("active") for row in self._selected(control)))
+        menu.AppendSeparator()
+        show = menu.Append(wx.ID_ANY, "Show data in &folder")
+        remove = menu.Append(wx.ID_ANY, "&Remove from list")
+        delete_data = menu.Append(wx.ID_ANY, "&Delete with data...")
+        clear = menu.Append(wx.ID_ANY, "Clear &finished uploads")
+        menu.AppendSeparator()
+        select_all = menu.Append(wx.ID_ANY, "Select &all")
+        clear_selection = menu.Append(wx.ID_ANY, "Clear &selection")
+        resume.Enable(any(row.get("paused") for row in selected))
+        pause.Enable(any(row.get("active") and not row.get("paused")
+                         for row in selected))
+        stop.Enable(any(row.get("active") for row in selected))
+        show.Enable(len(selected) == 1 and bool(selected[0].get("path")))
+        remove.Enable(bool(selected))
+        delete_data.Enable(bool(selected) and all(
+            row.get("service") == "BitTorrent" or row.get("path")
+            for row in selected
+        ))
+        clear.Enable(bool(self._finished_rows))
+        select_all.Enable(
+            control.GetSelectedItemCount() < control.GetItemCount())
+        clear_selection.Enable(bool(selected))
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_resume(e, control), resume)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_pause(e, control), pause)
         menu.Bind(wx.EVT_MENU, lambda e: self.on_stop(e, control), stop)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_show_folder(e, control), show)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_remove(e, control), remove)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_delete_data(e, control),
+                  delete_data)
+        menu.Bind(wx.EVT_MENU, self.on_clear_finished, clear)
+        menu.Bind(wx.EVT_MENU, lambda e: self._select_all(control), select_all)
+        menu.Bind(wx.EVT_MENU, lambda e: self._clear_selection(control),
+                  clear_selection)
         control.PopupMenu(menu)
         menu.Destroy()
+
+    def _selected_rows(self, control):
+        rows = []
+        row = control.GetFirstSelected()
+        while row != -1:
+            rows.append(row)
+            row = control.GetNextSelected(row)
+        return rows
+
+    def _target_context_item(self, event, control):
+        position = event.GetPosition()
+        if position == wx.DefaultPosition:
+            if not self._selected_rows(control):
+                focused = control.GetFocusedItem()
+                if focused >= 0:
+                    control.Select(focused)
+            return
+        row, _flags = control.HitTest(control.ScreenToClient(position))
+        if row < 0 or control.IsSelected(row):
+            return
+        for selected in self._selected_rows(control):
+            control.Select(selected, False)
+        control.Focus(row)
+        control.Select(row)
+
+    def _select_all(self, control):
+        for row in range(control.GetItemCount()):
+            control.Select(row)
+        count = control.GetSelectedItemCount()
+        self.frame.announce(f"Selected {count} upload{'s' if count != 1 else ''}.")
+
+    def _clear_selection(self, control):
+        for row in self._selected_rows(control):
+            control.Select(row, False)
+        self.frame.announce("Selection cleared.")
+
+    def _run_action(self, rows, action, message):
+        def work():
+            succeeded = 0
+            errors = []
+            for row in rows:
+                try:
+                    succeeded += bool(action(row))
+                except Exception as exc:  # noqa: BLE001 - reported in the GUI
+                    errors.append(str(exc))
+            def finish():
+                self._signature = None
+                self.refresh()
+                suffix = f" First error: {errors[0]}" if errors else ""
+                self.frame.announce(message(succeeded) + suffix)
+            wx.CallAfter(finish)
+        threading.Thread(target=work, daemon=True,
+                         name="blinddl-upload-action").start()
+
+    @staticmethod
+    def _service_action(row, torrent_action, soulseek_action):
+        if row.get("service") == "BitTorrent":
+            return torrent_action(row.get("key", ""))
+        if row.get("service") == soulseek_backend.SOURCE:
+            return soulseek_action(row.get("key", ""))
+        return False
+
+    def on_pause(self, event=None, control=None):
+        rows = [row for row in self._selected(control)
+                if row.get("active") and not row.get("paused")]
+        self._run_action(
+            rows,
+            lambda row: self._service_action(
+                row, torrent_engine.pause_seeding, soulseek_backend.pause_upload),
+            lambda count: f"Paused {count} upload{'s' if count != 1 else ''}.",
+        )
+
+    def on_resume(self, event=None, control=None):
+        rows = [row for row in self._selected(control) if row.get("paused")]
+        self._run_action(
+            rows,
+            lambda row: self._service_action(
+                row, torrent_engine.resume_seeding,
+                soulseek_backend.resume_upload),
+            lambda count: f"Resumed {count} upload{'s' if count != 1 else ''}.",
+        )
+
+    def on_show_folder(self, event=None, control=None):
+        rows = self._selected(control)
+        if len(rows) == 1 and rows[0].get("path"):
+            path = os.path.abspath(rows[0]["path"])
+            open_folder(path if os.path.isdir(path) else os.path.dirname(path))
+
+    def on_remove(self, event=None, control=None):
+        rows = self._selected(control)
+        self._run_action(
+            rows, self._remove_row,
+            lambda count: f"Removed {count} upload{'s' if count != 1 else ''}.",
+        )
+
+    def _remove_row(self, row, delete_data=False):
+        if row.get("service") == "BitTorrent":
+            key = row.get("key", "")
+            removed = (torrent_engine.delete_seed(key) if delete_data
+                       else torrent_engine.stop_seeding(key))
+            if removed:
+                self.frame.queue.mark_torrent_stopped(key, row.get("title", ""))
+            return removed
+        if row.get("service") == soulseek_backend.SOURCE:
+            return soulseek_backend.remove_upload(
+                row.get("key", ""), delete_data=delete_data)
+        return False
+
+    def on_delete_data(self, event=None, control=None):
+        rows = self._selected(control)
+        if not rows:
+            return
+        answer = wx.MessageBox(
+            f"Permanently delete the data for {len(rows)} selected "
+            f"upload{'s' if len(rows) != 1 else ''}? For Soulseek, this "
+            "deletes the shared source file.",
+            "Delete upload data", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            self,
+        )
+        if answer != wx.YES:
+            return
+        self._run_action(
+            rows, lambda row: self._remove_row(row, delete_data=True),
+            lambda count: f"Deleted data for {count} upload{'s' if count != 1 else ''}.",
+        )
+
+    def on_clear_finished(self, event=None):
+        rows = list(self._finished_rows)
+        self._run_action(
+            rows, self._remove_row,
+            lambda count: f"Cleared {count} finished upload{'s' if count != 1 else ''}.",
+        )
 
     def on_stop(self, event=None, control=None):
         rows = [row for row in self._selected(control) if row.get("active")]

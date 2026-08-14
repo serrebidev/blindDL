@@ -22,6 +22,7 @@ from blinddl.downloader import (
     STATUS_DONE,
     STATUS_DOWNLOADING,
     STATUS_ERROR,
+    STATUS_PAUSED,
     STATUS_QUEUED,
 )
 from musicdl.modules.utils.data import SongInfo
@@ -62,6 +63,59 @@ class DownloadPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(restored.items[0].payload["picture"], b"small")
         self.assertEqual(restored.items[0].id, active.id)
+
+    def test_pause_resume_and_persist_queued_download(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            item = queue.add_ytdlp("https://example.invalid/media", "Media")
+
+            self.assertTrue(queue.pause(item.id))
+            self.assertEqual(item.status, STATUS_PAUSED)
+            self.assertTrue(item.cancel_event.is_set())
+
+            restored = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            paused = restored.items[0]
+            self.assertEqual(paused.status, STATUS_PAUSED)
+            self.assertTrue(paused.cancel_event.is_set())
+            self.assertTrue(restored.resume(paused.id))
+            self.assertEqual(paused.status, STATUS_QUEUED)
+            self.assertFalse(paused.cancel_event.is_set())
+
+    def test_remove_with_data_deletes_only_a_known_result(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = self.config()
+            config["download_dir"] = folder
+            queue = DownloadQueue(config, None, state_path="", start_workers=False)
+            item = DownloadItem("Book", "book", {})
+            item.status = STATUS_DONE
+            result = Path(folder) / "book.epub"
+            result.write_bytes(b"book")
+            item.result_path = str(result)
+            queue.items = [item]
+
+            self.assertTrue(queue.can_delete_data(item))
+            self.assertTrue(queue.remove(item.id, delete_data=True))
+            self.assertFalse(result.exists())
+            self.assertEqual(queue.items, [])
+
+    def test_delete_data_refuses_the_download_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = self.config()
+            config["download_dir"] = folder
+            queue = DownloadQueue(config, None, state_path="", start_workers=False)
+            item = DownloadItem("Unsafe", "archive", {})
+            item.status = STATUS_DONE
+            item.result_path = folder
+            queue.items = [item]
+
+            self.assertFalse(queue.can_delete_data(item))
+            self.assertFalse(queue.remove(item.id, delete_data=True))
+            self.assertIn(item, queue.items)
 
     def test_saved_soulseek_settings_error_is_automatically_requeued(self):
         with tempfile.TemporaryDirectory() as folder:

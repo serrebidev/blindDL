@@ -1110,6 +1110,50 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(folder, "")
         self.assertIsNone(file_path)
 
+    def test_library_supports_multi_selection_and_deletes_selected_files(self):
+        class ImmediateThread:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [os.path.join(folder, name) for name in ("one.mp3", "two.mp3")]
+            for path in paths:
+                Path(path).write_bytes(b"audio")
+            panel = LibraryPanel(self.host, self.frame)
+            panel._visible = [
+                {
+                    "type": "file", "name": os.path.basename(path),
+                    "path": path, "kind": "Audio", "size": 5,
+                }
+                for path in paths
+            ]
+            panel.roots = [os.path.normcase(os.path.abspath(folder))]
+            panel._root_norms = set(panel.roots)
+            panel.list.DeleteAllItems()
+            for row, path in enumerate(paths):
+                panel.list.InsertItem(row, os.path.basename(path))
+                panel.list.Select(row)
+
+            self.assertEqual(len(panel._selected_entries()), 2)
+            with (
+                mock.patch.object(wx, "MessageBox", return_value=wx.YES),
+                mock.patch(
+                    "blinddl.gui.library_panel.threading.Thread",
+                    ImmediateThread,
+                ),
+                mock.patch.object(wx, "CallAfter", side_effect=lambda fn: fn()),
+                mock.patch.object(panel, "refresh") as refresh,
+            ):
+                panel._on_delete(None)
+
+            self.assertFalse(any(os.path.exists(path) for path in paths))
+            refresh.assert_called_once_with(announce=False)
+            panel.shutdown()
+            panel.Destroy()
+
     def test_search_queues_adult_api_result(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ADULT
@@ -1684,7 +1728,7 @@ class GuiInteractionTests(unittest.TestCase):
         )
         panel.on_engine_changed(wx.CommandEvent())
 
-        with mock.patch.object(threading, "Thread") as worker:
+        with mock.patch.object(threading, "Thread"):
             panel.on_search(None)
 
         # The search has no deadline and never mentions a timeout.

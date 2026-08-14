@@ -397,10 +397,11 @@ def _key_for(atp):
 class _Torrent:
     """One torrent the engine is looking after."""
 
-    def __init__(self, key, handle, title):
+    def __init__(self, key, handle, title, save_path=""):
         self.key = key
         self.handle = handle
         self.title = title
+        self.save_path = os.fspath(save_path)
         # Set once the payload is complete; seeding limits run from it.
         self.finished_at = 0.0
         self.stopping = False
@@ -474,7 +475,9 @@ class TorrentEngine:
             except RuntimeError as exc:
                 raise TorrentEngineError(
                     f"libtorrent refused that torrent: {exc}") from exc
-            torrent = _Torrent(key, handle, str(item.get("title") or "Torrent"))
+            torrent = _Torrent(
+                key, handle, str(item.get("title") or "Torrent"), save_path
+            )
             self._torrents[key] = torrent
         return torrent
 
@@ -547,6 +550,37 @@ class TorrentEngine:
         self.remove(torrent)
         return True
 
+    def pause_seeding(self, key):
+        with self._lock:
+            torrent = self._torrents.get(str(key or "").lower())
+        if torrent is None:
+            return False
+        try:
+            torrent.handle.pause()
+        except RuntimeError:
+            return False
+        return True
+
+    def resume_seeding(self, key):
+        with self._lock:
+            torrent = self._torrents.get(str(key or "").lower())
+        if torrent is None:
+            return False
+        try:
+            torrent.handle.resume()
+        except RuntimeError:
+            return False
+        return True
+
+    def delete_seed(self, key):
+        """Stop one seed and ask libtorrent to delete its payload files."""
+        with self._lock:
+            torrent = self._torrents.get(str(key or "").lower())
+        if torrent is None:
+            return False
+        self.remove(torrent, delete_files=True)
+        return True
+
     def seeding(self):
         """[(key, title, ratio, upload_rate)] for everything still seeding."""
         with self._lock:
@@ -588,18 +622,21 @@ class TorrentEngine:
         for torrent, status in statuses:
             ratio = _ratio(status)
             peers = max(0, int(getattr(status, "num_peers", 0) or 0))
+            paused = bool(getattr(status, "paused", False))
             rows.append(
                 {
                     "key": torrent.key,
                     "title": torrent.title,
                     "service": "BitTorrent",
                     "peer": f"{peers} peer" if peers == 1 else f"{peers} peers",
-                    "status": "Seeding",
+                    "status": "Paused" if paused else "Seeding",
                     "uploaded": int(getattr(status, "all_time_upload", 0) or 0),
                     "total": int(getattr(status, "total_wanted", 0) or 0),
                     "ratio": ratio,
                     "speed": float(getattr(status, "upload_rate", 0) or 0),
                     "active": True,
+                    "paused": paused,
+                    "path": torrent.save_path,
                     "error": "",
                     "started_at": torrent.finished_at,
                     "completed_at": None,
@@ -796,6 +833,24 @@ def stop_seeding(key):
     return current.stop_seeding(key)
 
 
+def pause_seeding(key):
+    with _engine_lock:
+        current = _engine
+    return current.pause_seeding(key) if current is not None else False
+
+
+def resume_seeding(key):
+    with _engine_lock:
+        current = _engine
+    return current.resume_seeding(key) if current is not None else False
+
+
+def delete_seed(key):
+    with _engine_lock:
+        current = _engine
+    return current.delete_seed(key) if current is not None else False
+
+
 def seeding():
     with _engine_lock:
         current = _engine
@@ -818,7 +873,8 @@ def save_path_for(config, fallback_dir):
     return path or fallback_dir
 
 
-def download(item, out_dir, config, progress_cb=None, cancel_event=None):
+def download(item, out_dir, config, progress_cb=None, cancel_event=None,
+             keep_partial_event=None):
     """Download one torrent, blocking until its files are complete.
 
     Returns the folder the data was saved in. Seeding carries on afterwards
@@ -836,7 +892,12 @@ def download(item, out_dir, config, progress_cb=None, cancel_event=None):
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
-            current.remove(torrent, delete_files=delete_partial)
+            keep_partial = (
+                keep_partial_event is not None and keep_partial_event.is_set()
+            )
+            current.remove(
+                torrent, delete_files=delete_partial and not keep_partial
+            )
             raise TorrentDownloadCancelled()
         try:
             status = torrent.handle.status()
@@ -906,6 +967,9 @@ __all__ = [
     "libtorrent_module",
     "parse_proxy",
     "running",
+    "pause_seeding",
+    "resume_seeding",
+    "delete_seed",
     "save_path_for",
     "seeding",
     "session_settings",

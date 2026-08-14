@@ -1499,7 +1499,7 @@ def download(payload, out_dir, progress_cb=None, cancel_event=None,
     """
     provider_key = payload["provider"]
     if provider_key == BOYFRIEND_KEY:
-        ytdlp_backend.download(
+        return ytdlp_backend.download(
             payload["direct_url"], out_dir, audio_only=False,
             video_format=video_format,
             progress_cb=progress_cb, cancel_event=cancel_event,
@@ -1508,19 +1508,19 @@ def download(payload, out_dir, progress_cb=None, cancel_event=None,
         return
     provider = PROVIDERS[provider_key]
     if provider.download_style == "creator":
-        creator_backend.download(
+        return creator_backend.download(
             payload, out_dir, progress_cb=progress_cb,
             cancel_event=cancel_event,
         )
         return
     if provider.download_style == "aebn":
-        _download_aebn(
+        return _download_aebn(
             payload, out_dir, progress_cb=progress_cb,
             cancel_event=cancel_event,
         )
         return
     if provider.download_style == "ytdlp":
-        ytdlp_backend.download(
+        return ytdlp_backend.download(
             payload["url"], out_dir, audio_only=False,
             video_format=video_format,
             progress_cb=progress_cb, cancel_event=cancel_event,

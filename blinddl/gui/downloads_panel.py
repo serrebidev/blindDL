@@ -12,10 +12,20 @@ the whole of the first list, and the finished ones are out of the way in
 the second until they are wanted.
 """
 
+import os
+
 import wx
 
 from .. import torrent_engine
-from ..downloader import ACTIVE_STATUSES, FINISHED_STATUSES, STATUS_DOWNLOADING
+from ..downloader import (
+    ACTIVE_STATUSES,
+    FINISHED_STATUSES,
+    PAUSABLE_KINDS,
+    STATUS_DOWNLOADING,
+    STATUS_PAUSED,
+    STATUS_QUEUED,
+)
+from ..runtime import open_file, open_folder
 
 COLUMNS = ("Title", "Status", "Progress", "Speed", "ETA", "Error")
 
@@ -32,12 +42,13 @@ class DownloadsPanel(wx.Panel):
         active_label = wx.StaticText(self, label="&Downloads:")
         self.list = self._make_list(
             "Downloads",
-            "Queued and running downloads. Context Menu opens actions.")
+            "Queued and running downloads. Select one or more items; Context "
+            "Menu opens actions.")
         finished_label = wx.StaticText(self, label="&Finished downloads:")
         self.finished_list = self._make_list(
             "Finished downloads",
-            "Downloads that finished, failed or were cancelled. Context "
-            "Menu opens actions.")
+            "Downloads that finished, failed or were cancelled. Select one "
+            "or more items; Context Menu opens actions.")
 
         sizer.Add(active_label, 0, wx.LEFT | wx.TOP, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.ALL, 8)
@@ -151,23 +162,62 @@ class DownloadsPanel(wx.Panel):
         self._target_context_item(event, control)
         selected = self._selected_items(control)
         menu = wx.Menu()
+        start = menu.Append(wx.ID_ANY, "&Start or resume selected")
+        pause = menu.Append(wx.ID_ANY, "&Pause selected")
         cancel = menu.Append(wx.ID_ANY, "&Cancel selected")
+        restart = menu.Append(wx.ID_ANY, "&Restart selected")
         stop_seeding = menu.Append(wx.ID_ANY, "Stop &seeding")
+        menu.AppendSeparator()
+        open_result = menu.Append(wx.ID_ANY, "&Open downloaded item")
+        show_result = menu.Append(wx.ID_ANY, "Show in &folder")
+        menu.AppendSeparator()
+        remove = menu.Append(wx.ID_ANY, "&Remove from list")
+        delete_data = menu.Append(wx.ID_ANY, "&Delete with data...")
         clear_finished = menu.Append(wx.ID_ANY, "Clear &finished")
         menu.AppendSeparator()
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear_selection = menu.Append(wx.ID_ANY, "Clear &selection")
+        start.Enable(any(item.status == STATUS_PAUSED for item in selected))
+        pause.Enable(any(
+            item.status == STATUS_QUEUED or (
+                item.status == STATUS_DOWNLOADING and item.kind in PAUSABLE_KINDS
+            ) for item in selected
+        ))
         cancel.Enable(any(item.status in ACTIVE_STATUSES for item in selected))
+        restart.Enable(any(
+            item.status in FINISHED_STATUSES and not item.seeding
+            for item in selected
+        ))
         stop_seeding.Enable(bool(self._seeding_keys(selected)))
+        paths = [self._result_path(item) for item in selected]
+        open_result.Enable(len(selected) == 1 and bool(paths[0])
+                           if selected else False)
+        show_result.Enable(len(selected) == 1 and bool(paths[0])
+                           if selected else False)
+        removable = [item for item in selected
+                     if item.status != STATUS_DOWNLOADING and not item.seeding]
+        remove.Enable(bool(removable))
+        delete_data.Enable(bool(removable) and all(
+            self.frame.queue.can_delete_data(item) for item in removable
+        ))
         clear_finished.Enable(any(
             item.status in FINISHED_STATUSES and not item.seeding
             for item in self.frame.queue.items))
         clear_selection.Enable(bool(selected))
         select_all.Enable(
             control.GetSelectedItemCount() < control.GetItemCount())
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_resume(e, control), start)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_pause(e, control), pause)
         menu.Bind(wx.EVT_MENU, lambda e: self.on_cancel(e, control), cancel)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_restart(e, control), restart)
         menu.Bind(wx.EVT_MENU, lambda e: self.on_stop_seeding(e, control),
                   stop_seeding)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_open(e, control), open_result)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_show_folder(e, control),
+                  show_result)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_remove(e, control), remove)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_delete_data(e, control),
+                  delete_data)
         menu.Bind(wx.EVT_MENU, self.on_clear, clear_finished)
         menu.Bind(wx.EVT_MENU, lambda e: self._select_all(e, control),
                   select_all)
@@ -175,6 +225,68 @@ class DownloadsPanel(wx.Panel):
                   clear_selection)
         control.PopupMenu(menu)
         menu.Destroy()
+
+    @staticmethod
+    def _result_path(item):
+        path = str(getattr(item, "result_path", "") or "")
+        return path if path and os.path.exists(path) else ""
+
+    def on_resume(self, event, control=None):
+        control = control if control is not None else self.list
+        items = [item for item in self._selected_items(control)
+                 if item.status == STATUS_PAUSED]
+        count = sum(bool(self.frame.queue.resume(item.id)) for item in items)
+        self.frame.announce(f"Resumed {count} download{'s' if count != 1 else ''}.")
+
+    def on_pause(self, event, control=None):
+        control = control if control is not None else self.list
+        items = self._selected_items(control)
+        count = sum(bool(self.frame.queue.pause(item.id)) for item in items)
+        self.frame.announce(f"Pausing {count} download{'s' if count != 1 else ''}.")
+
+    def on_restart(self, event, control=None):
+        control = control if control is not None else self.finished_list
+        items = self._selected_items(control)
+        count = sum(bool(self.frame.queue.retry(item.id)) for item in items)
+        self.frame.announce(f"Restarted {count} download{'s' if count != 1 else ''}.")
+
+    def on_open(self, event, control=None):
+        items = self._selected_items(control or self.finished_list)
+        if len(items) == 1 and (path := self._result_path(items[0])):
+            open_file(path)
+
+    def on_show_folder(self, event, control=None):
+        items = self._selected_items(control or self.finished_list)
+        if len(items) == 1 and (path := self._result_path(items[0])):
+            open_folder(path if os.path.isdir(path) else os.path.dirname(path))
+
+    def on_remove(self, event, control=None):
+        control = control if control is not None else self.finished_list
+        items = self._selected_items(control)
+        count = sum(bool(self.frame.queue.remove(item.id)) for item in items)
+        self.refresh_all()
+        self.frame.announce(f"Removed {count} download{'s' if count != 1 else ''}.")
+
+    def on_delete_data(self, event, control=None):
+        control = control if control is not None else self.finished_list
+        items = [item for item in self._selected_items(control)
+                 if self.frame.queue.can_delete_data(item)]
+        if not items:
+            self.frame.announce("No selected downloads have known data to delete.")
+            return
+        answer = wx.MessageBox(
+            f"Permanently delete the downloaded data for {len(items)} selected "
+            f"download{'s' if len(items) != 1 else ''}?",
+            "Delete download data", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            self,
+        )
+        if answer != wx.YES:
+            return
+        count = sum(bool(self.frame.queue.remove(item.id, delete_data=True))
+                    for item in items)
+        self.refresh_all()
+        self.frame.announce(
+            f"Deleted data for {count} download{'s' if count != 1 else ''}.")
 
     def _select_all(self, event, control=None):
         control = control if control is not None else self.list

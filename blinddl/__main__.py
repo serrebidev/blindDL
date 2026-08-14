@@ -8,6 +8,7 @@ import os
 import getpass
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -109,10 +110,41 @@ def _self_test(output_path: str) -> int:
 
     check("adult_providers", adult_providers)
 
+    def yt_dlp_runtime():
+        from yt_dlp.extractor import gen_extractor_classes
+
+        names = {extractor.IE_NAME for extractor in gen_extractor_classes()}
+        if "youtube" not in names:
+            raise RuntimeError("the YouTube extractor was not bundled")
+        return f"{len(names)} extractors including YouTube"
+
+    check("yt_dlp_extractors", yt_dlp_runtime)
+
+    def executable_runtime(tool):
+        path = shutil.which(tool)
+        if not path:
+            raise RuntimeError(f"{tool} was not found")
+        version_arg = "--version" if tool == "deno" else "-version"
+        completed = subprocess.run(
+            [path, version_arg], capture_output=True, text=True,
+            timeout=15, check=True,
+        )
+        version = (completed.stdout or completed.stderr).splitlines()
+        return f"{path}: {version[0] if version else 'started successfully'}"
+
     for tool in ("deno", "ffmpeg", "ffprobe"):
-        check(tool, lambda tool=tool: shutil.which(tool) or (_ for _ in ()).throw(
-            RuntimeError(f"{tool} was not found")
-        ))
+        check(tool, lambda tool=tool: executable_runtime(tool))
+
+    def node_runtime():
+        from nodejs_wheel.executable import node
+
+        completed = node(
+            ["--version"], return_completed_process=True,
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        return completed.stdout.strip()
+
+    check("embedded_node", node_runtime)
 
     report = {"ok": not failures, "results": results, "failures": failures}
     Path(output_path).write_text(

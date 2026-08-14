@@ -858,7 +858,8 @@ class SearchPanel(wx.Panel):
         self.results_list.cell_provider = self._result_cell
         self.results_list.SetName("Search results")
         self.results_list.SetHelpText(
-            "Select results. Enter downloads; Control C copies the URL; "
+            "Select one or more results. Enter downloads every selection; "
+            "Control C copies URLs; "
             "Context Menu opens actions."
         )
         for i, heading in enumerate(COLUMN_HEADINGS):

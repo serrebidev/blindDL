@@ -610,7 +610,7 @@ def _write_tags(out_path, item):
 def _write_lrc(out_path, item):
     """Write the synced-lyrics sidecar next to the finished file."""
     if item.lyrics is None or not item.lyrics.synced:
-        return
+        return out_path
     try:
         with open(os.path.splitext(out_path)[0] + ".lrc", "w",
                   encoding="utf-8", newline="\n") as handle:
@@ -683,6 +683,7 @@ def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
     _write_lrc(out_path, item)
+    return out_path
 
 
 def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
@@ -705,9 +706,10 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
     if media_type == "song" or info.get("sub_id"):
         media_id = info["sub_id"] or info["media_id"]
         metadata = _catalog_song(api, media_id)
-        _download_song(api, itunes_api, metadata, None, out_dir, cancel_event,
-                       audio_format=audio_format)
-        return
+        return _download_song(
+            api, itunes_api, metadata, None, out_dir, cancel_event,
+            audio_format=audio_format,
+        )
     if media_type == "album":
         collection = _catalog_album(api, info["media_id"])
         kind_name = "Album"
@@ -726,6 +728,7 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
         metadata = _catalog_song(api, _track_id(track))
         _download_song(api, itunes_api, metadata, collection, target_dir,
                        cancel_event, audio_format=audio_format)
+    return target_dir
 
 
 def download_track(url, out_dir, config=None, progress_cb=None,

@@ -956,6 +956,8 @@ class _Service:
             "speed": speed,
             "active": state
             not in {"COMPLETE", "ABORTED", "FAILED", "INCOMPLETE"},
+            "paused": state == "PAUSED",
+            "path": str(getattr(transfer, "local_path", "") or ""),
             "error": str(snapshot.fail_reason or snapshot.abort_reason or ""),
             "started_at": snapshot.start_time,
             "completed_at": snapshot.complete_time,
@@ -1463,6 +1465,57 @@ class _Service:
     def stop_upload(self, key, timeout: float = 30.0):
         return self._submit(self._stop_upload(str(key))).result(timeout=timeout)
 
+    def _find_upload(self, key):
+        client = self._client
+        if client is None:
+            raise SoulseekError("Soulseek is not connected.")
+        transfer = next((
+            item for item in client.transfers.get_uploads()
+            if self._transfer_key(item) == str(key)
+        ), None)
+        return client, transfer
+
+    async def _pause_upload(self, key):
+        client, transfer = self._find_upload(key)
+        if transfer is None:
+            return False
+        await client.transfers.pause(transfer)
+        self._publish_uploads(client)
+        return True
+
+    def pause_upload(self, key, timeout: float = 30.0):
+        return self._submit(self._pause_upload(str(key))).result(timeout=timeout)
+
+    async def _resume_upload(self, key):
+        client, transfer = self._find_upload(key)
+        if transfer is None:
+            return False
+        changed = await transfer.state.queue()
+        self._publish_uploads(client)
+        return bool(changed)
+
+    def resume_upload(self, key, timeout: float = 30.0):
+        return self._submit(self._resume_upload(str(key))).result(timeout=timeout)
+
+    async def _remove_upload(self, key, delete_data=False):
+        client, transfer = self._find_upload(key)
+        if transfer is None:
+            return False
+        path = str(getattr(transfer, "local_path", "") or "")
+        await client.transfers.remove(transfer)
+        if delete_data and path:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        self._publish_uploads(client)
+        return True
+
+    def remove_upload(self, key, delete_data=False, timeout: float = 30.0):
+        return self._submit(
+            self._remove_upload(str(key), delete_data=delete_data)
+        ).result(timeout=timeout)
+
     async def _search(self, snapshot, query, media_kind, timeout_s, stop_event=None,
                       on_batch=None):
         client = await self._configure(snapshot)
@@ -1772,6 +1825,20 @@ def user_profile(username, config, timeout: float = 45.0):
 
 def stop_upload(key, timeout: float = 30.0):
     return _SERVICE.stop_upload(key, timeout=timeout)
+
+
+def pause_upload(key, timeout: float = 30.0):
+    return _SERVICE.pause_upload(key, timeout=timeout)
+
+
+def resume_upload(key, timeout: float = 30.0):
+    return _SERVICE.resume_upload(key, timeout=timeout)
+
+
+def remove_upload(key, delete_data=False, timeout: float = 30.0):
+    return _SERVICE.remove_upload(
+        key, delete_data=delete_data, timeout=timeout
+    )
 
 
 def shutdown():

@@ -338,16 +338,28 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     nothing is re-encoded and the download finishes as soon as the bytes do.
     """
     os.makedirs(out_dir, exist_ok=True)
+    completed_paths = []
 
     def hook(d):
         if cancel_event is not None and cancel_event.is_set():
             raise DownloadCancelled()
         if progress_cb is not None:
             progress_cb(d)
+        if d.get("status") == "finished" and d.get("filename"):
+            completed_paths.append(str(d["filename"]))
+
+    def postprocessor_hook(d):
+        if d.get("status") != "finished":
+            return
+        info = d.get("info_dict") or {}
+        path = d.get("filepath") or info.get("filepath") or info.get("filename")
+        if path:
+            completed_paths.append(str(path))
 
     opts = {
         "outtmpl": os.path.join(out_dir, "%(title).150B [%(id)s].%(ext)s"),
         "progress_hooks": [hook],
+        "postprocessor_hooks": [postprocessor_hook],
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -408,3 +420,7 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         if cancel_event is not None and cancel_event.is_set():
             raise DownloadCancelled()
         raise
+    return next(
+        (path for path in reversed(completed_paths) if os.path.isfile(path)),
+        "",
+    )
