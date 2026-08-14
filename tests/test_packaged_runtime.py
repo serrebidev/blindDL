@@ -61,6 +61,42 @@ def test_missing_external_tools_are_installed_silently_with_winget():
         assert "--disable-interactivity" in command
 
 
+def test_install_progress_names_each_tool_as_it_starts_and_finishes():
+    # What the first-run window shows and speaks. WinGet's own output goes
+    # to the log instead: it is not something a screen reader can sit through.
+    wanted = ("VideoLAN.VLC",)
+    spoken = []
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              side_effect=[list(wanted), [], []]), \
+            mock.patch.object(updater, "_find_winget",
+                              return_value="winget.exe"), \
+            mock.patch.object(updater, "_run", return_value=True):
+        assert updater.ensure_external_tools(
+            lambda _line: None, wanted, progress=spoken.append)
+
+    assert spoken == [
+        "Installing VLC media player (audio preview). This can take a few minutes.",
+        "VLC media player (audio preview) installed.",
+    ]
+
+
+def test_install_progress_says_when_a_tool_did_not_arrive():
+    wanted = ("VideoLAN.VLC",)
+    spoken = []
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "missing_external_tools",
+                              side_effect=[list(wanted), list(wanted),
+                                           list(wanted)]), \
+            mock.patch.object(updater, "_find_winget",
+                              return_value="winget.exe"), \
+            mock.patch.object(updater, "_run", return_value=False):
+        assert updater.ensure_external_tools(
+            lambda _line: None, wanted, progress=spoken.append) is False
+
+    assert spoken[-1] == "VLC media player (audio preview) could not be installed."
+
+
 def test_missing_macos_tools_are_installed_with_homebrew():
     wanted = ("Gyan.FFmpeg.Essentials", "VideoLAN.VLC")
     with mock.patch.object(updater.sys, "platform", "darwin"), \

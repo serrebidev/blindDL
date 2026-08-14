@@ -42,8 +42,14 @@ Grab the latest build from the [Releases page](https://github.com/serrebidev/bli
 
 The installer contains BlindDL's private Python runtime, yt-dlp, libtorrent,
 and all Python application libraries. You do not need to install Python, pip,
-or a torrent client. On first run, the Windows build silently obtains Deno,
-FFmpeg, FFprobe, Node.js LTS, and VLC through WinGet in the background.
+or a torrent client. On first run, the Windows build obtains Deno, FFmpeg,
+FFprobe, Node.js LTS, and VLC through WinGet.
+
+An Installing media tools window opens while that happens. It names each tool
+as its download starts and again when it finishes, and speaks every step, so a
+setup that takes several minutes can be followed rather than waited out. Hide
+closes the window and the installation carries on without it; the result is
+spoken either way.
 
 **Windows portable**
 

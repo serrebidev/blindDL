@@ -649,9 +649,37 @@ def missing_external_tools(package_ids=None):
     ]
 
 
-def ensure_external_tools(log, package_ids=None):
-    """Install missing native runtimes with the current OS package manager."""
+def describe_external_tools(package_ids):
+    """Human names for *package_ids*, in the order they were given."""
+    return [
+        WINGET_PACKAGES[package_id][0] for package_id in package_ids
+        if package_id in WINGET_PACKAGES
+    ]
+
+
+def ensure_external_tools(log, package_ids=None, progress=None):
+    """Install missing native runtimes with the current OS package manager.
+
+    *log* receives everything, including the package manager's own output.
+    *progress* receives only the short sentences worth showing and speaking
+    -- one as each tool starts, one as it finishes -- because a package
+    manager's output is not something a screen reader can be asked to sit
+    through while VLC installs.
+    """
     wanted = tuple(package_ids or WINGET_PACKAGES)
+    say = progress if progress is not None else (lambda _line: None)
+
+    def announce_result(package_id):
+        # Nobody is listening without a progress callback, and the check
+        # costs a PATH walk and a handful of stat calls per package.
+        if progress is None:
+            return
+        description = WINGET_PACKAGES[package_id][0]
+        if missing_external_tools((package_id,)):
+            say(f"{description} could not be installed.")
+        else:
+            say(f"{description} installed.")
+
     with _external_tools_lock:
         missing = missing_external_tools(wanted)
         if not missing:
@@ -661,22 +689,26 @@ def ensure_external_tools(log, package_ids=None):
             winget = _find_winget()
             if winget is None:
                 log("WinGet is unavailable; required download tools could not be installed.")
+                say("WinGet is unavailable, so these tools could not be installed.")
                 return False
             for package_id in missing:
                 description = WINGET_PACKAGES[package_id][0]
-                log(f"Installing {description} in the background...")
+                log(f"Installing {description}...")
+                say(f"Installing {description}. This can take a few minutes.")
                 ok = _run([
                     winget, "install", "--id", package_id, "--exact",
                     "--source", "winget", "--silent",
                     "--accept-package-agreements", "--accept-source-agreements",
                     "--disable-interactivity",
                 ], log) and ok
+                announce_result(package_id)
         elif sys.platform == "darwin":
             brew = _find_brew()
             for package_id in missing:
                 description = WINGET_PACKAGES[package_id][0]
                 package, is_cask = HOMEBREW_PACKAGES[package_id]
-                log(f"Installing {description} in the background...")
+                log(f"Installing {description}...")
+                say(f"Installing {description}. This can take a few minutes.")
                 if brew:
                     command = [brew, "install"]
                     if is_cask:
@@ -687,15 +719,21 @@ def ensure_external_tools(log, package_ids=None):
                 else:
                     log("Homebrew is unavailable; this native tool could not be installed.")
                     ok = False
+                announce_result(package_id)
         elif sys.platform.startswith("linux"):
             if "DenoLand.Deno" in missing:
+                say("Installing Deno. This can take a few minutes.")
                 ok = _install_deno_user(log) and ok
+                announce_result("DenoLand.Deno")
             native = [item for item in missing if item != "DenoLand.Deno"]
             if native:
+                say("Installing " + ", ".join(describe_external_tools(native))
+                    + ". This can take a few minutes.")
                 manager, executable = _find_linux_package_manager()
                 elevation = _linux_elevation(log)
                 if not manager or not executable or elevation is None:
                     log("A supported Linux package manager is unavailable.")
+                    say("No supported Linux package manager is available.")
                     ok = False
                 else:
                     packages = list(dict.fromkeys(
@@ -714,6 +752,8 @@ def ensure_external_tools(log, package_ids=None):
                         command = [*elevation, executable, "--non-interactive",
                                    "install", *packages]
                     ok = _run(command, log) and ok
+                for package_id in native:
+                    announce_result(package_id)
         else:
             log(f"Automatic native-tool installation is unsupported on {sys.platform}.")
             return False

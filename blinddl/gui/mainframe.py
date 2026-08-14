@@ -32,6 +32,8 @@ from .settings_dialog import SettingsDialog
 from .soulseek_user_dialog import UserBrowserDialog, UserProfileDialog
 from .sources_dialog import SourcesDialog
 from .subs_panel import SubsPanel
+from .tools_dialog import ExternalToolsDialog
+from .tools_dialog import finished_text as tools_dialog_result
 from .tray import TrayIcon, app_icon
 from .update_dialog import UpdateDialog
 from .url_panel import UrlPanel
@@ -83,6 +85,8 @@ class MainFrame(wx.Frame):
         self._update_checking = False
         self._pending_update = None
         self._pending_update_announced = False
+        # The first-run window for VLC, FFmpeg, Deno and Node. One at a time.
+        self._tools_dialog = None
 
         self._build_ui()
         self.downloads_panel.refresh_all()
@@ -766,24 +770,36 @@ class MainFrame(wx.Frame):
     # -- automatic dependency updates -------------------------------------------
 
     def _external_dependencies_worker(self):
-        """Install large native tools without blocking the accessible UI."""
+        """Find out what is missing without blocking the accessible UI.
+
+        Looking for VLC and the rest touches the disk and the PATH, so it
+        happens off the main thread. The installation itself belongs to a
+        window: it takes minutes, and doing it silently left nothing to read.
+        """
         try:
             missing = updater.missing_external_tools()
             if not missing:
                 return
-            if updater.ensure_external_tools(lambda _line: None):
-                wx.CallAfter(
-                    self.announce,
-                    "Download and playback tools installed in the background.",
-                )
-            else:
-                wx.CallAfter(
-                    self.announce,
-                    "Some download tools could not be installed automatically. "
-                    "Use Help, Check for updates to try again.",
-                )
+            wx.CallAfter(self._show_external_tools_dialog, missing)
         except Exception:  # noqa: BLE001 - background best effort
             return
+
+    def _show_external_tools_dialog(self, packages):
+        """Open the install-progress window, unless one is already open."""
+        if self._closing or self._tools_dialog is not None:
+            return
+        self._tools_dialog = ExternalToolsDialog(
+            self, packages, on_finished=self._external_tools_finished
+        )
+        self._tools_dialog.Show()
+
+    def _external_tools_finished(self, ok):
+        # The dialog speaks the outcome itself, so this only writes it where
+        # NVDA+End can find it again and lets a later run open a new window.
+        self._tools_dialog = None
+        if self._closing:
+            return
+        self.announce(tools_dialog_result(ok), speak=False)
 
     def _start_update_checks(self):
         """Check for an update now, then keep checking on the saved interval."""

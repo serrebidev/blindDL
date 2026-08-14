@@ -112,6 +112,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SubsPanel,
         _sorted_subscriptions,
     )
+    from blinddl.gui.tools_dialog import ExternalToolsDialog
     from blinddl.gui.uploads_panel import UploadsPanel
     from blinddl.gui.tray import TrayIcon, app_icon
     from blinddl.gui.update_dialog import UpdateDialog
@@ -429,6 +430,100 @@ class GuiInteractionTests(unittest.TestCase):
         announce.assert_called_once_with("blindDL 9.9.9: 40 percent of 88 MB.")
         dialog._busy = False
         dialog.Destroy()
+
+    def test_missing_media_tools_open_an_install_window(self):
+        # First run downloads VLC and friends. Doing that with nothing on
+        # screen left minutes of silence and no window to tab to.
+        holder = SimpleNamespace(_show_external_tools_dialog=mock.Mock())
+        with mock.patch.object(updater, "missing_external_tools",
+                               return_value=["VideoLAN.VLC"]), \
+                mock.patch("blinddl.gui.mainframe.wx.CallAfter",
+                           side_effect=lambda callback, *args: callback(*args)):
+            MainFrame._external_dependencies_worker(holder)
+
+        holder._show_external_tools_dialog.assert_called_once_with(
+            ["VideoLAN.VLC"])
+
+    def test_nothing_missing_opens_no_install_window(self):
+        holder = SimpleNamespace(_show_external_tools_dialog=mock.Mock())
+        with mock.patch.object(updater, "missing_external_tools",
+                               return_value=[]), \
+                mock.patch("blinddl.gui.mainframe.wx.CallAfter",
+                           side_effect=lambda callback, *args: callback(*args)):
+            MainFrame._external_dependencies_worker(holder)
+
+        holder._show_external_tools_dialog.assert_not_called()
+
+    def test_only_one_install_window_is_ever_open(self):
+        holder = SimpleNamespace(_closing=False, _tools_dialog=object())
+        with mock.patch("blinddl.gui.mainframe.ExternalToolsDialog") as dialog:
+            MainFrame._show_external_tools_dialog(holder, ["VideoLAN.VLC"])
+        dialog.assert_not_called()
+
+    def test_the_install_window_names_the_tool_being_installed(self):
+        with mock.patch("blinddl.gui.tools_dialog.threading.Thread"):
+            dialog = ExternalToolsDialog(self.host, ["VideoLAN.VLC"])
+
+        self.assertIn("VLC media player", dialog.intro)
+        self.assertIn("VLC media player", dialog.log_text.GetValue())
+        self.assertEqual(dialog.close_btn.GetLabel(), "&Hide")
+        dialog.Destroy()
+
+    def test_the_install_window_speaks_every_step(self):
+        # The log is a read-only text control: a screen reader does not read
+        # what arrives in it, so an unspoken step is an invisible one.
+        with mock.patch("blinddl.gui.tools_dialog.threading.Thread"):
+            dialog = ExternalToolsDialog(self.host, ["VideoLAN.VLC"])
+
+        with mock.patch("blinddl.gui.tools_dialog.speech.announce") as announce:
+            dialog._progress("Installing VLC media player (audio preview).")
+        self.app.Yield()
+
+        announce.assert_called_once_with(
+            "Installing VLC media player (audio preview).")
+        self.assertIn("Installing VLC media player",
+                      dialog.log_text.GetValue())
+        dialog.Destroy()
+
+    def test_hiding_the_install_window_leaves_the_install_running(self):
+        finished = []
+        with mock.patch("blinddl.gui.tools_dialog.threading.Thread"):
+            dialog = ExternalToolsDialog(
+                self.host, ["VideoLAN.VLC"], on_finished=finished.append)
+        dialog.Close()
+        self.app.Yield()
+
+        # What the worker thread does after the window is gone.
+        with mock.patch("blinddl.gui.tools_dialog.speech.announce") as announce:
+            dialog._log("late line")
+            dialog._finished(True)
+
+        self.assertFalse(dialog._alive)
+        self.assertEqual(finished, [True])
+        announce.assert_called_once_with("Media tools installed. blindDL is ready.")
+
+    def test_a_finished_install_offers_a_close_button(self):
+        with mock.patch("blinddl.gui.tools_dialog.threading.Thread"):
+            dialog = ExternalToolsDialog(self.host, ["VideoLAN.VLC"])
+
+        with mock.patch("blinddl.gui.tools_dialog.speech.announce"):
+            dialog._finished(False)
+
+        self.assertEqual(dialog.close_btn.GetLabel(), "&Close")
+        self.assertIn("could not be installed", dialog.log_text.GetValue())
+        dialog.Destroy()
+
+    def test_the_install_result_stays_on_the_status_bar(self):
+        # The dialog already spoke it; the status bar is where NVDA+End can
+        # find it again afterwards.
+        holder = SimpleNamespace(
+            _closing=False, _tools_dialog=object(), announce=mock.Mock())
+
+        MainFrame._external_tools_finished(holder, True)
+
+        self.assertIsNone(holder._tools_dialog)
+        holder.announce.assert_called_once_with(
+            "Media tools installed. blindDL is ready.", speak=False)
 
     def test_window_is_never_hidden_without_an_installed_tray_icon(self):
         tray = SimpleNamespace(is_available=lambda: False)
