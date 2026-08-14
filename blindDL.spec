@@ -219,15 +219,43 @@ if os.environ.get("BLINDDL_BUNDLE_FFMPEG", "1") != "0":
     tool_names += ["ffmpeg", "ffprobe"]
 def find_tool(tool_name):
     tool_path = shutil.which(tool_name)
-    if tool_path or sys.platform != "win32":
+    if sys.platform != "win32":
         return tool_path
+    explicit = os.environ.get(f"BLINDDL_{tool_name.upper()}_PATH", "")
+    if explicit and Path(explicit).is_file():
+        return explicit
     if tool_name == "deno":
         deno = Path.home() / ".deno" / "bin" / "deno.exe"
         if deno.is_file():
             return str(deno)
+    # Chocolatey's PATH entries are launcher shims.  Copying one of those into
+    # the frozen app leaves it without its adjacent .shim configuration, so it
+    # cannot locate the actual executable.  Resolve the package payload first.
+    chocolatey = Path(
+        os.environ.get("ChocolateyInstall", r"C:\ProgramData\chocolatey")
+    )
+    if tool_name in {"ffmpeg", "ffprobe"}:
+        matches = [
+            path for path in chocolatey.glob(
+                f"lib/ffmpeg*/tools/**/{tool_name}.exe"
+            ) if path.is_file()
+        ]
+        if matches:
+            return str(max(matches, key=lambda path: path.stat().st_size))
     package_root = Path(ORIGINAL_LOCALAPPDATA) / "Microsoft" / "WinGet" / "Packages"
     matches = sorted(package_root.glob(f"*/**/{tool_name}.exe"))
-    return str(matches[-1]) if matches else None
+    if matches:
+        return str(max(matches, key=lambda path: path.stat().st_size))
+    if tool_path:
+        path = Path(tool_path)
+        choco_bin = chocolatey / "bin"
+        try:
+            is_chocolatey_shim = path.parent.resolve() == choco_bin.resolve()
+        except OSError:
+            is_chocolatey_shim = False
+        if not is_chocolatey_shim:
+            return tool_path
+    return None
 
 
 for tool_name in tool_names:

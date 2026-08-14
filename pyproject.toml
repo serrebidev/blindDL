@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.24.0"
+version = "0.24.1"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
