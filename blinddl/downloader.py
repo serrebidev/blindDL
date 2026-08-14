@@ -50,6 +50,13 @@ ADD_RESUMED = "resumed"
 ADD_SKIPPED = "skipped"
 ADD_ALREADY_ACTIVE = "already-active"
 
+# Soulseek peers cancel uploads and drop connections all the time. A transfer
+# interrupted that way is re-queued a few times, with a growing pause between
+# attempts, before the row is finally reported as failed.
+SOULSEEK_RETRY_ATTEMPTS = 5
+SOULSEEK_RETRY_BASE_DELAY = 2.0
+SOULSEEK_RETRY_MAX_DELAY = 30.0
+
 
 def addition_summary(items, titles=()):
     """Describe what happened when one or more selections were added."""
@@ -1049,6 +1056,7 @@ class DownloadQueue:
             item.eta = ytdlp_backend.format_duration(eta) if eta else ""
             self._notify(item, throttle=True)
 
+        attempt = 0
         while True:
             try:
                 soulseek_backend.download(
@@ -1064,6 +1072,27 @@ class DownloadQueue:
                 item.eta = ""
                 item.error = ""
                 self._notify(item)
+            except soulseek_backend.SoulseekTransientError as exc:
+                if item.cancel_event.is_set():
+                    raise soulseek_backend.SoulseekDownloadCancelled() from None
+                attempt += 1
+                if attempt > SOULSEEK_RETRY_ATTEMPTS:
+                    raise soulseek_backend.SoulseekError(
+                        f"{exc} (retried {SOULSEEK_RETRY_ATTEMPTS} times)"
+                    ) from exc
+                delay = min(
+                    SOULSEEK_RETRY_MAX_DELAY,
+                    SOULSEEK_RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                )
+                item.speed = (
+                    f"Peer interrupted; retrying in {delay:g}s "
+                    f"({attempt}/{SOULSEEK_RETRY_ATTEMPTS})"
+                )
+                item.eta = ""
+                item.error = ""
+                self._notify(item)
+                if item.cancel_event.wait(delay):
+                    raise soulseek_backend.SoulseekDownloadCancelled() from None
 
     def _run_torrent(self, item):
         if self.config.get("torrent_engine") and torrent_engine.available():

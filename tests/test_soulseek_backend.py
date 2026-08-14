@@ -58,6 +58,18 @@ class SoulseekBackendTests(unittest.TestCase):
         )
         return config
 
+    def test_transfer_failure_classifies_transient_and_permanent_reasons(self):
+        for reason in ("Cancelled", "File read error.", None, ""):
+            failure = soulseek_backend._transfer_failure(reason)
+            self.assertIsInstance(
+                failure, soulseek_backend.SoulseekTransientError
+            )
+        not_shared = soulseek_backend._transfer_failure("File not shared.")
+        self.assertIsInstance(not_shared, soulseek_backend.SoulseekError)
+        self.assertNotIsInstance(
+            not_shared, soulseek_backend.SoulseekTransientError
+        )
+
     def test_settings_use_default_download_dir_and_public_extra_shares(self):
         with tempfile.TemporaryDirectory() as folder:
             extra = f"{folder} extra"

@@ -333,6 +333,29 @@ class SoulseekSettingsChanged(SoulseekError):
     """Raised when a client restart interrupts an in-flight transfer."""
 
 
+class SoulseekTransientError(SoulseekError):
+    """A peer- or network-side interruption that a retry may get past.
+
+    Peers cancel uploads, drop their connection, or hit a disk error all the
+    time; none of those means the file is gone. The download queue retries
+    these a few times before giving up.
+    """
+
+
+# Reasons a peer sends that retrying the same peer cannot change. Everything
+# else -- a cancelled upload, a peer read error, an unknown abort -- is worth
+# asking for again.
+_PERMANENT_REASONS = frozenset({"file not shared."})
+
+
+def _transfer_failure(reason):
+    """Build the exception for a transfer that stopped before completing."""
+    text = str(reason or "").strip() or "Transfer failed"
+    if text.casefold() in _PERMANENT_REASONS:
+        return SoulseekError(text)
+    return SoulseekTransientError(text)
+
+
 def available() -> bool:
     return SoulSeekClient is not None
 
@@ -1585,7 +1608,7 @@ class _Service:
                     or transfer.fail_reason
                     or "Transfer failed"
                 )
-                raise SoulseekError(str(reason))
+                raise _transfer_failure(reason)
             if state == TransferState.ABORTED:
                 if cancel_event is not None and cancel_event.is_set():
                     raise SoulseekDownloadCancelled()
@@ -1594,7 +1617,7 @@ class _Service:
                     or transfer.abort_reason
                     or "Transfer aborted"
                 )
-                raise SoulseekError(str(reason))
+                raise _transfer_failure(reason)
             await asyncio.sleep(0.25)
 
     def download(self, item, config, progress_cb=None, cancel_event=None):

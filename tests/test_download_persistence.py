@@ -9,12 +9,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from blinddl import torrent_engine
+from blinddl import soulseek_backend, torrent_engine
 from blinddl.config import DEFAULTS
 from blinddl.downloader import (
     ADD_ALREADY_ACTIVE,
     ADD_RESUMED,
     ADD_SKIPPED,
+    SOULSEEK_RETRY_ATTEMPTS,
     DownloadItem,
     DownloadQueue,
     STATUS_CANCELLED,
@@ -88,6 +89,51 @@ class DownloadPersistenceTests(unittest.TestCase):
         self.assertEqual(restored.items[0].status, STATUS_QUEUED)
         self.assertEqual(restored.items[0].percent, 71)
         self.assertEqual(restored.items[0].error, "")
+
+    def test_soulseek_transient_failure_is_retried_until_success(self):
+        queue = DownloadQueue(self.config(), None, state_path="", start_workers=False)
+        item = DownloadItem(
+            "Track", "soulseek", {"username": "friend", "remote_path": "Track.mp3"}
+        )
+        calls = []
+        outcomes = [
+            soulseek_backend.SoulseekTransientError("Cancelled"),
+            soulseek_backend.SoulseekTransientError("File read error."),
+        ]
+
+        def download(payload, config, progress_cb=None, cancel_event=None):
+            calls.append(payload)
+            if outcomes:
+                raise outcomes.pop(0)
+
+        with (
+            mock.patch(
+                "blinddl.downloader.soulseek_backend.download", side_effect=download
+            ),
+            mock.patch.object(item.cancel_event, "wait", return_value=False),
+        ):
+            queue._run_soulseek(item)
+
+        self.assertEqual(len(calls), 3)
+
+    def test_soulseek_transient_failure_gives_up_after_retries(self):
+        queue = DownloadQueue(self.config(), None, state_path="", start_workers=False)
+        item = DownloadItem(
+            "Track", "soulseek", {"username": "friend", "remote_path": "Track.mp3"}
+        )
+
+        with (
+            mock.patch(
+                "blinddl.downloader.soulseek_backend.download",
+                side_effect=soulseek_backend.SoulseekTransientError("Cancelled"),
+            ) as download,
+            mock.patch.object(item.cancel_event, "wait", return_value=False),
+        ):
+            with self.assertRaises(soulseek_backend.SoulseekError) as caught:
+                queue._run_soulseek(item)
+
+        self.assertEqual(download.call_count, SOULSEEK_RETRY_ATTEMPTS + 1)
+        self.assertIn("retried", str(caught.exception))
 
     def test_batch_additions_persists_once_and_notifies_every_item(self):
         with tempfile.TemporaryDirectory() as folder:
