@@ -243,12 +243,114 @@ class SearchAmplificationTests(unittest.TestCase):
         self.assertEqual(provider._search(search_url="only"), "searched")
         self.assertEqual(provider.searched, ["only"])
 
-    def test_searches_share_one_pool_instead_of_stacking_threads(self):
-        pool = musicdl_backend._search_pool()
+    def test_site_workers_never_hold_the_application_open(self):
+        # A ThreadPoolExecutor keeps the interpreter alive until everything
+        # handed to it has finished, so closing blindDL while a slow site
+        # was still answering would hang the exit for as long as that site
+        # took. These have to stay daemon threads.
+        state = {"active": 0, "maximum": 0, "lock": threading.Lock()}
+        release = threading.Event()
+        clients = {"TestMusicClient": _BlockingClient(
+            "TestMusicClient", state, release)}
+        try:
+            with mock.patch.object(musicdl_backend, "_clients", clients):
+                musicdl_backend.search("query", timeout_s=0.2)
+            workers = [t for t in threading.enumerate()
+                       if t.name == "search-TestMusicClient"]
+            self.assertTrue(workers)
+            self.assertTrue(all(t.daemon for t in workers))
+        finally:
+            release.set()
 
-        self.assertIs(musicdl_backend._search_pool(), pool)
-        self.assertGreaterEqual(pool._max_workers,
-                                len(musicdl_backend.ALL_SOURCES))
+
+class InteractiveVerificationTests(unittest.TestCase):
+    def test_a_source_cannot_open_a_browser_mid_search(self):
+        # The Deezer and Qobuz parsers registered a spotiflac:// handler,
+        # opened a browser at an approval page and waited five minutes for
+        # the answer -- once per result, over the results being read.
+        import musicdl.modules.utils.zarz as zarz
+
+        with self.assertRaises(musicdl_backend.InteractiveVerificationBlocked):
+            zarz.capturegrant("https://example.invalid/approve", "state")
+
+    def test_every_interactive_entry_point_is_blocked(self):
+        import musicdl.modules.utils.afkarxyz as afkarxyz
+        import musicdl.modules.utils.tidalutils as tidalutils
+        import musicdl.modules.utils.youtubeutils as youtubeutils
+        import musicdl.modules.utils.zarz as zarz
+
+        blocked = musicdl_backend._blocked_verification
+        self.assertIs(zarz.capturegrant, blocked)
+        self.assertIs(afkarxyz.CommunityClientBase.runbrowserverification,
+                      blocked)
+        self.assertIs(tidalutils.TidalTvSession.auth, blocked)
+        self.assertIs(youtubeutils.defaultoauthverifier, blocked)
+        self.assertIs(youtubeutils.defaultpotokenverifier, blocked)
+
+    def test_sources_keep_one_http_session_instead_of_three_per_request(self):
+        # musicdl rebuilt its session, and one for each of its two link
+        # testers, before every request -- each reloading the certificate
+        # bundle and opening a fresh connection to a host it had just left.
+        client = object()
+        with (mock.patch.object(musicdl_backend, "_clients", None),
+              mock.patch.object(musicdl_backend, "ALL_SOURCES",
+                                ["TestMusicClient"]),
+              mock.patch.object(musicdl_backend, "cache_dir",
+                                return_value="cache"),
+              mock.patch.object(musicdl_backend, "_silence_progress_bars"),
+              mock.patch.object(musicdl_backend, "MusicClient",
+                                return_value=client) as constructor):
+            musicdl_backend._get_clients()
+
+        config = constructor.call_args.kwargs["init_music_clients_cfg"]
+        self.assertTrue(config["TestMusicClient"]["maintain_session"])
+
+    def test_the_link_check_keeps_its_connection(self):
+        from musicdl.modules.utils.misc import AudioLinkTester
+
+        tester = AudioLinkTester()
+        calls = []
+        with mock.patch.object(tester, "request",
+                               side_effect=lambda *a, **k: calls.append(a)):
+            session = tester.session
+            with mock.patch.object(session, "close") as close:
+                with suppress_errors():
+                    tester.test("https://example.invalid/song.mp3")
+            close.assert_not_called()
+        self.assertIs(tester.session, session)
+
+
+class suppress_errors:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return True
+
+
+class ScratchCleanupTests(unittest.TestCase):
+    def test_only_stale_search_folders_are_swept_up(self):
+        # musicdl keeps a folder per site per search, with half-finished
+        # downloads in it, and never removes them. A folder a download is
+        # still writing to is not stale.
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, "TestMusicClient")
+            old = os.path.join(source, "20260101 old query")
+            fresh = os.path.join(source, "20260814 fresh query")
+            os.makedirs(old)
+            os.makedirs(fresh)
+            stale_time = time.time() - 7200
+            os.utime(old, (stale_time, stale_time))
+
+            with mock.patch.object(musicdl_backend, "cache_dir",
+                                   return_value=root):
+                musicdl_backend.clear_cache(older_than_s=3600)
+
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(fresh))
 
 
 class RuntimeShutdownTests(unittest.TestCase):

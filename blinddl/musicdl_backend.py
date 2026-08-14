@@ -27,12 +27,13 @@ both and keeps musicdl's scratch files in a cache directory. Only finished
 downloads go to the user's download folder.
 """
 
+import importlib
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 
 # musicdl configures an exclusive per-user FileHandler at import time. On
 # Windows that prevents a second blindDL process (including the frozen release
@@ -76,7 +77,6 @@ _lock = threading.Lock()
 _clients = None  # dict: source -> single-source MusicClient
 _http_timeout_installed = False
 _silenced = False
-_pool = None
 # The stop event of the search running on this thread, so a page can be the
 # last one when the user has moved on. musicdl has no cancel token of its own.
 _cancel = threading.local()
@@ -87,16 +87,49 @@ def cache_dir():
     return path
 
 
-def clear_cache():
+def clear_cache(older_than_s=None):
     """Drop the scratch folders from previous sessions.
 
     musicdl writes a `<source>/<timestamp> <query>/search_results.pkl` tree
-    for every site of every search, which would grow without bound.
+    for every site of every search, and leaves half-finished downloads
+    there too, so it grows without bound -- hundreds of megabytes over a
+    few weeks of use.
+
+    With *older_than_s* only folders untouched for that long are removed,
+    which is what makes this safe to run while blindDL is up: a download
+    working in its own scratch folder is not old.
     """
+    root = cache_dir()
+    if older_than_s is None:
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+        except OSError:
+            pass
+        return
+    # The tree is <cache>/<source>/<timestamp and query>/, and it is the
+    # inner folder that belongs to one search: a source's own folder looks
+    # fresh as long as anything under it is being written.
+    cutoff = time.time() - older_than_s
+    for source_dir in _scandir(root):
+        if not source_dir.is_dir():
+            continue
+        for search_dir in _scandir(source_dir.path):
+            try:
+                if search_dir.stat().st_mtime >= cutoff:
+                    continue
+                if search_dir.is_dir():
+                    shutil.rmtree(search_dir.path, ignore_errors=True)
+                else:
+                    os.remove(search_dir.path)
+            except OSError:
+                continue
+
+
+def _scandir(path):
     try:
-        shutil.rmtree(cache_dir(), ignore_errors=True)
+        return list(os.scandir(path))
     except OSError:
-        pass
+        return []
 
 
 class _QuietProgress(Progress):
@@ -135,8 +168,6 @@ def _silence_progress_bars():
     sources can be imported lazily, so it is cheap to re-run before a
     search.
     """
-    import sys
-
     for name, module in list(sys.modules.items()):
         if not name.startswith("musicdl") or module is None:
             continue
@@ -166,9 +197,133 @@ def _install_http_timeout():
     _http_timeout_installed = True
 
 
+class InteractiveVerificationBlocked(RuntimeError):
+    """A music source wanted the screen, and blindDL would not give it up."""
+
+
+def _blocked_verification(*_args, **_kwargs):
+    raise InteractiveVerificationBlocked(
+        "This source needs browser verification, which blindDL does not run."
+    )
+
+
+def _block_interactive_verification():
+    """Stop music sources taking over the screen in the middle of a search.
+
+    Several of musicdl's sources try to verify themselves interactively
+    while a search is running: the Deezer and Qobuz "VIP" parsers register a
+    spotiflac:// URL handler in the Windows registry, open a browser at an
+    approval page, and then wait five minutes for a callback -- once per
+    result. Others open a browser for TIDAL and put a message box on top of
+    everything, or read an access token from a console blindDL does not
+    have.
+
+    None of that can be answered here. A search is something the user
+    started with a keystroke, not an invitation to hand the screen to a
+    site, and a screen reader user gets a dialog they did not ask for over
+    the results they did. Every one of these entry points is made to fail at
+    once instead: musicdl tries each parser in turn and suppresses whatever
+    they raise, so the site simply moves on to the next way in.
+    """
+    blocked = (
+        ("musicdl.modules.utils.zarz", "capturegrant", None),
+        ("musicdl.modules.utils.afkarxyz", "CommunityClientBase",
+         "runbrowserverification"),
+        ("musicdl.modules.utils.tidalutils", "TidalTvSession", "auth"),
+        ("musicdl.modules.utils.youtubeutils", "defaultoauthverifier", None),
+        ("musicdl.modules.utils.youtubeutils", "defaultpotokenverifier", None),
+    )
+    for module_name, name, method in blocked:
+        module = sys.modules.get(module_name)
+        if module is None:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:  # noqa: BLE001 - an absent source blocks itself
+                continue
+        target = getattr(module, name, None)
+        if target is None:
+            continue
+        if method is None:
+            setattr(module, name, _blocked_verification)
+        elif getattr(target, method, None) is not None:
+            setattr(target, method, _blocked_verification)
+
+
 _install_http_timeout()
 _silence_musicdl()
 _silence_progress_bars()
+_block_interactive_verification()
+
+
+def _reuse_link_test_connections():
+    """Stop the per-song link check throwing its connection away each time.
+
+    Every result of every site is checked with a HEAD, and sometimes a GET,
+    to find out what the file actually is. musicdl builds a brand new HTTP
+    session for each of those checks, so each song pays a fresh TLS
+    handshake -- certificate verification and all -- to a host the previous
+    song had just finished talking to. A search checks hundreds of songs.
+
+    The session is kept and its cookies dropped instead, which leaves each
+    check as stateless as a new session would have been while the
+    connection underneath it is reused.
+    """
+    from musicdl.modules.utils.misc import AudioLinkTester
+
+    original = AudioLinkTester.test
+    if getattr(original, "_blinddl_reuses_connections", False):
+        return
+
+    def test(self, url, request_overrides=None, renew_session=True):
+        if renew_session:
+            try:
+                self.session.cookies.clear()
+            except Exception:  # noqa: BLE001 - a session without cookies
+                pass
+        return original(self, url, request_overrides=request_overrides,
+                        renew_session=False)
+
+    test._blinddl_reuses_connections = True
+    AudioLinkTester.test = test
+
+
+_reuse_link_test_connections()
+
+
+def remove_stale_url_handler():
+    """Delete the spotiflac:// handler a search may have left in Windows.
+
+    The Deezer and Qobuz parsers registered that handler under HKCU before
+    opening their approval page, and put it back the way they found it
+    afterwards -- unless blindDL closed, or was closed, while a search still
+    had one open. What is left points at a blindDL that may no longer be
+    there and a temporary file that certainly is not, and Windows keeps
+    offering it. Nothing registers it any more, so the leftovers go.
+
+    Only a key whose command names musicdl's own helper is touched.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg  # noqa: PLC0415 - Windows-only standard library
+    except ImportError:
+        return False
+    root = r"Software\Classes\spotiflac"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            root + r"\shell\open\command") as key:
+            command, _kind = winreg.QueryValueEx(key, "")
+    except OSError:
+        return False
+    if "zarz.py" not in str(command).lower():
+        return False
+    for subkey in (root + r"\shell\open\command", root + r"\shell\open",
+                   root + r"\shell", root):
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, subkey)
+        except OSError:
+            return False
+    return True
 
 
 def _cap_search_pages(provider):
@@ -206,18 +361,6 @@ def _make_cancellable(provider):
     provider._search = cancellable
 
 
-def _search_pool():
-    """One reused pool, so repeated searches cannot stack their threads."""
-    global _pool
-    with _lock:
-        if _pool is None:
-            _pool = ThreadPoolExecutor(
-                max_workers=max(1, len(ALL_SOURCES)),
-                thread_name_prefix="musicdl-search",
-            )
-        return _pool
-
-
 def _get_clients():
     global _clients
     with _lock:
@@ -232,6 +375,17 @@ def _get_clients():
                         init_music_clients_cfg={source: {
                             "work_dir": work_dir,
                             "disable_print": True,
+                            # Without this, a source throws its HTTP session
+                            # away and builds three new ones -- its own and
+                            # one for each of its two link testers -- before
+                            # every single request it makes. Each of those
+                            # reloads the whole certificate bundle and opens
+                            # a new TLS connection to a host it was already
+                            # talking to: nearly two thousand certificate
+                            # loads in one search, seconds of processor time
+                            # spent on nothing. Four sources already turn
+                            # this on for themselves.
+                            "maintain_session": True,
                             # Retrying a dead site three times only burns
                             # the search budget.
                             "max_retries": 1,
@@ -384,13 +538,20 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
             except Exception:  # noqa: BLE001 - a bad callback is not the site's fault
                 pass
 
-    # One pool for the process, wide enough that a single search still asks
-    # every site at once. Raw threads meant a second search added another
-    # fifty-odd of them on top of the first search's, all parsing at once.
-    pool = _search_pool()
-    futures = [pool.submit(search_one, source, client)
-               for source, client in clients.items()]
-    futures_wait(futures, timeout=max(0.0, deadline - time.monotonic()))
+    # Daemon threads, deliberately: a ThreadPoolExecutor keeps the
+    # interpreter alive until everything it was handed has finished, so
+    # closing blindDL while a slow site was still answering would hang the
+    # exit for as long as that site took. What keeps a replaced search from
+    # piling up is the stop event its pages now check, not the pool shape.
+    threads = []
+    for source, client in clients.items():
+        thread = threading.Thread(target=search_one, args=(source, client),
+                                  name=f"search-{source}", daemon=True)
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
 
     # Snapshot under the lock: a straggler finishing mid-iteration would
     # otherwise change the dict while we walk it.

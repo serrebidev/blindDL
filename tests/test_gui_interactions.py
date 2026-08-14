@@ -844,6 +844,7 @@ class GuiInteractionTests(unittest.TestCase):
             subs=SimpleNamespace(start=mock.Mock()),
             config={"soulseek_enabled": True},
             _external_dependencies_worker=mock.Mock(),
+            _housekeeping_worker=mock.Mock(),
             _start_update_checks=mock.Mock(),
             _apply_soulseek_setting=mock.Mock(),
         )

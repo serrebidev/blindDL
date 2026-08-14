@@ -120,6 +120,11 @@ class MainFrame(wx.Frame):
             daemon=True,
             name="blinddl-external-tools",
         ).start()
+        threading.Thread(
+            target=self._housekeeping_worker,
+            daemon=True,
+            name="blinddl-housekeeping",
+        ).start()
         self._start_update_checks()
         if self.config["soulseek_enabled"]:
             self._apply_soulseek_setting()
@@ -790,6 +795,30 @@ class MainFrame(wx.Frame):
                 return
             wx.CallAfter(self._show_external_tools_dialog, missing)
         except Exception:  # noqa: BLE001 - background best effort
+            return
+
+    def _housekeeping_worker(self):
+        """Clear up what a music search leaves behind it.
+
+        Two things outlive the search that made them. musicdl keeps a
+        scratch folder per site per search, with half-finished downloads in
+        it, and never removes them: hundreds of megabytes after a few
+        weeks. And on Windows its Deezer and Qobuz parsers used to register
+        a spotiflac:// handler before opening a browser to approve
+        themselves; if blindDL closed while one was open, the handler
+        stayed, and Windows went on offering it. Nothing registers it now,
+        so any that is left is swept up here.
+        """
+        try:
+            # Imported here rather than at the top: pulling musicdl in costs
+            # seconds, and nothing else at startup needs it.
+            from .. import musicdl_backend
+
+            musicdl_backend.remove_stale_url_handler()
+            # An hour old and nothing has been written to it since, so it
+            # cannot belong to a download this session is still running.
+            musicdl_backend.clear_cache(older_than_s=3600)
+        except Exception:  # noqa: BLE001 - housekeeping is a best effort
             return
 
     def _show_external_tools_dialog(self, packages):
