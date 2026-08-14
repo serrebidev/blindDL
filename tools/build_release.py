@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import platform
@@ -41,6 +42,54 @@ def run(*command: str) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def ensure_libtorrent() -> str:
+    """Make complete builds use the locally maintained wheel on CPython 3.14.
+
+    Official release runners install libtorrent from requirements.txt. Python
+    3.14 builders use the weekly wheelhouse because upstream does not publish
+    that interpreter tag yet. Import remains the source of truth: locally
+    built extensions do not necessarily have pip distribution metadata.
+    """
+    try:
+        module = importlib.import_module("libtorrent")
+        return str(module.__version__)
+    except (ImportError, OSError):
+        pass
+
+    wheelhouse = Path(
+        os.environ.get(
+            "BLINDDL_LIBTORRENT_WHEELHOUSE",
+            Path.home() / "libtorrent-build" / "wheels",
+        )
+    ).expanduser()
+    if not wheelhouse.is_dir():
+        raise RuntimeError(
+            "libtorrent cannot be imported and its wheelhouse was not found: "
+            f"{wheelhouse}. Run the platform libtorrent updater first or set "
+            "BLINDDL_LIBTORRENT_WHEELHOUSE."
+        )
+    run(
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-index",
+        "--find-links",
+        str(wheelhouse),
+        "--force-reinstall",
+        "libtorrent>=2.1.1",
+    )
+    importlib.invalidate_caches()
+    try:
+        module = importlib.import_module("libtorrent")
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "libtorrent still cannot be imported after installing from "
+            f"{wheelhouse}"
+        ) from exc
+    return str(module.__version__)
+
+
 def architecture() -> str:
     machine = platform.machine().lower()
     return {
@@ -52,6 +101,7 @@ def architecture() -> str:
 
 
 def build_application() -> None:
+    print(f"Using libtorrent {ensure_libtorrent()}", flush=True)
     run(
         sys.executable,
         "-m",

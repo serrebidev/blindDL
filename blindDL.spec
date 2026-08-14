@@ -166,8 +166,8 @@ for package in ADULT_MODULES:
 # cannot add a CPython extension later with pip.
 if importlib.util.find_spec("libtorrent") is None:
     raise RuntimeError(
-        "libtorrent is required for a complete blindDL release. Build with "
-        "a Python version for which libtorrent publishes a wheel."
+        "libtorrent is required for a complete blindDL release. Install a "
+        "compatible official or locally built wheel before packaging."
     )
 hiddenimports.append("libtorrent")
 

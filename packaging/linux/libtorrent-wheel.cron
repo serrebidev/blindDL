@@ -1,0 +1,6 @@
+# Build and verify the latest stable libtorrent CPython 3.14 wheel weekly.
+# Output is mailed by chronic only when the updater fails.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+0 3 * * 0 root /usr/bin/chronic /usr/local/sbin/update-libtorrent-wheel

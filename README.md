@@ -135,6 +135,17 @@ The Subscriptions tab's **Sort by** control changes only how subscriptions are d
 
 Install the requirements and PyInstaller, then run `build.bat` on Windows or `./build.sh` on macOS and Linux. Native packages are written to `release/`.
 
+Complete builds verify that libtorrent imports before PyInstaller starts. On
+Python 3.14, where upstream does not publish wheels yet, the build automatically
+uses the newest compatible wheel in `~/libtorrent-build/wheels`. Set
+`BLINDDL_LIBTORRENT_WHEELHOUSE` to use a different wheelhouse. The Windows
+`Libtorrent Weekly Update` task and Linux's
+`/etc/cron.d/libtorrent-wheel` keep these wheels on the latest stable
+libtorrent release and test each one in a clean virtual environment before it
+can be used by a release build. Their source-controlled entry points are
+`tools/update_libtorrent_windows.ps1` and
+`tools/update_libtorrent_linux.sh`.
+
 GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and Apple silicon Macs, and Linux tarballs and Debian packages for x64 and ARM64 whenever a version tag such as `v0.1.0` is pushed.
 
 ## Keyboard shortcuts
