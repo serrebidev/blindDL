@@ -1029,13 +1029,15 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(items[1]["folder"], "Videos")
 
     def test_library_roots_includes_shared_folders_and_dedupes(self):
+        media = os.path.abspath("C:\\Media")
+        music = os.path.abspath("D:\\Music")
         roots = library_roots(
             {
                 "download_dir": "C:\\Media",
                 "soulseek_shared_folders": ["D:\\Music", "C:\\Media", "", "D:\\Music"],
             }
         )
-        self.assertEqual([root["path"] for root in roots], ["C:\\Media", "D:\\Music"])
+        self.assertEqual([root["path"] for root in roots], [media, music])
 
     def test_library_discovers_every_file_and_subfolder_of_shared_folders(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1102,7 +1104,9 @@ class GuiInteractionTests(unittest.TestCase):
         worker.return_value.start.assert_called_once_with()
         self.assertTrue(panel._refreshing)
         roots, folder, file_path = panel._pending_refresh
-        self.assertEqual([root["path"] for root in roots], ["C:\\Media"])
+        self.assertEqual(
+            [root["path"] for root in roots], [os.path.abspath("C:\\Media")]
+        )
         self.assertEqual(folder, "")
         self.assertIsNone(file_path)
 
