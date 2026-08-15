@@ -135,7 +135,7 @@ Subscribing to a channel by its plain address follows every tab it publishes, so
 
 The Subscriptions tab's **Sort by** control changes only how subscriptions are displayed. It can group by title or site, show recently checked or stale feeds first, rank by tracked-item count, or put enabled feeds first; background checks still use the saved subscription order. Use a subscription's context menu to change its feed order later.
 
-**Download existing items** in the Add dialog queues everything currently listed — leave it clear to start from now on. Checks run in the background at the interval in Settings, and Ctrl+Shift+C checks everything immediately.
+**Download existing items** in the Add dialog queues the newest 100 items currently listed — leave it clear to start from now on. Channel and playlist subscriptions inspect the newest 100 entries on each refresh, so even channels with years of uploads subscribe promptly without repeatedly crawling their complete history. Set **Update interval (hours)** directly on the Subscriptions tab and press **Apply interval**; Ctrl+Shift+C checks everything immediately.
 
 ## Building
 
@@ -152,7 +152,7 @@ can be used by a release build. Their source-controlled entry points are
 `tools/update_libtorrent_windows.ps1` and
 `tools/update_libtorrent_linux.sh`.
 
-GitHub Actions builds the Windows installer and portable ZIP, DMGs for Intel and Apple silicon Macs, and Linux tarballs and Debian packages for x64 and ARM64 whenever a version tag such as `v0.1.0` is pushed.
+Release artifacts are built and self-tested on their target operating systems. Windows x64 is built on the maintainer's Windows machine, Linux x64 is built on `serrebiradio.com`, and GitHub Actions continues to build the Intel and Apple-silicon macOS DMGs when a version tag such as `v0.1.0` is published. The Windows and Linux frozen self-tests remove every developer Python path; Linux additionally runs with an empty executable search path. A release is rejected unless its packaged executable identifies its embedded Python and imports its bundled libtorrent.
 
 ## Keyboard shortcuts
 

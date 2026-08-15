@@ -77,6 +77,10 @@ MAX_NESTED_DEPTH = 3
 # Search results and hashtag feeds are ranked, endless, and re-shuffle
 # between visits, so only the top slice is worth listing.
 RANKED_FEED_LIMIT = 100
+# A subscription only needs a recent window. Asking yt-dlp to enumerate a
+# prolific channel's complete history makes the Add dialog look as though it
+# did nothing, and every later check repeats the same expensive crawl.
+SUBSCRIPTION_FEED_LIMIT = 100
 # How many results a YouTube search asks for.
 SEARCH_COUNT = 200
 

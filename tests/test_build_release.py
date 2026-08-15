@@ -19,6 +19,18 @@ def test_release_build_uses_an_importable_libtorrent_without_pip():
     run.assert_not_called()
 
 
+def test_linux_frozen_verification_cannot_find_a_system_python(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    monkeypatch.setenv("PYTHONHOME", "/developer/python")
+    monkeypatch.setenv("PYTHONPATH", "/developer/packages")
+    with mock.patch.object(build_release.sys, "platform", "linux"):
+        environment = build_release.isolated_runtime_environment()
+
+    assert environment["PATH"] == ""
+    assert "PYTHONHOME" not in environment
+    assert "PYTHONPATH" not in environment
+
+
 def test_a_busy_disk_image_is_retried_instead_of_failing_the_release(tmp_path):
     # "Resource busy" from hdiutil is Spotlight holding the bundle, not a
     # broken build. Failing on it threw away every other platform's packages.

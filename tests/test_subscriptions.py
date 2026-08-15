@@ -91,6 +91,9 @@ class SubscriptionStoreTests(unittest.TestCase):
 
         self.assertEqual(
             extract.call_args.kwargs["order"], search_order.ORDER_POPULAR)
+        self.assertEqual(
+            extract.call_args.kwargs["limit"],
+            subscriptions.ytdlp_backend.SUBSCRIPTION_FEED_LIMIT)
 
     def test_legacy_subscription_without_order_keeps_best_match(self):
         sub = self.store.add("https://www.youtube.com/results?search_query=x",

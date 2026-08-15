@@ -101,6 +101,28 @@ def architecture() -> str:
     }.get(machine, machine)
 
 
+def isolated_runtime_environment() -> dict[str, str]:
+    """Environment proving the frozen app cannot borrow a system Python."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment.pop("PYTHONPATH", None)
+    if sys.platform == "win32":
+        windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        environment["PATH"] = os.pathsep.join(
+            str(path) for path in (windows / "System32", windows)
+            if path.is_dir()
+        )
+    elif sys.platform.startswith("linux"):
+        # The self-test uses absolute paths and bundled libraries. An empty
+        # PATH makes invoking python/python3 impossible even on a build host
+        # that has both installed.
+        environment["PATH"] = ""
+    else:
+        # Keep the existing macOS verification environment unchanged.
+        environment["PATH"] = "/usr/bin:/bin"
+    return environment
+
+
 def build_application() -> None:
     print(f"Using libtorrent {ensure_libtorrent()}", flush=True)
     run(
@@ -124,7 +146,7 @@ def verify_application() -> None:
     report_path.unlink(missing_ok=True)
     self_test_data = BUILD / "self-test-data"
     self_test_data.mkdir(parents=True, exist_ok=True)
-    environment = os.environ.copy()
+    environment = isolated_runtime_environment()
     environment["BLINDDL_APP_DATA_DIR"] = str(self_test_data / "app-data")
     if sys.platform == "win32":
         environment["APPDATA"] = str(self_test_data / "roaming")
@@ -133,19 +155,10 @@ def verify_application() -> None:
         # Python and application libraries must work in isolation; large
         # Windows media tools are installed silently through WinGet at first
         # run and are deliberately absent from the release archive.
-        windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-        environment["PATH"] = os.pathsep.join(
-            str(path) for path in (windows / "System32", windows) if path.is_dir()
-        )
-        environment.pop("PYTHONHOME", None)
-        environment.pop("PYTHONPATH", None)
     else:
         environment["XDG_CONFIG_HOME"] = str(self_test_data / "config")
         environment["XDG_CACHE_HOME"] = str(self_test_data / "cache")
         environment["XDG_STATE_HOME"] = str(self_test_data / "state")
-        # Native media tools are intentionally supplied by Homebrew or the
-        # Linux package manager on the user's machine, not by the application.
-        environment["PATH"] = "/usr/bin:/bin"
     print("+", executable, "--self-test", report_path, flush=True)
     completed = subprocess.run(
         [str(executable), "--self-test", str(report_path)],

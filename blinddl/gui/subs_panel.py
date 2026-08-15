@@ -142,7 +142,7 @@ class SubsPanel(wx.Panel):
 
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        sort_row = wx.BoxSizer(wx.HORIZONTAL)
+        controls_row = wx.BoxSizer(wx.HORIZONTAL)
         sort_label = wx.StaticText(self, label="Sort &by:")
         self.sort_choice = wx.Choice(self, choices=list(SUBS_SORT_LABELS))
         self.sort_choice.SetName("Sort subscriptions")
@@ -151,8 +151,27 @@ class SubsPanel(wx.Panel):
             mode = SUBS_SORT_ADDED
         self.sort_choice.SetSelection(SUBS_SORTS.index(mode))
         self.sort_choice.Bind(wx.EVT_CHOICE, self.on_sort_changed)
-        sort_row.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        sort_row.Add(self.sort_choice, 0)
+        controls_row.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        controls_row.Add(self.sort_choice, 0, wx.RIGHT, 16)
+
+        interval_label = wx.StaticText(
+            self, label="&Update interval (hours):")
+        self.interval_spin = wx.SpinCtrl(
+            self, min=1, max=168,
+            initial=max(1, min(168, int(
+                self.frame.config.get("sub_check_hours", 6)))),
+        )
+        self.interval_spin.SetName("Subscription update interval in hours")
+        self.interval_spin.SetHelpText(
+            "How often enabled subscriptions are checked automatically. "
+            "Choose from 1 hour to 168 hours, then press Apply interval.")
+        self.interval_button = wx.Button(self, label="&Apply interval")
+        self.interval_button.SetName("Apply subscription update interval")
+        self.interval_button.Bind(wx.EVT_BUTTON, self.on_interval_changed)
+        controls_row.Add(
+            interval_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        controls_row.Add(self.interval_spin, 0, wx.RIGHT, 4)
+        controls_row.Add(self.interval_button, 0)
 
         self.list = wx.ListCtrl(self, style=wx.LC_REPORT)
         self.list.SetName("Subscriptions")
@@ -165,7 +184,7 @@ class SubsPanel(wx.Panel):
         self.list.SetColumnWidth(1, 300)
         self.list.Bind(wx.EVT_CONTEXT_MENU, self.on_context_menu)
 
-        sizer.Add(sort_row, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sizer.Add(controls_row, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizer(sizer)
         self.refresh()
@@ -288,6 +307,19 @@ class SubsPanel(wx.Panel):
         if event is not None:
             event.Skip()
 
+    def on_interval_changed(self, event):
+        hours = self.interval_spin.GetValue()
+        self.frame.config["sub_check_hours"] = hours
+        save = getattr(self.frame.config, "save", None)
+        if save is not None:
+            save()
+        self.frame.subs.wake()
+        noun = "hour" if hours == 1 else "hours"
+        self.frame.announce(
+            f"Subscriptions will update every {hours} {noun}.")
+        if event is not None:
+            event.Skip()
+
     # -- actions -----------------------------------------------------------
 
     def on_add(self, event):
@@ -321,6 +353,7 @@ class SubsPanel(wx.Panel):
                     url, cookies_from_browser=
                     self.frame.config["cookies_from_browser"],
                     cookies_file=self.frame.config.get("cookies_file"),
+                    limit=ytdlp_backend.SUBSCRIPTION_FEED_LIMIT,
                     order=order)
         except Exception as exc:  # noqa: BLE001 - shown to the user
             wx.CallAfter(self._add_failed, str(exc))

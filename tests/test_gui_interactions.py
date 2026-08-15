@@ -217,6 +217,7 @@ class _SavingConfig(dict):
 
 class _Subscriptions:
     def __init__(self):
+        self.wake_count = 0
         self.rows = [
             {
                 "id": "one",
@@ -243,10 +244,13 @@ class _Subscriptions:
     def set_order(self, sub_id, order):
         next(row for row in self.rows if row["id"] == sub_id)["order"] = order
 
+    def wake(self):
+        self.wake_count += 1
+
 
 class _Frame:
     def __init__(self):
-        self.config = {
+        self.config = _SavingConfig({
             "disabled_music_sources": [],
             "disabled_adult_sources": [],
             "disabled_book_sources": [],
@@ -256,7 +260,10 @@ class _Frame:
             "search_timeout_s": 5,
             "audio_only": True,
             "auto_clear_finished": False,
-        }
+            "sub_check_hours": 6,
+            "cookies_from_browser": None,
+            "cookies_file": "",
+        })
         self.queue = _Queue()
         self.subs = _Subscriptions()
         self.messages = []
@@ -3194,6 +3201,31 @@ class GuiInteractionTests(unittest.TestCase):
 
         self.assertEqual(self.frame.subs.rows[0]["order"], search_order.ORDER_POPULAR)
         self.assertIn("Most popular", self.frame.messages[-1])
+
+    def test_subscription_interval_is_controlled_from_the_subscriptions_tab(self):
+        panel = SubsPanel(self.host, self.frame)
+        panel.interval_spin.SetValue(2)
+
+        panel.on_interval_changed(None)
+
+        self.assertEqual(self.frame.config["sub_check_hours"], 2)
+        self.assertTrue(self.frame.config.saved)
+        self.assertEqual(self.frame.subs.wake_count, 1)
+        self.assertEqual(
+            self.frame.messages[-1], "Subscriptions will update every 2 hours.")
+
+    def test_adding_a_subscription_only_reads_the_recent_window(self):
+        panel = SubsPanel(self.host, self.frame)
+        with mock.patch.object(
+            ytdlp_backend, "extract_flat", return_value=([], "Channel")
+        ) as extract, mock.patch("blinddl.gui.subs_panel.wx.CallAfter"):
+            panel._add_worker(
+                "https://www.youtube.com/user/EuphoricHardStyleZ", False)
+
+        self.assertEqual(
+            extract.call_args.kwargs["limit"],
+            ytdlp_backend.SUBSCRIPTION_FEED_LIMIT,
+        )
 
 
 if __name__ == "__main__":
