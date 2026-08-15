@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: MIT
 name: Build macOS release
 
+# Windows x64 releases are built locally with build.bat. Linux x64 releases
+# are built over SSH on root@serrebiradio.com with
+# tools/build_linux_release.sh. Hosted release runners intentionally own only
+# the two macOS architectures below.
+
 on:
   push:
     tags:

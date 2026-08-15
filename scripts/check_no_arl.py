@@ -22,6 +22,7 @@ EXCLUDED_PARTS = {
     "__pycache__",
     "build",
     "dist",
+    ".release-venv",
     ".venv",
     "venv",
 }

@@ -19,6 +19,35 @@ def test_release_build_uses_an_importable_libtorrent_without_pip():
     run.assert_not_called()
 
 
+def test_windows_release_policy_reinstalls_the_maintained_wheel(
+    tmp_path, monkeypatch
+):
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    monkeypatch.setenv("BLINDDL_REQUIRE_LIBTORRENT_WHEEL", "1")
+    monkeypatch.setenv("BLINDDL_LIBTORRENT_WHEELHOUSE", str(wheelhouse))
+    module = SimpleNamespace(__version__="2.1.1.0")
+    with mock.patch.object(
+        build_release.importlib, "import_module", return_value=module
+    ) as import_module, mock.patch.object(
+        build_release.importlib, "invalidate_caches"
+    ), mock.patch.object(build_release, "run") as run:
+        assert build_release.ensure_libtorrent() == "2.1.1.0"
+
+    run.assert_called_once_with(
+        build_release.sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-index",
+        "--find-links",
+        str(wheelhouse),
+        "--force-reinstall",
+        "libtorrent>=2.1.1",
+    )
+    import_module.assert_called_once_with("libtorrent")
+
+
 def test_linux_frozen_verification_cannot_find_a_system_python(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     monkeypatch.setenv("PYTHONHOME", "/developer/python")

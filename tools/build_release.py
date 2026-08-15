@@ -51,11 +51,15 @@ def ensure_libtorrent() -> str:
     that interpreter tag yet. Import remains the source of truth: locally
     built extensions do not necessarily have pip distribution metadata.
     """
-    try:
-        module = importlib.import_module("libtorrent")
-        return str(module.__version__)
-    except (ImportError, OSError):
-        pass
+    require_wheel = os.environ.get(
+        "BLINDDL_REQUIRE_LIBTORRENT_WHEEL", "0"
+    ) == "1"
+    if not require_wheel:
+        try:
+            module = importlib.import_module("libtorrent")
+            return str(module.__version__)
+        except (ImportError, OSError):
+            pass
 
     wheelhouse = Path(
         os.environ.get(
@@ -64,9 +68,14 @@ def ensure_libtorrent() -> str:
         )
     ).expanduser()
     if not wheelhouse.is_dir():
+        requirement = (
+            "The release policy requires the maintained libtorrent wheel, but"
+            if require_wheel
+            else "libtorrent cannot be imported and its wheelhouse was not found:"
+        )
         raise RuntimeError(
-            "libtorrent cannot be imported and its wheelhouse was not found: "
-            f"{wheelhouse}. Run the platform libtorrent updater first or set "
+            f"{requirement} {wheelhouse}. Run the platform libtorrent updater "
+            "first or set "
             "BLINDDL_LIBTORRENT_WHEELHOUSE."
         )
     run(
