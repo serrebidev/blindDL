@@ -324,6 +324,23 @@ if BUNDLE_EXTERNAL_TOOLS and not any(
         "built-in media playback"
     )
 
+excluded_modules = [
+    "Crypto.SelfTest",
+    "pydantic.mypy",
+    "pydantic.v1.mypy",
+    "pytest",
+    "tkinter",
+]
+if sys.platform != "win32":
+    # These conditional helpers load Win32 DLLs through ctypes. They are not
+    # usable on Linux or macOS, and letting PyInstaller inspect them produces
+    # false missing-library warnings for ole32, shell32 and user32.
+    excluded_modules += [
+        "dateutil.tz.win",
+        "platformdirs.windows",
+        "prompt_toolkit.output.win32",
+    ]
+
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
@@ -333,13 +350,7 @@ a = Analysis(
     hookspath=[str(ROOT / "hooks")],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        "Crypto.SelfTest",
-        "pydantic.mypy",
-        "pydantic.v1.mypy",
-        "pytest",
-        "tkinter",
-    ],
+    excludes=excluded_modules,
     noarchive=False,
     optimize=0,
 )
