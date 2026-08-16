@@ -1941,6 +1941,54 @@ class GuiInteractionTests(unittest.TestCase):
         sideb_search.assert_called_once()
         self.assertEqual(deezer.call_args.kwargs["kind"], search_kind.KIND_TRACK)
 
+    def test_artist_albums_scope_asks_only_the_catalogue(self):
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        token = panel.token = object()
+
+        with (
+            mock.patch.object(musicdl_backend, "search") as musicdl_search,
+            mock.patch.object(panel, "_sideb_search") as sideb_search,
+            mock.patch.object(deezer_backend, "search", return_value=[]),
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search("discovery", ENGINE_MUSIC, token, stop, ["netease"],
+                          search_order.ORDER_RELEVANCE, search_kind.KIND_ARTIST,
+                          search_kind.ARTIST_SCOPE_ALBUMS)
+            for thread in threading.enumerate():
+                if thread.name == "search-deezer":
+                    thread.join(timeout=5)
+
+        musicdl_search.assert_not_called()
+        sideb_search.assert_not_called()
+
+    def test_artist_songs_scope_still_asks_every_music_site(self):
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        token = panel.token = object()
+
+        with (
+            mock.patch.object(
+                musicdl_backend, "search", return_value=([], [], [])
+            ) as musicdl_search,
+            mock.patch.object(panel, "_sideb_search") as sideb_search,
+            mock.patch.object(deezer_backend, "search", return_value=[]) as deezer,
+            mock.patch.object(wx, "CallAfter"),
+        ):
+            panel._search("discovery", ENGINE_MUSIC, token, stop, ["netease"],
+                          search_order.ORDER_RELEVANCE, search_kind.KIND_ARTIST,
+                          search_kind.ARTIST_SCOPE_SONGS)
+            for thread in threading.enumerate():
+                if thread.name == "search-deezer":
+                    thread.join(timeout=5)
+
+        musicdl_search.assert_called_once()
+        sideb_search.assert_called_once()
+        self.assertEqual(
+            deezer.call_args.kwargs["artist_scope"],
+            search_kind.ARTIST_SCOPE_SONGS,
+        )
+
     def test_search_status_says_which_sites_could_search_by_type(self):
         # Album leaves the sites that cannot answer it out of the search...
         self.assertEqual(
@@ -2616,6 +2664,40 @@ class GuiInteractionTests(unittest.TestCase):
         panel.on_preview_selected(None)
 
         self.assertIn("no single track to play", self.frame.messages[-1])
+
+    def test_starting_a_preview_cancels_an_inflight_full_playback(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        panel.results = [{"title": "One", "kind": "deezer"}]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+        panel.full_playback_token = object()
+        panel.play_full_btn.Disable()
+
+        with mock.patch.object(threading, "Thread"):
+            panel.on_preview_selected(None)
+
+        self.assertIsNone(panel.full_playback_token)
+        self.assertTrue(panel.play_full_btn.IsEnabled())
+        self.assertIsNotNone(panel.preview_token)
+        self.assertFalse(panel.preview_btn.IsEnabled())
+
+    def test_starting_full_playback_cancels_an_inflight_preview(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        panel.results = [{"title": "One", "kind": "deezer"}]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+        panel.preview_token = object()
+        panel.preview_btn.Disable()
+
+        with mock.patch.object(threading, "Thread"):
+            panel.on_play_full_selected(None)
+
+        self.assertIsNone(panel.preview_token)
+        self.assertTrue(panel.preview_btn.IsEnabled())
+        self.assertIsNotNone(panel.full_playback_token)
+        self.assertFalse(panel.play_full_btn.IsEnabled())
 
     def test_books_cannot_be_previewed(self):
         panel = SearchPanel(self.host, self.frame)

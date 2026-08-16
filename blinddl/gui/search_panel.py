@@ -1200,11 +1200,20 @@ class SearchPanel(wx.Panel):
         # matched one, so only the sites that can return albums go out. The
         # rest would answer with tracks and bury the albums under them.
         albums_only = search_kind.is_album(kind)
+        # Artist + Albums/Playlists scope is answered by Deezer's catalogue,
+        # so the musicdl sites are skipped the same way an album search is.
+        catalogue_scope = (
+            kind == search_kind.KIND_ARTIST
+            and artist_scope in (
+                search_kind.ARTIST_SCOPE_ALBUMS,
+                search_kind.ARTIST_SCOPE_PLAYLISTS,
+            )
+        )
         if engine == ENGINE_MUSIC:
             sources = musicdl_backend.enabled_sources(
                 self.frame.config["disabled_music_sources"]
             )
-            if not sources and not albums_only:
+            if not sources and not albums_only and not catalogue_scope:
                 self.frame.announce("No music sites selected. Use Tools, Search sites.")
                 return
         elif engine == ENGINE_BOOKS:
@@ -1347,9 +1356,10 @@ class SearchPanel(wx.Panel):
             self.frame.announce(
                 f"Searching {ENGINE_LABELS[engine]}. Results arrive as they come."
             )
-        elif engine == ENGINE_MUSIC and albums_only:
+        elif engine == ENGINE_MUSIC and (albums_only or catalogue_scope):
+            what = "albums" if albums_only else "albums and playlists"
             self.frame.announce(
-                f"Searching {deezer_backend._SEARCH_SOURCE} for albums "
+                f"Searching {deezer_backend._SEARCH_SOURCE} for {what} "
                 f"({self.frame.config['search_timeout_s']:g} seconds)..."
             )
         elif engine == ENGINE_MUSIC:
@@ -1410,6 +1420,13 @@ class SearchPanel(wx.Panel):
         order = search_order.normalize(order or self.current_order)
         kind = search_kind.normalize(kind)
         artist_scope = search_kind.normalize_artist_scope(artist_scope)
+        catalogue_scope = (
+            kind == search_kind.KIND_ARTIST
+            and artist_scope in (
+                search_kind.ARTIST_SCOPE_ALBUMS,
+                search_kind.ARTIST_SCOPE_PLAYLISTS,
+            )
+        )
         asked = []
         try:
             if engine == ENGINE_MUSIC:
@@ -1434,11 +1451,12 @@ class SearchPanel(wx.Panel):
                     on_batch=on_soulseek_batch,
                 )
                 asked = [soulseek_backend.SOURCE]
-            elif engine == ENGINE_MUSIC and search_kind.is_album(kind):
+            elif engine == ENGINE_MUSIC and (
+                    search_kind.is_album(kind) or catalogue_scope):
                 # Deezer is the only one of the music sources with an album
-                # catalogue to search. The musicdl sites and Side B match
-                # song titles, so asking them here would answer an album
-                # search with several hundred tracks.
+                # or playlist catalogue to search. The musicdl sites and
+                # Side B match song titles, so asking them here would bury
+                # the albums or playlists under several hundred tracks.
                 threading.Thread(
                     target=self._deezer_search,
                     args=(query, token, engine, stop, order, kind,
@@ -2495,6 +2513,10 @@ class SearchPanel(wx.Panel):
         )
         token = self.preview_token = object()
         self.preview_btn.Disable()
+        # A full-song resolve started moments ago must not land after this
+        # preview and swap it out; drop it and leave its button usable.
+        self.full_playback_token = None
+        self.play_full_btn.Enable(_plays(self.result_engine))
         self.frame.announce(f"Preparing preview: {item['title']}")
         threading.Thread(
             target=self._resolve_preview,
@@ -2577,6 +2599,9 @@ class SearchPanel(wx.Panel):
         )
         token = self.full_playback_token = object()
         self.play_full_btn.Disable()
+        # Ditto for a preview that is still resolving.
+        self.preview_token = None
+        self.preview_btn.Enable(_plays(self.result_engine))
         self.frame.announce(f"Loading: {item['title']}")
         threading.Thread(
             target=self._resolve_full_playback,
