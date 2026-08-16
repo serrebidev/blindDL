@@ -102,8 +102,11 @@ class FeedsDialog(wx.Dialog):
         self.list.Bind(wx.EVT_CHAR, self.on_char)
 
         self.add_btn = wx.Button(self, label="&Add...")
+        self.add_btn.SetName("Add indexer")
         self.edit_btn = wx.Button(self, label="&Edit...")
+        self.edit_btn.SetName("Edit indexer")
         self.remove_btn = wx.Button(self, label="&Remove")
+        self.remove_btn.SetName("Remove indexer")
         self.add_btn.Bind(wx.EVT_BUTTON, self.on_add)
         self.edit_btn.Bind(wx.EVT_BUTTON, self.on_edit)
         self.remove_btn.Bind(wx.EVT_BUTTON, self.on_remove)

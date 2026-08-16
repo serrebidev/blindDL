@@ -34,106 +34,55 @@ class SourcesDialog(wx.Dialog):
                   for s in self.sources]
 
         list_label = wx.StaticText(self, label="&Sites:")
-        self.check_list = wx.CheckListBox(self, choices=labels)
-        self.check_list.SetName("Music sites")
-        self.check_list.SetHelpText(
-            "Space toggles a site. Context Menu selects or clears all.")
-        disabled = set(config["disabled_music_sources"])
-        for index, source in enumerate(self.sources):
-            self.check_list.Check(index, source not in disabled)
-        self.check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
-        self.check_list.Bind(
-            wx.EVT_CONTEXT_MENU,
-            lambda event: self.on_context_menu(event, self.check_list),
+        self.check_list = self._checkbox_list(
+            self.sources, labels, "Music sites",
+            "Space toggles a site. Context Menu selects or clears all.",
+            set(config["disabled_music_sources"]),
         )
-        if labels:
-            self.check_list.SetSelection(0)
 
         self.book_sources = book_backend.sources_by_label()
-        self.book_check_list = wx.CheckListBox(
-            self,
-            choices=[book_backend.source_label(source)
-                     for source in self.book_sources],
+        self.book_check_list = self._checkbox_list(
+            self.book_sources,
+            [book_backend.source_label(source)
+             for source in self.book_sources],
+            "Book libraries",
+            "Space toggles a library. Context Menu selects or clears all.",
+            set(config["disabled_book_sources"]),
         )
-        self.book_check_list.SetName("Book libraries")
-        self.book_check_list.SetHelpText(
-            "Space toggles a library. Context Menu selects or clears all.")
-        disabled_books = set(config["disabled_book_sources"])
-        for index, source in enumerate(self.book_sources):
-            self.book_check_list.Check(index, source not in disabled_books)
-        self.book_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
-        self.book_check_list.Bind(
-            wx.EVT_CONTEXT_MENU,
-            lambda event: self.on_context_menu(event, self.book_check_list),
-        )
-        if self.book_sources:
-            self.book_check_list.SetSelection(0)
 
         # Sites whose package is not installed are not listed at all, so
         # nothing here can be checked and then quietly do nothing.
         self.audiobook_sources = audiobook_backend.sources_by_label()
-        self.audiobook_check_list = wx.CheckListBox(
-            self,
-            choices=[audiobook_backend.source_label(source)
-                     for source in self.audiobook_sources],
+        self.audiobook_check_list = self._checkbox_list(
+            self.audiobook_sources,
+            [audiobook_backend.source_label(source)
+             for source in self.audiobook_sources],
+            "Audiobook sites",
+            "Space toggles a site. Context Menu selects or clears all.",
+            set(config["disabled_audiobook_sources"]),
         )
-        self.audiobook_check_list.SetName("Audiobook sites")
-        self.audiobook_check_list.SetHelpText(
-            "Space toggles a site. Context Menu selects or clears all.")
-        disabled_audiobooks = set(config["disabled_audiobook_sources"])
-        for index, source in enumerate(self.audiobook_sources):
-            self.audiobook_check_list.Check(
-                index, source not in disabled_audiobooks)
-        self.audiobook_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
-        self.audiobook_check_list.Bind(
-            wx.EVT_CONTEXT_MENU,
-            lambda event: self.on_context_menu(event,
-                                               self.audiobook_check_list),
-        )
-        if self.audiobook_sources:
-            self.audiobook_check_list.SetSelection(0)
 
         self.archive_sources = archive_backend.sources_by_label()
-        self.archive_check_list = wx.CheckListBox(
-            self,
-            choices=[archive_backend.source_label(source)
-                     for source in self.archive_sources],
+        self.archive_check_list = self._checkbox_list(
+            self.archive_sources,
+            [archive_backend.source_label(source)
+             for source in self.archive_sources],
+            "Internet Archive collections",
+            "Space toggles a collection. Context Menu selects or clears all.",
+            set(config["disabled_archive_sources"]),
         )
-        self.archive_check_list.SetName("Internet Archive collections")
-        self.archive_check_list.SetHelpText(
-            "Space toggles a collection. Context Menu selects or clears all.")
-        disabled_archive = set(config["disabled_archive_sources"])
-        for index, source in enumerate(self.archive_sources):
-            self.archive_check_list.Check(index, source not in disabled_archive)
-        self.archive_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
-        self.archive_check_list.Bind(
-            wx.EVT_CONTEXT_MENU,
-            lambda event: self.on_context_menu(event, self.archive_check_list),
-        )
-        if self.archive_sources:
-            self.archive_check_list.SetSelection(0)
 
         # Includes the user's own feeds, so a private tracker reached through
         # Prowlarr or Jackett switches off like any other indexer.
         self.torrent_sources = torrent_backend.sources_by_label(config)
-        self.torrent_check_list = wx.CheckListBox(
-            self,
-            choices=[torrent_backend.source_label(source)
-                     for source in self.torrent_sources],
+        self.torrent_check_list = self._checkbox_list(
+            self.torrent_sources,
+            [torrent_backend.source_label(source)
+             for source in self.torrent_sources],
+            "Torrent indexers",
+            "Space toggles an indexer. Context Menu selects or clears all.",
+            set(config["disabled_torrent_sources"]),
         )
-        self.torrent_check_list.SetName("Torrent indexers")
-        self.torrent_check_list.SetHelpText(
-            "Space toggles an indexer. Context Menu selects or clears all.")
-        disabled_torrents = set(config["disabled_torrent_sources"])
-        for index, source in enumerate(self.torrent_sources):
-            self.torrent_check_list.Check(index, source not in disabled_torrents)
-        self.torrent_check_list.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
-        self.torrent_check_list.Bind(
-            wx.EVT_CONTEXT_MENU,
-            lambda event: self.on_context_menu(event, self.torrent_check_list),
-        )
-        if self.torrent_sources:
-            self.torrent_check_list.SetSelection(0)
 
         disabled_adult = set(config["disabled_adult_sources"])
         self.adult_check_list = self._create_adult_list(
@@ -172,52 +121,71 @@ class SourcesDialog(wx.Dialog):
 
     # -- helpers -------------------------------------------------------------
 
+    def _checkbox_list(self, sources, labels, name, help_text, disabled,
+                       enabled=True):
+        """One accessible checklist: a report ListCtrl checkbox column.
+
+        wx.CheckListBox never exposes the checked state to NVDA on Windows,
+        so sources are listed in a ListCtrl with a checkbox column, the same
+        way the Item Picker lists downloads.
+        """
+        control = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        control.EnableCheckBoxes()
+        control.SetName(name)
+        control.SetHelpText(help_text)
+        control.InsertColumn(0, "")
+        for index, (source, label) in enumerate(zip(sources, labels)):
+            control.InsertItem(index, label)
+            control.CheckItem(index, source not in disabled)
+        control.SetColumnWidth(0, wx.LIST_AUTOSIZE)
+        control.Enable(enabled)
+        control.Bind(wx.EVT_LIST_ITEM_CHECKED, self.on_toggle)
+        control.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self.on_toggle)
+        control.Bind(
+            wx.EVT_CONTEXT_MENU,
+            lambda event: self.on_context_menu(event, control),
+        )
+        if labels:
+            control.Select(0)
+        return control
+
     def _create_adult_list(self, sources, unavailable, disabled, name):
         labels = [
             adult_backend.source_label(source)
             + (UNAVAILABLE if source in unavailable else "")
             for source in sources
         ]
-        control = wx.CheckListBox(self, choices=labels)
-        control.SetName(name)
-        control.SetHelpText(
+        return self._checkbox_list(
+            sources, labels, name,
             "Space toggles a site. Unavailable providers indicate an "
-            "incomplete installation.")
-        control.Enable(bool(self.config["adult_sites_enabled"]))
-        for index, source in enumerate(sources):
-            control.Check(index, source not in disabled)
-        control.Bind(wx.EVT_CHECKLISTBOX, self.on_toggle)
-        control.Bind(
-            wx.EVT_CONTEXT_MENU,
-            lambda event: self.on_context_menu(event, control),
+            "incomplete installation.",
+            disabled,
+            enabled=bool(self.config["adult_sites_enabled"]),
         )
-        if labels:
-            control.SetSelection(0)
-        return control
 
     def _checked_count(self):
         return sum(1 for i in range(len(self.sources))
-                   if self.check_list.IsChecked(i))
+                   if self.check_list.IsItemChecked(i))
 
     def _adult_checked_count(self):
         return sum(1 for index in range(len(self.adult_sources))
-                   if self.adult_check_list.IsChecked(index))
+                   if self.adult_check_list.IsItemChecked(index))
 
     def _book_checked_count(self):
         return sum(1 for index in range(len(self.book_sources))
-                   if self.book_check_list.IsChecked(index))
+                   if self.book_check_list.IsItemChecked(index))
 
     def _audiobook_checked_count(self):
         return sum(1 for index in range(len(self.audiobook_sources))
-                   if self.audiobook_check_list.IsChecked(index))
+                   if self.audiobook_check_list.IsItemChecked(index))
 
     def _archive_checked_count(self):
         return sum(1 for index in range(len(self.archive_sources))
-                   if self.archive_check_list.IsChecked(index))
+                   if self.archive_check_list.IsItemChecked(index))
 
     def _torrent_checked_count(self):
         return sum(1 for index in range(len(self.torrent_sources))
-                   if self.torrent_check_list.IsChecked(index))
+                   if self.torrent_check_list.IsItemChecked(index))
 
     def _update_count(self):
         self.count_text.SetLabel(
@@ -232,8 +200,8 @@ class SourcesDialog(wx.Dialog):
             f"{len(self.adult_sources)} adult sites selected.")
 
     def _set_all(self, control, checked):
-        for index in range(control.GetCount()):
-            control.Check(index, checked)
+        for index in range(control.GetItemCount()):
+            control.CheckItem(index, checked)
         self._update_count()
         control.SetFocus()
 
@@ -256,22 +224,22 @@ class SourcesDialog(wx.Dialog):
         """Write the selection back into the config object."""
         self.config["disabled_music_sources"] = [
             source for index, source in enumerate(self.sources)
-            if not self.check_list.IsChecked(index)]
+            if not self.check_list.IsItemChecked(index)]
         self.config["disabled_adult_sources"] = [
             source for index, source in enumerate(self.adult_sources)
-            if not self.adult_check_list.IsChecked(index)]
+            if not self.adult_check_list.IsItemChecked(index)]
         self.config["disabled_book_sources"] = [
             source for index, source in enumerate(self.book_sources)
-            if not self.book_check_list.IsChecked(index)]
+            if not self.book_check_list.IsItemChecked(index)]
         self.config["disabled_audiobook_sources"] = [
             source for index, source in enumerate(self.audiobook_sources)
-            if not self.audiobook_check_list.IsChecked(index)]
+            if not self.audiobook_check_list.IsItemChecked(index)]
         self.config["disabled_archive_sources"] = [
             source for index, source in enumerate(self.archive_sources)
-            if not self.archive_check_list.IsChecked(index)]
+            if not self.archive_check_list.IsItemChecked(index)]
         self.config["disabled_torrent_sources"] = [
             source for index, source in enumerate(self.torrent_sources)
-            if not self.torrent_check_list.IsChecked(index)]
+            if not self.torrent_check_list.IsItemChecked(index)]
         self.config.save()
 
     def summary(self):

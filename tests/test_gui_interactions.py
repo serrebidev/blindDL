@@ -104,6 +104,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     )
     from blinddl.gui.settings_dialog import DEEZER_FORMAT_CHOICES, SettingsDialog
     from blinddl.gui.soulseek_user_dialog import UserBrowserDialog
+    from blinddl.gui.feeds_dialog import FeedsDialog
     from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import (
         SUBS_SORT_CHECKED,
@@ -3432,11 +3433,56 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertIn("pornhub", dialog.adult_sources)
 
         pornhub_index = dialog.adult_sources.index("pornhub")
-        dialog.adult_check_list.Check(pornhub_index, False)
+        dialog.adult_check_list.CheckItem(pornhub_index, False)
         dialog.apply()
 
         self.assertIn("pornhub", config["disabled_adult_sources"])
         self.assertNotIn("eporner", config["disabled_adult_sources"])
+        dialog.Destroy()
+
+    def test_sources_dialog_uses_accessible_checkbox_lists(self):
+        # wx.CheckListBox hides the checked state from NVDA on Windows, so
+        # every source list must be a report ListCtrl with a checkbox column.
+        config = _SettingsConfig()
+        dialog = SourcesDialog(self.host, config)
+
+        for attribute in (
+            "check_list",
+            "book_check_list",
+            "audiobook_check_list",
+            "archive_check_list",
+            "torrent_check_list",
+            "adult_check_list",
+        ):
+            control = getattr(dialog, attribute)
+            self.assertIsInstance(control, wx.ListCtrl, attribute)
+            self.assertTrue(control.GetName(), attribute)
+            self.assertTrue(hasattr(control, "IsItemChecked"), attribute)
+        dialog.Destroy()
+
+    def test_soulseek_user_browser_buttons_say_what_they_act_on(self):
+        frame = self.frame
+        frame.config = _SettingsConfig()
+        dialog = UserBrowserDialog(self.host, frame)
+
+        expected = {
+            "browse_button": "Browse this user's files",
+            "message_button": "Message this Soulseek user",
+            "friend_button": "Add this user as a friend",
+            "slot_button": "Give this user a free slot",
+            "profile_button": "View this user's profile",
+        }
+        for attribute, name in expected.items():
+            self.assertEqual(getattr(dialog, attribute).GetName(), name)
+        dialog.Destroy()
+
+    def test_feeds_dialog_buttons_say_what_they_act_on(self):
+        config = _SettingsConfig()
+        dialog = FeedsDialog(self.host, config)
+
+        self.assertEqual(dialog.add_btn.GetName(), "Add indexer")
+        self.assertEqual(dialog.edit_btn.GetName(), "Edit indexer")
+        self.assertEqual(dialog.remove_btn.GetName(), "Remove indexer")
         dialog.Destroy()
 
     def test_search_shutdown_stops_timer_and_ignores_late_results(self):
