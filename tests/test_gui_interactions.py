@@ -2997,11 +2997,15 @@ class GuiInteractionTests(unittest.TestCase):
         }
         for attribute, name in expected.items():
             picker = getattr(dialog, attribute)
+            self.assertEqual(picker.GetName(), name)
+            # The inner text box exists on Windows and macOS, where focus
+            # lands in it; wxGTK renders a file picker without one, in which
+            # case the picker's own name is all there is to read.
             text = (
                 picker.GetTextCtrl() if hasattr(picker, "GetTextCtrl") else None
             )
-            self.assertIsNotNone(text, attribute)
-            self.assertEqual(text.GetName(), name)
+            if text is not None:
+                self.assertEqual(text.GetName(), name)
         dialog.Destroy()
 
     def test_apple_music_copy_button_says_what_it_copies(self):
