@@ -10,11 +10,14 @@ swarm about itself, and that the settings a user types survive the trip into
 libtorrent's own units.
 """
 
-import unittest
+import os
+import tempfile
 import threading
+import time
+import unittest
 from unittest import mock
 
-from blinddl import torrent_engine
+from blinddl import torrent_backend, torrent_engine
 from blinddl.config import CONFIG_VERSION, DEFAULTS
 
 
@@ -246,6 +249,151 @@ class UploadSnapshotTests(unittest.TestCase):
 
         self.assertEqual(rows, [{"key": "abc", "title": "Release"}])
         self.assertIsNot(rows[0], engine._uploads_cache[0])
+
+
+class RealLibtorrentTests(unittest.TestCase):
+    """Exercise the engine against the real libtorrent bindings.
+
+    Everything above stubs libtorrent so the module's pure logic is testable
+    without it installed. A stub cannot catch a bindings break, though:
+    libtorrent 2.1 removed torrent_status.paused and made pause() leave
+    auto_managed set, both of which a release must fail on rather than ship.
+    These tests run the real library, and skip only where it is not
+    installed (release builds always carry it, so the release gates still
+    exercise them).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.lt = torrent_engine.libtorrent_module()
+        except torrent_engine.TorrentEngineError:
+            raise unittest.SkipTest("libtorrent is not installed")  # noqa: B904
+
+    def _quiet_config(self):
+        # Pinned client identity and no public swarm: these tests never need
+        # the network and never announce anywhere.
+        return _Config(
+            torrent_client_version="5.2.3",
+            torrent_dht=False,
+            torrent_port_forward=False,
+        )
+
+    def _write_torrent(self, folder, name="f.bin", size=64 * 1024):
+        """Create a single-file .torrent plus its payload; return both paths."""
+        payload = os.path.join(folder, name)
+        with open(payload, "wb") as handle:
+            handle.write(b"1" * size)
+        entry = self.lt.create_file_entry(name, size)
+        creator = self.lt.create_torrent([entry])
+        creator.set_creator("blinddl-test")
+        self.lt.set_piece_hashes(creator, folder)
+        torrent_path = os.path.join(folder, "test.torrent")
+        with open(torrent_path, "wb") as handle:
+            handle.write(self.lt.bencode(creator.generate()))
+        return torrent_path, payload
+
+    @staticmethod
+    def _wait_for(status_call, predicate, timeout=10.0):
+        deadline = time.time() + timeout
+        status = status_call()
+        while not predicate(status) and time.time() < deadline:
+            time.sleep(0.05)
+            status = status_call()
+        return status
+
+    def test_session_accepts_every_setting_the_engine_sends(self):
+        config = self._quiet_config()
+        config["torrent_proxy"] = "socks5://vpn.example:1080"
+        settings = torrent_engine.session_settings(config, allow_network=False)
+        # An unknown or removed setting raises KeyError; a changed config
+        # must apply to the live session the same way.
+        session = self.lt.session(dict(settings))
+        session.apply_settings(dict(settings))
+
+    def test_a_torrent_file_add_is_filed_under_its_real_hash(self):
+        config = self._quiet_config()
+        engine = object.__new__(torrent_engine.TorrentEngine)
+        engine._lt = self.lt
+        with tempfile.TemporaryDirectory() as folder:
+            torrent_path, _payload = self._write_torrent(folder)
+            item = {"title": "Test",
+                    "download_url": "https://example.invalid/test.torrent"}
+            with mock.patch.object(torrent_backend, "resolve_magnet",
+                                  return_value=None), \
+                    mock.patch.object(torrent_backend, "fetch_torrent_file",
+                                      return_value=torrent_path), \
+                    mock.patch.object(torrent_engine, "_resume_dir",
+                                      return_value=folder):
+                atp = engine._params_for(item, folder, config)
+            key = torrent_engine._key_for(atp)
+            self.assertNotEqual(set(key), {"0"})
+            self.assertEqual(len(key), 40)
+            self.assertEqual(key, str(atp.ti.info_hashes().v1))
+
+    def test_pause_and_resume_stick_on_a_real_session(self):
+        config = self._quiet_config()
+        engine = torrent_engine.TorrentEngine(config)
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                torrent_path, _payload = self._write_torrent(folder)
+                item = {"title": "Test",
+                        "download_url": "https://example.invalid/test.torrent"}
+                with mock.patch.object(torrent_backend, "resolve_magnet",
+                                      return_value=None), \
+                        mock.patch.object(torrent_backend, "fetch_torrent_file",
+                                          return_value=torrent_path), \
+                        mock.patch.object(torrent_engine, "_resume_dir",
+                                          return_value=folder):
+                    torrent = engine.add(item, folder, config)
+                status = self._wait_for(torrent.handle.status,
+                                        lambda s: s.is_seeding)
+                self.assertEqual(status.progress, 1.0)
+                self.assertFalse(
+                    torrent_engine._status_paused(status, self.lt))
+
+                self.assertTrue(engine.pause_seeding(torrent.key))
+                # A merely paused, still auto-managed seed is started again by
+                # the queue manager within about a second; wait past that.
+                time.sleep(1.5)
+                status = torrent.handle.status()
+                self.assertTrue(
+                    torrent_engine._status_paused(status, self.lt))
+
+                self.assertTrue(engine.resume_seeding(torrent.key))
+                time.sleep(0.5)
+                status = torrent.handle.status()
+                self.assertFalse(
+                    torrent_engine._status_paused(status, self.lt))
+        finally:
+            engine.shutdown()
+
+    def test_resume_data_round_trips_under_the_real_hash(self):
+        # No TorrentEngine here: its maintenance thread drains alerts on its
+        # own, so the round-trip is checked against the raw bindings, which is
+        # what matters -- a saved resume blob must reload under the same hash
+        # the add-time params were filed under.
+        with tempfile.TemporaryDirectory() as folder:
+            torrent_path, _payload = self._write_torrent(folder)
+            ti = self.lt.torrent_info(torrent_path)
+            atp = self.lt.add_torrent_params()
+            atp.ti = ti
+            atp.info_hashes = ti.info_hashes()  # what _params_for now does
+            atp.save_path = folder
+            key = torrent_engine._key_for(atp)
+            session = self.lt.session({"listen_interfaces": "0.0.0.0:0"})
+            handle = session.add_torrent(atp)
+            handle.save_resume_data()
+            data = None
+            deadline = time.time() + 10.0
+            while time.time() < deadline and data is None:
+                for alert in session.pop_alerts():
+                    if isinstance(alert, self.lt.save_resume_data_alert):
+                        data = self.lt.write_resume_data_buf(alert.params)
+                time.sleep(0.05)
+            self.assertIsNotNone(data)
+            params = self.lt.read_resume_data(data)
+            self.assertEqual(torrent_engine._key_for(params), key)
 
 
 class AvailabilityTests(unittest.TestCase):

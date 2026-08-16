@@ -497,7 +497,13 @@ class TorrentEngine:
             path = torrent_backend.fetch_torrent_file(item, _resume_dir())
             atp = lt.add_torrent_params()
             try:
-                atp.ti = lt.torrent_info(path)
+                ti = lt.torrent_info(path)
+                atp.ti = ti
+                # add_torrent_params keeps its info hashes separate from the
+                # torrent_info; the session fills them in only after
+                # add_torrent, but _key_for needs them before that to file
+                # the torrent (and its resume data) under its real hash.
+                atp.info_hashes = ti.info_hashes()
             except RuntimeError as exc:
                 raise TorrentEngineError(
                     f"That tracker's torrent file could not be read: {exc}"
@@ -555,8 +561,15 @@ class TorrentEngine:
             torrent = self._torrents.get(str(key or "").lower())
         if torrent is None:
             return False
+        lt = self._lt
         try:
-            torrent.handle.pause()
+            # libtorrent 2.1's pause() no longer clears auto_managed, so the
+            # queue manager starts the seed again a moment later. Take it out
+            # of auto-management and pause it in one step.
+            torrent.handle.set_flags(
+                lt.torrent_flags.paused,
+                lt.torrent_flags.paused | lt.torrent_flags.auto_managed,
+            )
         except RuntimeError:
             return False
         return True
@@ -566,8 +579,12 @@ class TorrentEngine:
             torrent = self._torrents.get(str(key or "").lower())
         if torrent is None:
             return False
+        lt = self._lt
         try:
-            torrent.handle.resume()
+            torrent.handle.set_flags(
+                lt.torrent_flags.auto_managed,
+                lt.torrent_flags.paused | lt.torrent_flags.auto_managed,
+            )
         except RuntimeError:
             return False
         return True
@@ -622,7 +639,7 @@ class TorrentEngine:
         for torrent, status in statuses:
             ratio = _ratio(status)
             peers = max(0, int(getattr(status, "num_peers", 0) or 0))
-            paused = bool(getattr(status, "paused", False))
+            paused = _status_paused(status, self._lt)
             rows.append(
                 {
                     "key": torrent.key,
@@ -786,6 +803,18 @@ def _ratio(status):
     """Share ratio, measured against what the torrent actually is."""
     downloaded = max(status.all_time_download, status.total_wanted, 1)
     return status.all_time_upload / float(downloaded)
+
+
+def _status_paused(status, lt):
+    """Whether a torrent_status is paused, across libtorrent 2.0 and 2.1.
+
+    libtorrent 2.1 dropped the dedicated ``paused`` field from
+    torrent_status; the pause state now lives in the torrent's flags.
+    """
+    flags = getattr(status, "flags", None)
+    if flags is not None:
+        return bool(int(flags) & int(lt.torrent_flags.paused))
+    return bool(getattr(status, "paused", False))
 
 
 # -- module-level engine -----------------------------------------------------

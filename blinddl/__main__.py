@@ -58,7 +58,20 @@ def _self_test(output_path: str) -> int:
     check("sideb", lambda: __import__("sideb.app.main", fromlist=["Application"]).__name__)
     check("crypto", lambda: __import__("Crypto.Cipher.Blowfish", fromlist=["new"]).__name__)
     check("cryptography", lambda: __import__("cryptography").__version__)
-    check("libtorrent", lambda: __import__("libtorrent").__version__)
+    def libtorrent_runtime():
+        libtorrent = __import__("libtorrent")
+        version = str(libtorrent.__version__)
+        # The torrent engine calls these on every download. A partial or
+        # stale binding must fail the release rather than merely import.
+        libtorrent.generate_fingerprint("qB", 5, 2, 3, 0)
+        libtorrent.parse_magnet_uri(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
+        libtorrent.torrent_flags.paused
+        session = libtorrent.session({"listen_interfaces": "0.0.0.0:0"})
+        session.apply_settings({"enable_dht": False})
+        return version
+
+    check("libtorrent", libtorrent_runtime)
     check("audiobooker", lambda: __import__("audiobooker").__name__)
     check("curl_cffi", lambda: __import__("curl_cffi").__version__)
     check("lxml", lambda: ".".join(map(
