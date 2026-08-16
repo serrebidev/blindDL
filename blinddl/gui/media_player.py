@@ -332,6 +332,11 @@ class MediaPlayerPanel(wx.Panel):
             return
         self.timer.Stop()
         self.play_btn.SetLabel("&Play")
+        # Playback is over (it never really began), so the controls come
+        # back on. load() disables them while the stream is still Opening;
+        # without this they stay dead after a decode error and the only
+        # way to retry is to start a whole new selection.
+        self._enable_controls(True)
         self.now_playing.SetLabel(f"Could not play: {self._title}")
         self.frame.announce("The player could not decode or open this media.")
 

@@ -1241,6 +1241,44 @@ class GuiInteractionTests(unittest.TestCase):
         panel.timer.Stop.assert_not_called()
         panel.frame.announce.assert_not_called()
 
+    def test_decode_error_reenables_controls(self):
+        panel = SimpleNamespace(
+            _shutting_down=False,
+            IsBeingDeleted=mock.Mock(return_value=False),
+            _load_generation=1,
+            _title="Broken",
+            timer=mock.Mock(),
+            play_btn=mock.Mock(),
+            now_playing=mock.Mock(),
+            frame=mock.Mock(),
+            _enable_controls=mock.Mock(),
+        )
+
+        media_player.MediaPlayerPanel._playback_error(panel, 1)
+
+        panel._enable_controls.assert_called_once_with(True)
+        panel.play_btn.SetLabel.assert_called_once_with("&Play")
+        panel.now_playing.SetLabel.assert_called_once_with(
+            "Could not play: Broken")
+
+    def test_stale_decode_error_does_not_touch_controls(self):
+        panel = SimpleNamespace(
+            _shutting_down=False,
+            IsBeingDeleted=mock.Mock(return_value=False),
+            _load_generation=2,
+            _title="New",
+            timer=mock.Mock(),
+            play_btn=mock.Mock(),
+            now_playing=mock.Mock(),
+            frame=mock.Mock(),
+            _enable_controls=mock.Mock(),
+        )
+
+        media_player.MediaPlayerPanel._playback_error(panel, 1)
+
+        panel._enable_controls.assert_not_called()
+        panel.timer.Stop.assert_not_called()
+
     def test_completed_download_only_rescans_visible_library(self):
         frame = SimpleNamespace(
             _closing=False,
