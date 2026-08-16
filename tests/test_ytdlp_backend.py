@@ -194,6 +194,34 @@ class YtDlpBackendTests(unittest.TestCase):
         self.assertEqual(result, "")
         self.assertEqual(len(_YoutubeDL.instances), 2)
 
+    def test_download_falls_back_when_cookies_fail_wrapped_in_download_error(self):
+        # download() and resolve_stream() do not set ignoreerrors, so yt-dlp's
+        # cookiejar property reports the cookie failure with "ERROR:" and
+        # raises a DownloadError whose __context__ is the CookieLoadError.
+        # The fallback must recognise that wrapped form too.
+        class _FailCookiesWrapped(_YoutubeDL):
+            def download(self, urls):
+                if self.options.get("cookiesfrombrowser"):
+                    cookie_error = CookieLoadError("failed to load cookies")
+                    wrapped = yt_dlp.utils.DownloadError(
+                        "ERROR: could not find firefox cookies database")
+                    wrapped.__context__ = cookie_error
+                    raise wrapped
+                self.downloaded.extend(urls)
+
+        with (
+            mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _FailCookiesWrapped),
+            mock.patch.object(
+                ytdlp_backend, "_automatic_cookie_file", return_value={}),
+        ):
+            result = ytdlp_backend.download(
+                "https://example.invalid/video", "out", audio_only=True,
+                cookies_from_browser="firefox")
+
+        self.assertEqual(result, "")
+        self.assertEqual(len(_YoutubeDL.instances), 2)
+
     def test_watch_url_with_list_expands_to_the_whole_playlist(self):
         # yt-dlp only redirects watch?v=...&list=... to its playlist when the
         # top-level URL is resolved, which "in_playlist" does and True does not.

@@ -120,6 +120,17 @@ def _with_cookie_fallback(cookies_from_browser, cookies_file, make_opts, run):
             return run(make_opts(cookie_opts))
         except CookieLoadError as exc:
             last_error = exc
+            continue
+        except yt_dlp.utils.DownloadError as exc:
+            # download() and resolve_stream() do not set ignoreerrors, so
+            # yt-dlp's cookiejar catches the CookieLoadError and re-raises it
+            # as a DownloadError prefixed with "ERROR:". Recognise that
+            # wrapped form (its __context__ is the CookieLoadError) and treat
+            # it like the direct error: move to the next cookie attempt.
+            if isinstance(exc.__context__, CookieLoadError):
+                last_error = exc
+                continue
+            raise
     if last_error is not None:
         raise last_error
     raise RuntimeError(
