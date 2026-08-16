@@ -2718,7 +2718,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertFalse(dialog.onlyfans_auth_picker.IsEnabled())
         self.assertFalse(dialog.justforfans_auth_picker.IsEnabled())
         dialog.adult_sites_check.SetValue(True)
-        dialog.cookies_choice.SetSelection(1)
+        dialog.cookies_choice.SetSelection(2)
         dialog.onlyfans_auth_picker.SetPath("onlyfans.json")
         dialog.justforfans_auth_picker.SetPath("justforfans.json")
         dialog.apply()

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import yt_dlp
+from yt_dlp.cookies import CookieLoadError
 
 from blinddl import search_order, ytdlp_backend
 
@@ -60,6 +61,138 @@ class YtDlpBackendTests(unittest.TestCase):
         self.assertEqual(items[0]["title"], "Example")
         self.assertEqual(
             _YoutubeDL.instances[0].options["cookiesfrombrowser"], ("edge",))
+
+    def test_cookie_attempts_prefer_file_then_browser_then_none(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            path = f.name
+        try:
+            with mock.patch.object(
+                    ytdlp_backend, "_automatic_cookie_file",
+                    return_value={"auto": True}):
+                # A valid cookies file wins over any browser choice.
+                self.assertEqual(
+                    ytdlp_backend._cookie_attempts("edge", path),
+                    [{"cookiefile": path}, {}],
+                )
+                # A named browser is used as-is, with no silent auto-detection.
+                self.assertEqual(
+                    ytdlp_backend._cookie_attempts("edge", None),
+                    [{"cookiesfrombrowser": ("edge",)}, {}],
+                )
+                # No choice at all: just no cookies.
+                self.assertEqual(
+                    ytdlp_backend._cookie_attempts(None, None),
+                    [{}],
+                )
+                # The opt-in auto choice adds the automatic export.
+                self.assertEqual(
+                    ytdlp_backend._cookie_attempts("auto", None),
+                    [{"auto": True}, {}],
+                )
+                self.assertEqual(
+                    ytdlp_backend._cookie_attempts("auto", path),
+                    [{"cookiefile": path}, {"auto": True}, {}],
+                )
+        finally:
+            Path(path).unlink()
+
+    def test_auto_browser_cookies_opt_in_uses_the_exported_file(self):
+        with (
+            mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL", _YoutubeDL),
+            mock.patch.object(
+                ytdlp_backend, "_automatic_cookie_file",
+                return_value={"cookiefile": "exported.txt"}),
+        ):
+            ytdlp_backend.extract_flat(
+                "https://example.invalid/video", cookies_from_browser="auto")
+
+        self.assertEqual(
+            _YoutubeDL.instances[0].options["cookiefile"], "exported.txt")
+        self.assertNotIn(
+            "cookiesfrombrowser", _YoutubeDL.instances[0].options)
+
+    def test_broken_browser_cookies_fall_back_to_no_cookies(self):
+        class _FailCookies(_YoutubeDL):
+            def extract_info(self, url, download=False):
+                if self.options.get("cookiesfrombrowser"):
+                    raise CookieLoadError("failed to load cookies")
+                return {
+                    "id": "1", "title": "Example", "webpage_url": url,
+                    "url": "https://media.example/stream.mp4",
+                }
+
+        with (
+            mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL", _FailCookies),
+            mock.patch.object(
+                ytdlp_backend, "_automatic_cookie_file", return_value={}),
+        ):
+            items, title = ytdlp_backend.extract_flat(
+                "https://example.invalid/video", cookies_from_browser="firefox")
+
+        self.assertEqual(title, "Example")
+        self.assertEqual(len(_YoutubeDL.instances), 2)
+        self.assertEqual(
+            _YoutubeDL.instances[0].options["cookiesfrombrowser"], ("firefox",))
+        self.assertNotIn("cookiesfrombrowser", _YoutubeDL.instances[1].options)
+        self.assertNotIn("cookiefile", _YoutubeDL.instances[1].options)
+
+    def test_existing_cookies_file_wins_over_the_browser(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            path = f.name
+        try:
+            with mock.patch.object(
+                    ytdlp_backend.yt_dlp, "YoutubeDL", _YoutubeDL):
+                ytdlp_backend.extract_flat(
+                    "https://example.invalid/video",
+                    cookies_from_browser="edge", cookies_file=path)
+            opts = _YoutubeDL.instances[0].options
+            self.assertEqual(opts["cookiefile"], path)
+            self.assertNotIn("cookiesfrombrowser", opts)
+        finally:
+            Path(path).unlink()
+
+    def test_resolve_stream_falls_back_when_browser_cookies_fail(self):
+        class _FailCookies(_YoutubeDL):
+            def extract_info(self, url, download=False):
+                if self.options.get("cookiesfrombrowser"):
+                    raise CookieLoadError("failed to load cookies")
+                return {
+                    "id": "1", "title": "Example", "webpage_url": url,
+                    "url": "https://media.example/stream.mp4",
+                }
+
+        with (
+            mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL", _FailCookies),
+            mock.patch.object(
+                ytdlp_backend, "_automatic_cookie_file", return_value={}),
+        ):
+            stream = ytdlp_backend.resolve_stream(
+                "https://example.invalid/video", audio_only=True,
+                cookies_from_browser="firefox")
+
+        self.assertEqual(stream, "https://media.example/stream.mp4")
+        self.assertEqual(len(_YoutubeDL.instances), 2)
+
+    def test_download_falls_back_when_browser_cookies_fail(self):
+        class _FailCookies(_YoutubeDL):
+            def download(self, urls):
+                if self.options.get("cookiesfrombrowser"):
+                    raise CookieLoadError("failed to load cookies")
+                self.downloaded.extend(urls)
+
+        with (
+            mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL", _FailCookies),
+            mock.patch.object(
+                ytdlp_backend, "_automatic_cookie_file", return_value={}),
+        ):
+            result = ytdlp_backend.download(
+                "https://example.invalid/video", "out", audio_only=True,
+                cookies_from_browser="firefox")
+
+        self.assertEqual(result, "")
+        self.assertEqual(len(_YoutubeDL.instances), 2)
 
     def test_watch_url_with_list_expands_to_the_whole_playlist(self):
         # yt-dlp only redirects watch?v=...&list=... to its playlist when the

@@ -11,9 +11,11 @@ them onto the main thread.
 
 import os
 import re
+import tempfile
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import yt_dlp
+from yt_dlp.cookies import CookieLoadError
 
 from . import search_order
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
@@ -46,6 +48,82 @@ X265_ARGS = (
 
 class DownloadCancelled(Exception):
     """Raised inside progress hooks when the user cancels a download."""
+
+
+# The ``cookies_from_browser`` value that means "detect any installed
+# browser", as opposed to one named browser. It is an explicit opt-in: a
+# user who has not chosen it never has their browser read automatically.
+AUTO_COOKIES = "auto"
+
+
+def _cookie_attempts(cookies_from_browser, cookies_file):
+    """Cookie options to try in order, ending with no cookies at all.
+
+    The first attempt is what the user configured -- their cookies file when
+    it still exists, otherwise their chosen browser. A browser named
+    ``AUTO_COOKIES`` is the opt-in that automatically exports cookies from
+    whichever installed browser has them. The last attempt always uses no
+    cookies, so a bad or unset cookie choice degrades instead of failing the
+    whole request with "failed to load cookies".
+    """
+    attempts = []
+    if cookies_file and os.path.isfile(str(cookies_file)):
+        attempts.append({"cookiefile": str(cookies_file)})
+    elif cookies_from_browser and cookies_from_browser != AUTO_COOKIES:
+        attempts.append({"cookiesfrombrowser": (str(cookies_from_browser),)})
+    if cookies_from_browser == AUTO_COOKIES:
+        auto = _automatic_cookie_file()
+        if auto:
+            attempts.append(auto)
+    attempts.append({})
+    return attempts
+
+
+def _automatic_cookie_file():
+    """Export a cookies.txt from an installed browser, without elevation.
+
+    Returns a ``{"cookiefile": path}`` opts dict, or ``{}`` when no
+    plain-text browser has cookies. App-bound (Chromium v20) browsers are
+    skipped here: unwrapping them needs a UAC prompt, which must not appear
+    silently while a URL is loading -- those users export once in Settings
+    instead. Only reached after the user opted in via ``AUTO_COOKIES``.
+    """
+    try:
+        from . import browser_cookies
+    except ImportError:
+        return {}
+    descriptor, path = tempfile.mkstemp(
+        prefix="blinddl_cookies_", suffix=".txt")
+    os.close(descriptor)
+    try:
+        browser_cookies.export_cookies(path, elevate=False)
+    except Exception:  # noqa: BLE001 - best effort; fall back to no cookies
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return {}
+    return {"cookiefile": path}
+
+
+def _with_cookie_fallback(cookies_from_browser, cookies_file, make_opts, run):
+    """Run ``run(make_opts(cookie_opts))`` once per cookie attempt.
+
+    ``make_opts`` folds one cookie attempt into a complete opts dict and
+    ``run`` performs the yt-dlp operation on that dict, returning its result.
+    A :class:`CookieLoadError` moves to the next attempt; every other
+    exception propagates untouched.
+    """
+    last_error = None
+    for cookie_opts in _cookie_attempts(cookies_from_browser, cookies_file):
+        try:
+            return run(make_opts(cookie_opts))
+        except CookieLoadError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(
+        "unreachable: the no-cookies attempt cannot fail cookie loading")
 
 
 def format_duration(seconds):
@@ -227,12 +305,15 @@ def extract_flat(url, cookies_from_browser=None, cookies_file=None,
     }
     if limit:
         opts["playlistend"] = int(limit)
-    if cookies_file:
-        opts["cookiefile"] = str(cookies_file)
-    if cookies_from_browser:
-        opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    def run(opts_dict):
+        with yt_dlp.YoutubeDL(opts_dict) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    info = _with_cookie_fallback(
+        cookies_from_browser, cookies_file,
+        make_opts=lambda cookie_opts: {**opts, **cookie_opts},
+        run=run,
+    )
     if not info:
         raise RuntimeError(f"Could not extract any information from: {url}")
     title = info.get("title") or url
@@ -295,31 +376,32 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
-        "format": primary_format,
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
-    if cookies_file:
-        opts["cookiefile"] = str(cookies_file)
-    if cookies_from_browser:
-        opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
 
     attempts = [primary_format]
     if fallback_format != primary_format:
         attempts.append(fallback_format)
-    for attempt, fmt in enumerate(attempts):
-        opts["format"] = fmt
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-            break
-        except yt_dlp.utils.ExtractorError as exc:
-            if (attempt + 1 < len(attempts)
-                    and "Requested format is not available" in str(exc)):
-                continue
-            raise
-    else:
+
+    def run(opts_dict):
+        for attempt, fmt in enumerate(attempts):
+            opts_dict["format"] = fmt
+            try:
+                with yt_dlp.YoutubeDL(opts_dict) as ydl:
+                    return ydl.extract_info(url, download=False)
+            except yt_dlp.utils.ExtractorError as exc:
+                if (attempt + 1 < len(attempts)
+                        and "Requested format is not available" in str(exc)):
+                    continue
+                raise
         raise RuntimeError("No playable media stream was found.")
+
+    info = _with_cookie_fallback(
+        cookies_from_browser, cookies_file,
+        make_opts=lambda cookie_opts: {**opts, **cookie_opts},
+        run=run,
+    )
 
     if not info:
         raise RuntimeError("No playable media stream was found.")
@@ -382,10 +464,6 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
-    if cookies_file:
-        opts["cookiefile"] = str(cookies_file)
-    if cookies_from_browser:
-        opts["cookiesfrombrowser"] = (str(cookies_from_browser),)
     if audio_only:
         opts["format"] = "bestaudio/best"
         if audio_format and audio_format != ORIGINAL_FORMAT:
@@ -426,9 +504,16 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
             opts["postprocessor_args"] = {"videoconvertor": list(X265_ARGS)}
         # "original" (and anything unrecognized) leaves the container to
         # yt-dlp, which keeps the streams as they came.
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+    def run(opts_dict):
+        with yt_dlp.YoutubeDL(opts_dict) as ydl:
             ydl.download([url])
+
+    try:
+        _with_cookie_fallback(
+            cookies_from_browser, cookies_file,
+            make_opts=lambda cookie_opts: {**opts, **cookie_opts},
+            run=run,
+        )
     except Exception:
         if cancel_event is not None and cancel_event.is_set():
             raise DownloadCancelled()

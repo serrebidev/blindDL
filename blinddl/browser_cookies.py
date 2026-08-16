@@ -205,8 +205,11 @@ def candidate_browsers(preferred=None):
     root (for ``Local State``) and is ``None`` for Firefox. ``preferred`` is a
     ``cookies_from_browser`` value to try first; when it names a browser that
     was not detected it is added as a fallback so the user's explicit choice
-    is still honoured.
+    is still honoured. The sentinel ``"auto"`` means no preference -- detect
+    whatever is installed.
     """
+    if preferred == "auto":
+        preferred = None
     candidates = []
 
     for key, label, user_data_dir in _chromium_installs():
@@ -311,7 +314,8 @@ def _elevate(candidates, dest_path, require, errors):
     return label
 
 
-def export_cookies(dest_path, preferred=None, needs=None, why=None, require=None):
+def export_cookies(dest_path, preferred=None, needs=None, why=None, require=None,
+                   elevate=True):
     """Extract cookies into ``dest_path`` (Netscape format) and return a label.
 
     Tries every detected browser in turn and keeps the first export that
@@ -319,15 +323,20 @@ def export_cookies(dest_path, preferred=None, needs=None, why=None, require=None
     None, the first browser with any cookies wins. ``why`` is the per-browser
     note recorded when a jar fails ``needs``. ``require`` is an optional
     ``(name, domain_suffixes)`` pair handed to the app-bound helper so it can
-    skip browsers that decrypt but lack the cookie. Raises
-    :class:`CookieExportError` with a per-browser ``errors`` list when none
-    works.
+    skip browsers that decrypt but lack the cookie. With ``elevate=False``,
+    app-bound (Chromium v20) browsers are skipped rather than triggering the
+    UAC helper -- used for the silent automatic fallback, where a prompt must
+    not appear out of nowhere. Raises :class:`CookieExportError` with a
+    per-browser ``errors`` list when none works.
     """
     errors = []
     app_bound = []
     for label, browser_name, profile, user_data_dir in candidate_browsers(preferred):
         if _uses_app_bound(browser_name, profile, user_data_dir):
-            app_bound.append((label, user_data_dir, profile))
+            if elevate:
+                app_bound.append((label, user_data_dir, profile))
+            else:
+                errors.append(f"{label}: app-bound cookies need elevation")
             continue
         try:
             jar = extract_cookies_from_browser(browser_name, profile)

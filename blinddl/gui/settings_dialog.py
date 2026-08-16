@@ -56,6 +56,7 @@ DEEZER_FORMAT_CHOICES = [
 ]
 BROWSER_COOKIE_CHOICES = [
     ("None", ""),
+    ("Auto (any installed browser)", "auto"),
     ("Chrome", "chrome"),
     ("Edge", "edge"),
     ("Firefox", "firefox"),

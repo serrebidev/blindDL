@@ -191,7 +191,10 @@ DEFAULTS = {
     # user explicitly enables them in Settings.
     "adult_sites_enabled": False,
     # Optional browser profile whose cookies yt-dlp may read for sites the
-    # user is already signed into. Empty means no browser-cookie access.
+    # user is already signed into. Empty means no browser-cookie access;
+    # "auto" (the opt-in) detects and reads any installed browser instead of
+    # one named browser. A URL still loads without cookies when neither is
+    # set, so a missing browser never fails the request.
     "cookies_from_browser": "",
     # Optional Netscape cookies.txt exported from a browser (Settings,
     # General, Copy from browser). When set, yt-dlp uses this file for
