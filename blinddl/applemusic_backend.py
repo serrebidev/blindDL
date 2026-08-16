@@ -31,7 +31,16 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from . import search_kind
-from .search_kind import KIND_ALBUM, KIND_ARTIST, KIND_BEST, KIND_TRACK
+from .search_kind import (
+    ARTIST_SCOPE_ALBUMS,
+    ARTIST_SCOPE_ALL,
+    ARTIST_SCOPE_PLAYLISTS,
+    ARTIST_SCOPE_SONGS,
+    KIND_ALBUM,
+    KIND_ARTIST,
+    KIND_BEST,
+    KIND_TRACK,
+)
 
 _SEARCH_SOURCE = "Apple Music"
 _ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
@@ -159,7 +168,8 @@ def supports_kind(kind):
     return search_kind.normalize(kind) in _ITUNES_SEARCH_KINDS
 
 
-def search(query, config=None, order=None, kind=KIND_BEST):
+def search(query, config=None, order=None, kind=KIND_BEST,
+           artist_scope=ARTIST_SCOPE_ALL):
     """Search Apple Music through iTunes' public, credential-free API.
 
     The catalogue behind music.apple.com is the one the iTunes Search API
@@ -169,37 +179,108 @@ def search(query, config=None, order=None, kind=KIND_BEST):
     *kind* is the Search tab's search type. Album returns one row per
     release, which downloads as every track on it; the others return tracks,
     matched on the whole entry or on just the title or artist.
+
+    An artist search takes *artist_scope* further: songs, albums, playlists,
+    or all three. Songs and albums come from the iTunes Search API (which
+    can match the artist field); playlists need the catalog API, since
+    iTunes search has no playlist entity.
     """
     kind = search_kind.normalize(kind)
+    artist_scope = search_kind.normalize_artist_scope(artist_scope)
+
+    def itunes_search(entity, attribute, item_kind):
+        params = {
+            "term": query,
+            "media": "music",
+            "entity": entity,
+            "limit": 200,
+        }
+        if attribute:
+            params["attribute"] = attribute
+        try:
+            response = requests.get(
+                _ITUNES_SEARCH_URL, params=params, timeout=30)
+            response.raise_for_status()
+            results = response.json().get("results", [])
+        except (requests.RequestException, ValueError):
+            return []
+        items = []
+        for entry in results:
+            if item_kind == KIND_ALBUM:
+                url = entry.get("collectionViewUrl") or ""
+                if url:
+                    items.append(_album_item(entry, url))
+                continue
+            url = entry.get("trackViewUrl") or ""
+            if not url:
+                continue
+            items.append(_track_item(entry, url))
+        return items
+
+    if kind == KIND_ARTIST:
+        if artist_scope == ARTIST_SCOPE_ALBUMS:
+            return itunes_search("album", "artistTerm", KIND_ALBUM)
+        if artist_scope == ARTIST_SCOPE_PLAYLISTS:
+            return _catalog_playlist_search(query)
+        if artist_scope == ARTIST_SCOPE_ALL:
+            # Split the 200-row budget so songs do not crowd out the
+            # albums and playlists.
+            budget = 200 // 3
+            items = itunes_search("song", "artistTerm", KIND_TRACK)[:budget]
+            items.extend(itunes_search("album", "artistTerm", KIND_ALBUM)[:budget])
+            items.extend(_catalog_playlist_search(query, budget))
+            return items
+        # ARTIST_SCOPE_SONGS
+        return itunes_search("song", "artistTerm", KIND_TRACK)
+
     entity, attribute = _ITUNES_SEARCH_KINDS.get(
         kind, _ITUNES_SEARCH_KINDS[KIND_BEST]
     )
-    params = {
-        "term": query,
-        "media": "music",
-        "entity": entity,
-        "limit": 200,
-    }
-    if attribute:
-        params["attribute"] = attribute
+    return itunes_search(entity, attribute, kind)
+
+
+def _catalog_playlist_search(query, limit=25):
+    """Playlists matching *query*, from the anonymous catalog API.
+
+    iTunes' public search has no playlist entity, so this is the one artist
+    scope that cannot be answered by that API. The anonymous catalog client
+    is credential-free, exactly like iTunes search, and caps a request at
+    25 results (larger limits are answered with HTTP 400).
+    """
+    limit = max(1, min(int(limit or 25), 25))
     try:
-        response = requests.get(_ITUNES_SEARCH_URL, params=params, timeout=30)
-        response.raise_for_status()
-        results = response.json().get("results", [])
-    except (requests.RequestException, ValueError):
+        api = _anonymous_api()
+        results = api.getsearchresults(
+            query, types="playlists", limit=limit)
+    except Exception:  # noqa: BLE001 - offline or token failure
         return []
-    items = []
-    for entry in results:
-        if kind == KIND_ALBUM:
-            url = entry.get("collectionViewUrl") or ""
-            if url:
-                items.append(_album_item(entry, url))
-            continue
-        url = entry.get("trackViewUrl") or ""
-        if not url:
-            continue
-        items.append(_track_item(entry, url))
-    return items
+    data = (results.get("results", {}).get("playlists", {}).get("data")
+            or [])
+    return [_catalog_playlist_item(playlist) for playlist in data]
+
+
+def _catalog_playlist_item(playlist):
+    """One row for a whole Apple Music playlist."""
+    attrs = playlist.get("attributes") or {}
+    name = attrs.get("name") or "Unknown playlist"
+    playlist_id = playlist.get("id") or ""
+    track_count = int(attrs.get("trackCount") or 0)
+    return {
+        "id": f"applemusic:playlist:{playlist_id or name}",
+        # Like an album row: pressing Enter resolves it to its tracks
+        # before anything reaches the queue.
+        "kind": "applemusic_playlist",
+        "title": name,
+        "artist": attrs.get("curatorName") or "",
+        "album": "",
+        "source": _SEARCH_SOURCE,
+        "duration_s": 0,
+        "tracks": track_count,
+        "format": search_kind.playlist_type_label(track_count),
+        "url": (f"https://music.apple.com/us/playlist/{playlist_id}"
+                if playlist_id else ""),
+        "artwork_url": ((attrs.get("artwork") or {}).get("url") or ""),
+    }
 
 
 def _album_item(collection, url):

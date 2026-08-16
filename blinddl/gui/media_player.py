@@ -118,6 +118,9 @@ class MediaPlayerPanel(wx.Panel):
         self._vlc_instance = None
         self._vlc_player = None
         self._vlc_events = None
+        # Increments on every load(); libVLC events carry the value they saw
+        # so a stale event from a media just replaced is ignored.
+        self._load_generation = 0
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.now_playing = wx.StaticText(self, label="Nothing playing.")
@@ -189,6 +192,8 @@ class MediaPlayerPanel(wx.Panel):
                 self._vlc_events.event_attach(
                     vlc.EventType.MediaPlayerEndReached, self._on_vlc_finished)
                 self._vlc_events.event_attach(
+                    vlc.EventType.MediaPlayerPlaying, self._on_vlc_playing)
+                self._vlc_events.event_attach(
                     vlc.EventType.MediaPlayerEncounteredError,
                     self._on_vlc_error)
                 return wx.Panel(self, style=wx.SIMPLE_BORDER)
@@ -218,6 +223,7 @@ class MediaPlayerPanel(wx.Panel):
 
     def load(self, location, title):
         self.stop(silent=True)
+        self._load_generation += 1
         self._title = title or "Untitled media"
         self._loaded = False
         self.now_playing.SetLabel(f"Loading: {self._title}")
@@ -232,8 +238,22 @@ class MediaPlayerPanel(wx.Panel):
                 media = self._vlc_instance.media_new_path(os.path.abspath(location))
             self._vlc_player.set_media(media)
             media.release()
-            loaded = self._vlc_player.play() != -1
-        elif parsed.scheme in ("http", "https"):
+            if self._vlc_player.play() == -1:
+                self.now_playing.SetLabel(f"Could not load: {self._title}")
+                self.frame.announce(
+                    "The player could not load this media format or stream."
+                )
+                return False
+            # libVLC opens media asynchronously: play() returning 0 only
+            # means the request was accepted, not that audio is already
+            # coming out. A stream can spend seconds in its Opening state
+            # (YouTube's googlevideo URLs are the worst offender), and
+            # announcing "Playing" during that gap left the user with a
+            # player that claimed to play while staying silent. The
+            # MediaPlayerPlaying event is what says playback really began.
+            self.frame.announce(f"Loading: {self._title}")
+            return True
+        if parsed.scheme in ("http", "https"):
             loaded = self.media.LoadURI(location)
         else:
             loaded = self.media.Load(location)
@@ -243,7 +263,7 @@ class MediaPlayerPanel(wx.Panel):
                 "The player could not load this media format or stream."
             )
             return False
-        if self._vlc_player is not None or self.media.Play():
+        if self.media.Play():
             self._playback_started()
         else:
             self.frame.announce(f"Loading: {self._title}")
@@ -272,10 +292,30 @@ class MediaPlayerPanel(wx.Panel):
         event.Skip()
 
     def _on_vlc_finished(self, event):
-        wx.CallAfter(self._playback_finished)
+        wx.CallAfter(self._playback_finished, self._load_generation)
 
-    def _playback_finished(self):
+    def _on_vlc_playing(self, event):
+        wx.CallAfter(self._on_vlc_playing_gui, self._load_generation)
+
+    def _on_vlc_playing_gui(self, generation):
         if self._shutting_down or self.IsBeingDeleted():
+            return
+        if generation != self._load_generation:
+            return
+        if self._loaded:
+            return
+        self._playback_started()
+
+    def _playback_finished(self, generation=None):
+        if self._shutting_down or self.IsBeingDeleted():
+            return
+        if generation is not None and generation != self._load_generation:
+            return
+        if not self._loaded:
+            # Playback was never announced as started, so this finished
+            # event belongs to a media that was just replaced (its Playing
+            # event never had a chance to fire, or already fired for the
+            # previous load). There is nothing to report as finished.
             return
         self.timer.Stop()
         self.play_btn.SetLabel("&Play")
@@ -283,10 +323,12 @@ class MediaPlayerPanel(wx.Panel):
         self.frame.announce(f"Finished playing: {self._title}")
 
     def _on_vlc_error(self, event):
-        wx.CallAfter(self._playback_error)
+        wx.CallAfter(self._playback_error, self._load_generation)
 
-    def _playback_error(self):
+    def _playback_error(self, generation=None):
         if self._shutting_down or self.IsBeingDeleted():
+            return
+        if generation is not None and generation != self._load_generation:
             return
         self.timer.Stop()
         self.play_btn.SetLabel("&Play")
@@ -416,6 +458,7 @@ class MediaPlayerPanel(wx.Panel):
             self._stop()
         if self._vlc_player is not None:
             self._vlc_events.event_detach(vlc.EventType.MediaPlayerEndReached)
+            self._vlc_events.event_detach(vlc.EventType.MediaPlayerPlaying)
             self._vlc_events.event_detach(
                 vlc.EventType.MediaPlayerEncounteredError)
             self._vlc_player.release()

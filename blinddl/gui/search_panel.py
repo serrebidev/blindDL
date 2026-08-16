@@ -392,28 +392,42 @@ def _dropdown_is_open(control):
         return False
 
 
-def _album_folder(album):
-    """The folder a whole album downloads into: "Artist - Album".
+def _collection_folder(collection):
+    """The folder a whole album or playlist downloads into.
 
     Two artists can release an album under the same name, and a folder
-    called Greatest Hits with both of them in it is no use to anyone. The
-    artist is dropped when the row does not name one.
+    called Greatest Hits with both of them in it is no use to anyone, so an
+    album is named "Artist - Album" (the artist is dropped when the row does
+    not name one). A playlist is its own name -- its curator is not the
+    artist whose work it collects.
     """
-    title = str(album.get("title") or album.get("album") or "").strip()
-    artist = str(album.get("artist") or "").strip()
+    title = str(collection.get("title") or collection.get("album") or "").strip()
+    artist = str(collection.get("artist") or "").strip()
     if not title:
         return ""
+    if str(collection.get("kind") or "").endswith("_playlist"):
+        return title
     return f"{artist} - {title}" if artist else title
 
 
 def _is_album_item(item):
-    """Whether this row is a whole album rather than one track.
+    """Whether this row is a whole album rather than one track."""
+    return str(item.get("kind") or "").endswith("_album")
 
-    Album rows are resolved to their tracks before anything is queued, so
-    the queue never sees one; the download and preview paths ask this to
+
+def _is_playlist_item(item):
+    """Whether this row is a whole playlist rather than one track."""
+    return str(item.get("kind") or "").endswith("_playlist")
+
+
+def _is_collection_item(item):
+    """Whether this row is a whole album or playlist, not one track.
+
+    Collection rows are resolved to their tracks before anything is queued,
+    so the queue never sees one; the download and preview paths ask this to
     know that resolving is needed.
     """
-    return str(item.get("kind") or "").endswith("_album")
+    return _is_album_item(item) or _is_playlist_item(item)
 
 
 def _kind_capable_sources(engine, sources, kind):
@@ -766,14 +780,19 @@ class SearchPanel(wx.Panel):
         self.current_kind = search_kind.normalize(
             self.frame.config.get("search_kind", KIND_BEST)
         )
+        self.current_artist_scope = search_kind.normalize_artist_scope(
+            self.frame.config.get(
+                "artist_scope", search_kind.ARTIST_SCOPE_ALL)
+        )
         self.order_unable = []
         self.order_source_count = 0
         self.kind_used = KIND_BEST
         self.kind_able = []
         self.kind_unable = []
         self.preview_token = None
+        self.full_playback_token = None
         self.archive_token = None
-        self.album_token = None
+        self.collection_token = None
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -817,6 +836,20 @@ class SearchPanel(wx.Panel):
         self.kind_choice.SetSelection(search_kind.KINDS.index(self.current_kind))
         self.kind_choice.Bind(wx.EVT_CHOICE, self.on_kind_changed)
 
+        self.artist_scope_label = wx.StaticText(self, label="Artist s&earch:")
+        self.artist_scope_choice = wx.Choice(
+            self, choices=search_kind.ARTIST_SCOPE_LABEL_LIST)
+        self.artist_scope_choice.SetName("Artist search")
+        self.artist_scope_choice.SetHelpText(
+            "What an Artist search looks for: songs by the artist, their "
+            "albums, playlists about them, or all three. It takes effect "
+            "on the next search."
+        )
+        self.artist_scope_choice.SetSelection(
+            search_kind.ARTIST_SCOPES.index(self.current_artist_scope))
+        self.artist_scope_choice.Bind(
+            wx.EVT_CHOICE, self.on_artist_scope_changed)
+
         order_label = wx.StaticText(self, label="&Order:")
         self.order_choice = wx.Choice(self, choices=search_order.ORDER_LABEL_LIST)
         self.order_choice.SetName("Search result order")
@@ -856,6 +889,7 @@ class SearchPanel(wx.Panel):
         for control in (
             self.engine_choice,
             self.kind_choice,
+            self.artist_scope_choice,
             self.order_choice,
             self.sort_choice,
         ):
@@ -884,6 +918,11 @@ class SearchPanel(wx.Panel):
             "Plays music as audio and video results with picture and sound."
         )
         self.preview_btn.Bind(wx.EVT_BUTTON, self.on_preview_selected)
+        self.play_full_btn = wx.Button(self, label="Play &full song")
+        self.play_full_btn.SetHelpText(
+            "Plays the whole song rather than a short preview."
+        )
+        self.play_full_btn.Bind(wx.EVT_BUTTON, self.on_play_full_selected)
         self.player = MediaPlayerPanel(self, frame, video_height=150)
 
         top = wx.BoxSizer(wx.HORIZONTAL)
@@ -891,6 +930,8 @@ class SearchPanel(wx.Panel):
         top.Add(self.engine_choice, 0, wx.RIGHT, 12)
         top.Add(kind_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.kind_choice, 0, wx.RIGHT, 12)
+        top.Add(self.artist_scope_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        top.Add(self.artist_scope_choice, 0, wx.RIGHT, 12)
         top.Add(order_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         top.Add(self.order_choice, 0, wx.RIGHT, 12)
         top.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
@@ -902,9 +943,13 @@ class SearchPanel(wx.Panel):
         sizer.Add(self.query_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(top, 0, wx.ALL, 8)
         sizer.Add(self.results_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
-        sizer.Add(self.preview_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        play_row = wx.BoxSizer(wx.HORIZONTAL)
+        play_row.Add(self.preview_btn, 0, wx.RIGHT, 8)
+        play_row.Add(self.play_full_btn, 0)
+        sizer.Add(play_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         sizer.Add(self.player, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.SetSizer(sizer)
+        self._apply_artist_scope_visibility()
 
     def focus_input(self):
         if self.closing:
@@ -979,6 +1024,32 @@ class SearchPanel(wx.Panel):
                 selection if 0 <= selection < len(labels) else SORT_RELEVANCE
             )
         self.preview_btn.Enable(_plays(engine))
+        self.play_full_btn.Enable(_plays(engine))
+        self._apply_artist_scope_visibility()
+
+    def _apply_artist_scope_visibility(self):
+        """Offer the artist scope only while Artist is the search type.
+
+        The extra choice only means something for an artist search, so it
+        is switched off the rest of the time -- the same honest-controls
+        rule the search type itself follows.
+        """
+        artist = self._selected_kind() == search_kind.KIND_ARTIST
+        self.artist_scope_choice.Enable(artist)
+        if artist:
+            index = search_kind.ARTIST_SCOPES.index(
+                self.current_artist_scope)
+            if self.artist_scope_choice.GetSelection() != index:
+                self.artist_scope_choice.SetSelection(index)
+
+    def _selected_artist_scope(self):
+        """The artist scope this artist search will actually use."""
+        if self._selected_kind() != search_kind.KIND_ARTIST:
+            return search_kind.ARTIST_SCOPE_ALL
+        selection = self.artist_scope_choice.GetSelection()
+        if 0 <= selection < len(search_kind.ARTIST_SCOPES):
+            return search_kind.ARTIST_SCOPES[selection]
+        return search_kind.ARTIST_SCOPE_ALL
 
     def _apply_engine_columns(self, engine):
         for index, heading in enumerate(_column_headings(engine)):
@@ -1049,8 +1120,29 @@ class SearchPanel(wx.Panel):
             save = getattr(self.frame.config, "save", None)
             if save is not None:
                 save()
+        self._apply_artist_scope_visibility()
         self._setting_changed(
             f"Search type set to {search_kind.label(self.current_kind)}."
+        )
+        if event is not None:
+            event.Skip()
+
+    def on_artist_scope_changed(self, event):
+        """Save the artist scope. The next search is the one that uses it."""
+        selection = self.artist_scope_choice.GetSelection()
+        if not 0 <= selection < len(search_kind.ARTIST_SCOPES):
+            selection = 0
+            self.artist_scope_choice.SetSelection(selection)
+        chosen = search_kind.ARTIST_SCOPES[selection]
+        if chosen != self.current_artist_scope:
+            self.current_artist_scope = chosen
+            self.frame.config["artist_scope"] = self.current_artist_scope
+            save = getattr(self.frame.config, "save", None)
+            if save is not None:
+                save()
+        self._setting_changed(
+            "Artist search set to "
+            f"{search_kind.artist_scope_label(self.current_artist_scope)}."
         )
         if event is not None:
             event.Skip()
@@ -1103,6 +1195,7 @@ class SearchPanel(wx.Panel):
             return
         engine = self._selected_engine()
         kind = self._selected_kind()
+        artist_scope = self._selected_artist_scope()
         # An album search asks for a different thing, not a differently
         # matched one, so only the sites that can return albums go out. The
         # rest would answer with tracks and bury the albums under them.
@@ -1307,13 +1400,16 @@ class SearchPanel(wx.Panel):
             self.frame.announce(f"Searching {ENGINE_LABELS[engine]}...")
         threading.Thread(
             target=self._search,
-            args=(query, engine, self.token, self.stop, sources, order, kind),
+            args=(query, engine, self.token, self.stop, sources, order, kind,
+                  artist_scope),
             daemon=True,
         ).start()
 
-    def _search(self, query, engine, token, stop, sources, order=None, kind=KIND_BEST):
+    def _search(self, query, engine, token, stop, sources, order=None,
+                kind=KIND_BEST, artist_scope=search_kind.ARTIST_SCOPE_ALL):
         order = search_order.normalize(order or self.current_order)
         kind = search_kind.normalize(kind)
+        artist_scope = search_kind.normalize_artist_scope(artist_scope)
         asked = []
         try:
             if engine == ENGINE_MUSIC:
@@ -1345,7 +1441,8 @@ class SearchPanel(wx.Panel):
                 # search with several hundred tracks.
                 threading.Thread(
                     target=self._deezer_search,
-                    args=(query, token, engine, stop, order, kind),
+                    args=(query, token, engine, stop, order, kind,
+                          artist_scope),
                     daemon=True,
                     name="search-deezer",
                 ).start()
@@ -1364,7 +1461,8 @@ class SearchPanel(wx.Panel):
                 ).start()
                 threading.Thread(
                     target=self._deezer_search,
-                    args=(query, token, engine, stop, order, kind),
+                    args=(query, token, engine, stop, order, kind,
+                          artist_scope),
                     daemon=True,
                     name="search-deezer",
                 ).start()
@@ -1449,11 +1547,13 @@ class SearchPanel(wx.Panel):
                 items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
                 items = applemusic_backend.search(
-                    query, self.frame.config, order=order, kind=kind
+                    query, self.frame.config, order=order, kind=kind,
+                    artist_scope=artist_scope,
                 )
             elif engine == ENGINE_DEEZER:
                 items = deezer_backend.search(
-                    query, self.frame.config, order=order, kind=kind
+                    query, self.frame.config, order=order, kind=kind,
+                    artist_scope=artist_scope,
                 )
             elif _is_adult_engine(engine):
 
@@ -1494,10 +1594,11 @@ class SearchPanel(wx.Panel):
         )
 
     def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE,
-                       kind=KIND_BEST):
+                       kind=KIND_BEST, artist_scope=search_kind.ARTIST_SCOPE_ALL):
         try:
             items = deezer_backend.search(
-                query, self.frame.config, order=order, kind=kind
+                query, self.frame.config, order=order, kind=kind,
+                artist_scope=artist_scope,
             )
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
@@ -1646,6 +1747,12 @@ class SearchPanel(wx.Panel):
                 str(item.get("username") or "").casefold(),
                 str(item.get("remote_path") or "").casefold(),
             )
+        kind = str(item.get("kind") or "")
+        # An album or playlist is a different thing from a track that shares
+        # its name, so collection kinds carry themselves into the key. Plain
+        # tracks keep the artist+title key, which is what merges the same
+        # song returned by Deezer and Side B.
+        collection = kind if kind.endswith(("_album", "_playlist")) else ""
         title = str(item.get("title") or "").strip().lower()
         artist = str(item.get("artist") or "").strip().lower()
         # Remove punctuation and extra whitespace for fuzzy matching.
@@ -1653,7 +1760,7 @@ class SearchPanel(wx.Panel):
         artist = _DEDUP_PUNCTUATION.sub("", artist)
         title = " ".join(title.split())
         artist = " ".join(artist.split())
-        return f"{artist}\x00{title}"
+        return f"{collection}\x00{artist}\x00{title}"
 
     @staticmethod
     def _item_quality(item):
@@ -1997,60 +2104,64 @@ class SearchPanel(wx.Panel):
 
     # -- whole albums --------------------------------------------------------
 
-    def _queue_album_items(self, albums):
-        """Read each album's track list, then queue or offer a choice."""
-        token = self.album_token = object()
-        if len(albums) == 1:
-            self.frame.announce(f"Reading track list: {albums[0]['title']}")
+    def _queue_collection_items(self, collections):
+        """Read each album's or playlist's track list, then queue or offer."""
+        token = self.collection_token = object()
+        if len(collections) == 1:
+            self.frame.announce(
+                f"Reading track list: {collections[0]['title']}")
         else:
-            self.frame.announce(f"Reading {len(albums)} album track lists...")
+            self.frame.announce(
+                f"Reading {len(collections)} track lists...")
         threading.Thread(
-            target=self._resolve_album_tracks,
-            args=(token, list(albums)),
+            target=self._resolve_collection_tracks,
+            args=(token, list(collections)),
             daemon=True,
-            name="blinddl-album-tracks",
+            name="blinddl-collection-tracks",
         ).start()
 
-    def _resolve_album_tracks(self, token, albums):
+    def _resolve_collection_tracks(self, token, collections):
         resolved = []
         errors = []
-        for album in albums:
+        for collection in collections:
             try:
                 backend = (
                     applemusic_backend
-                    if album.get("kind") == "applemusic_album"
+                    if str(collection.get("kind") or "").startswith(
+                        "applemusic_")
                     else deezer_backend
                 )
                 tracks, _title = backend.extract_flat(
-                    album["url"], self.frame.config
+                    collection["url"], self.frame.config
                 )
             except Exception as exc:  # noqa: BLE001 - reported to the user
-                errors.append(f"{album['title']}: {exc}")
+                errors.append(f"{collection['title']}: {exc}")
                 continue
             if tracks:
-                resolved.append((album, tracks))
+                resolved.append((collection, tracks))
             else:
-                errors.append(f"{album['title']}: no tracks listed")
-        wx.CallAfter(self._album_tracks_ready, token, resolved, errors)
+                errors.append(f"{collection['title']}: no tracks listed")
+        wx.CallAfter(self._collection_tracks_ready, token, resolved, errors)
 
-    def _album_tracks_ready(self, token, resolved, errors):
-        if self.closing or token is not self.album_token:
+    def _collection_tracks_ready(self, token, resolved, errors):
+        if self.closing or token is not self.collection_token:
             return
         if not resolved:
-            self.frame.announce("Could not read that album.")
+            self.frame.announce("Could not read that album or playlist.")
             if errors:
                 wx.MessageBox(
-                    "Could not read that album:\n" + "\n".join(errors),
+                    "Could not read that album or playlist:\n"
+                    + "\n".join(errors),
                     "blindDL",
                     wx.OK | wx.ICON_ERROR,
                     self,
                 )
             return
         if len(resolved) == 1 and len(resolved[0][1]) > 1:
-            # One album is a list worth reading before it fills the queue,
-            # the same way one Archive item is.
-            album, tracks = resolved[0]
-            dialog = ItemPickerDialog(self, tracks, album["title"])
+            # One collection is a list worth reading before it fills the
+            # queue, the same way one Archive item is.
+            collection, tracks = resolved[0]
+            dialog = ItemPickerDialog(self, tracks, collection["title"])
             try:
                 if dialog.ShowModal() != wx.ID_OK:
                     self.frame.announce("Download cancelled.")
@@ -2062,18 +2173,19 @@ class SearchPanel(wx.Panel):
             if not chosen:
                 self.frame.announce("Nothing selected.")
                 return
-            resolved = [(album, chosen)]
+            resolved = [(collection, chosen)]
         added = []
         titles = []
         with self.frame.queue.batch_additions():
-            for album, tracks in resolved:
-                apple = album.get("kind") == "applemusic_album"
+            for collection, tracks in resolved:
+                apple = str(collection.get("kind") or "").startswith(
+                    "applemusic_")
                 # An album is a release, so its tracks go in a folder of its
                 # own -- named for the artist as well when the row knows one,
                 # since two artists can put out the same album title.
-                folder = _album_folder(album)
+                folder = _collection_folder(collection)
                 for track in tracks:
-                    title = track.get("title") or album["title"]
+                    title = track.get("title") or collection["title"]
                     titles.append(title)
                     if apple:
                         added.append(
@@ -2087,7 +2199,7 @@ class SearchPanel(wx.Panel):
                         )
         message = addition_summary(added, titles)
         if errors:
-            failed = "album" if len(errors) == 1 else "albums"
+            failed = "item" if len(errors) == 1 else "items"
             message += f" {len(errors)} {failed} could not be read."
         self.frame.announce(message)
 
@@ -2177,6 +2289,7 @@ class SearchPanel(wx.Panel):
         self._target_context_item(event)
         menu = wx.Menu()
         preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
+        play_full_item = menu.Append(wx.ID_ANY, "Play &full song")
         download = menu.Append(wx.ID_ANY, "&Download selected")
         focused = self._focused_result_object()
         soulseek_item = (
@@ -2204,6 +2317,7 @@ class SearchPanel(wx.Panel):
         clear = menu.Append(wx.ID_ANY, "&Clear selection")
         has_selection = bool(self._selected_indices())
         preview_item.Enable(has_selection and _plays(self.result_engine))
+        play_full_item.Enable(has_selection and _plays(self.result_engine))
         download.Enable(has_selection)
         copy_url.Enable(has_selection and soulseek_item is None)
         open_browser.Enable(
@@ -2222,6 +2336,7 @@ class SearchPanel(wx.Panel):
             self.results_list.GetSelectedItemCount() < self.results_list.GetItemCount()
         )
         menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
+        menu.Bind(wx.EVT_MENU, self.on_play_full_selected, play_full_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
         menu.Bind(
             wx.EVT_MENU,
@@ -2364,10 +2479,10 @@ class SearchPanel(wx.Panel):
                 "Press Enter to download this file."
             )
             return
-        if _is_album_item(item):
+        if _is_collection_item(item):
             self.frame.announce(
-                "An album has no single track to play. Press Enter to "
-                "choose which of its tracks to download."
+                "An album or playlist has no single track to play. Press "
+                "Enter to choose which of its tracks to download."
             )
             return
         audio_only = self.result_engine in (
@@ -2416,6 +2531,88 @@ class SearchPanel(wx.Panel):
             self,
         )
 
+    def on_play_full_selected(self, event):
+        """Play the whole song, rather than the 30-second preview."""
+        if _is_book_engine(self.result_engine):
+            self.frame.announce(
+                "Books cannot be played. Press Enter to download, then "
+                "open it from the Library tab."
+            )
+            return
+        if _is_torrent_engine(self.result_engine):
+            self.frame.announce(
+                "Torrents cannot be played. Press Enter to open the "
+                "magnet link in your torrent client."
+            )
+            return
+        indices = [
+            index for index in self._selected_indices() if index < len(self.results)
+        ]
+        if not indices:
+            self.frame.announce("Select a result to play first.")
+            return
+        index = self.results_list.GetFocusedItem()
+        if index not in indices:
+            index = indices[0]
+        item = self.results[index]
+        if item.get("kind") == "soulseek":
+            self.frame.announce(
+                "Soulseek files cannot be played before downloading. "
+                "Press Enter to download this file."
+            )
+            return
+        if _is_collection_item(item):
+            self.frame.announce(
+                "An album or playlist has no single track to play. Press "
+                "Enter to choose which of its tracks to download."
+            )
+            return
+        audio_only = self.result_engine in (
+            ENGINE_MUSIC,
+            ENGINE_DEEZER,
+            ENGINE_APPLE_MUSIC,
+            ENGINE_SOUNDCLOUD,
+            ENGINE_BANDCAMP,
+            ENGINE_AUDIOBOOKS,
+        )
+        token = self.full_playback_token = object()
+        self.play_full_btn.Disable()
+        self.frame.announce(f"Loading: {item['title']}")
+        threading.Thread(
+            target=self._resolve_full_playback,
+            args=(token, item, audio_only),
+            daemon=True,
+            name="blinddl-search-play-full",
+        ).start()
+
+    def _resolve_full_playback(self, token, item, audio_only):
+        try:
+            location, title = preview.resolve_full_playback(
+                item, audio_only, self.frame.config
+            )
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            wx.CallAfter(self._full_playback_failed, token, str(exc))
+            return
+        wx.CallAfter(self._full_playback_ready, token, location, title)
+
+    def _full_playback_ready(self, token, location, title):
+        if self.closing or token is not self.full_playback_token:
+            return
+        self.play_full_btn.Enable()
+        self.frame.play_media(self.player, location, title)
+
+    def _full_playback_failed(self, token, error):
+        if self.closing or token is not self.full_playback_token:
+            return
+        self.play_full_btn.Enable()
+        self.frame.announce("Could not play that song.")
+        wx.MessageBox(
+            f"Could not play that song:\n{error}",
+            "blindDL",
+            wx.OK | wx.ICON_ERROR,
+            self,
+        )
+
     def _artist_folder(self, item):
         """Folder for a row from an artist search, or "" for any other row.
 
@@ -2447,20 +2644,20 @@ class SearchPanel(wx.Panel):
             # episodes to take before filling the queue with hundreds.
             self._queue_archive_item(self.results[indices[0]])
             return
-        # An album row is a whole release, so its track list has to be
-        # fetched before anything can be queued. That is a network call, so
-        # it happens off the GUI thread and the rest of the selection is
-        # queued straight away rather than waiting behind it.
-        albums = [
+        # An album or playlist row is a whole collection, so its track list
+        # has to be fetched before anything can be queued. That is a network
+        # call, so it happens off the GUI thread and the rest of the
+        # selection is queued straight away rather than waiting behind it.
+        collections = [
             self.results[index] for index in indices
-            if _is_album_item(self.results[index])
+            if _is_collection_item(self.results[index])
         ]
         indices = [
             index for index in indices
-            if not _is_album_item(self.results[index])
+            if not _is_collection_item(self.results[index])
         ]
-        if albums:
-            self._queue_album_items(albums)
+        if collections:
+            self._queue_collection_items(collections)
         if not indices:
             return
         with self.frame.queue.batch_additions():

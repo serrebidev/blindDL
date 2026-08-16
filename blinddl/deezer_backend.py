@@ -22,7 +22,16 @@ import requests
 from Crypto.Cipher import Blowfish  # nosec B413
 
 from . import search_kind, search_order
-from .search_kind import KIND_ALBUM, KIND_ARTIST, KIND_BEST, KIND_TRACK
+from .search_kind import (
+    ARTIST_SCOPE_ALBUMS,
+    ARTIST_SCOPE_ALL,
+    ARTIST_SCOPE_PLAYLISTS,
+    ARTIST_SCOPE_SONGS,
+    KIND_ALBUM,
+    KIND_ARTIST,
+    KIND_BEST,
+    KIND_TRACK,
+)
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 from .ytdlp_backend import DownloadCancelled
 
@@ -64,6 +73,9 @@ _SEARCH_TARGET = 200
 # always the one meant; few enough that the search stays one round trip
 # each rather than a dozen.
 _ARTIST_SEARCH_LIMIT = 5
+# An "All" artist search splits its 200-row budget between the three kinds
+# of result so songs do not crowd albums and playlists out entirely.
+_ARTIST_SCOPE_ALL_BUDGET = _SEARCH_TARGET // 3
 
 _sessions = {}  # arl -> authenticated HTTP session and streaming credentials
 _sessions_lock = threading.Lock()
@@ -355,6 +367,28 @@ def _album_to_item(data):
     }
 
 
+def _playlist_to_item(data):
+    """One row for a whole playlist, which downloads as all of its tracks."""
+    tracks = int(data.get("nb_tracks") or 0)
+    user = data.get("user") or {}
+    curator = user.get("name", "") if isinstance(user, dict) else ""
+    return {
+        "id": f"deezer:playlist:{data['id']}",
+        # Like an album row: pressing Enter resolves it to its tracks
+        # before anything reaches the queue.
+        "kind": "deezer_playlist",
+        "title": data.get("title") or "Unknown playlist",
+        "artist": curator,
+        "album": "",
+        "source": _SEARCH_SOURCE,
+        "duration_s": 0,
+        "tracks": tracks,
+        "format": search_kind.playlist_type_label(tracks),
+        "rank": 0,
+        "url": data.get("link", f"https://www.deezer.com/playlist/{data['id']}"),
+    }
+
+
 def supports_order(order, kind=KIND_BEST):
     """Deezer publishes a rank per track, and no release date to sort on.
 
@@ -399,7 +433,7 @@ def _search_albums(query):
     return items
 
 
-def _search_artist_tracks(query):
+def _search_artist_tracks(query, limit=_SEARCH_TARGET):
     """Tracks by the artists whose *names* match *query*.
 
     Deezer does have a documented ``artist:"..."`` query term, and it does
@@ -417,7 +451,7 @@ def _search_artist_tracks(query):
     items = []
     seen = set()
     for artist in found:
-        if len(items) >= _SEARCH_TARGET:
+        if len(items) >= limit:
             break
         artist_name = artist.get("name") or ""
         try:
@@ -436,10 +470,81 @@ def _search_artist_tracks(query):
             if item["id"] not in seen:
                 seen.add(item["id"])
                 items.append(item)
-    return items[:_SEARCH_TARGET]
+    return items[:limit]
 
 
-def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST):
+def _search_artist_albums(query, limit=_SEARCH_TARGET):
+    """Albums by the artists whose names match *query*.
+
+    Same two-step look-up as the track search: find the artists first,
+    then take their releases. The album endpoint paginates, so a long
+    discography is followed through its ``next`` links.
+    """
+    try:
+        found = _api_get(
+            "/search/artist", {"q": query, "limit": _ARTIST_SEARCH_LIMIT}
+        ).get("data", [])
+    except Exception:
+        return []
+    items = []
+    seen = set()
+    for artist in found:
+        if len(items) >= limit:
+            break
+        artist_name = artist.get("name") or ""
+        try:
+            next_path = f"/artist/{artist['id']}/albums?limit={_SEARCH_LIMIT}"
+            while next_path and len(items) < limit:
+                page = _api_get(next_path)
+                for album in page.get("data", []):
+                    entry = dict(album)
+                    # /artist/{id}/albums names the artist on the request,
+                    # not on each release, so inject it like the tracks do.
+                    entry.setdefault("artist", {"name": artist_name})
+                    item = _album_to_item(entry)
+                    if item["id"] not in seen:
+                        seen.add(item["id"])
+                        items.append(item)
+                next_path = page.get("next")
+        except Exception:
+            # One artist that cannot be read must not lose the others.
+            continue
+    return items[:limit]
+
+
+def _search_artist_playlists(query, limit=_SEARCH_TARGET):
+    """Playlists whose titles match *query* ("playlists by them").
+
+    Deezer has no artist-playlists endpoint, so this searches the playlist
+    catalogue by the artist's name -- the same playlists Deezer's own
+    search box surfaces for an artist.
+    """
+    items = []
+    seen = set()
+    try:
+        for index in range(0, limit, _SEARCH_LIMIT):
+            page = _api_get(
+                "/search/playlist",
+                {"q": query, "limit": _SEARCH_LIMIT, "index": index},
+            )
+            batch = page.get("data", [])
+            if not batch:
+                break
+            for playlist in batch:
+                item = _playlist_to_item(playlist)
+                if item["id"] not in seen:
+                    seen.add(item["id"])
+                    items.append(item)
+            if len(batch) < _SEARCH_LIMIT:
+                break
+    except Exception:
+        # A failed page stops the crawl; whatever arrived is still shown.
+        pass
+    return items[:limit]
+
+
+def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
+           artist_scope=ARTIST_SCOPE_ALL):
     """Search Deezer via the public API.  Returns normalized items.
 
     *kind* is the Search tab's search type. Album asks Deezer's album
@@ -447,15 +552,38 @@ def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST):
     and returns what those artists are known for, and track title keeps only
     the results whose title really does contain what was typed.
 
+    An artist search takes *artist_scope* further: songs, albums, playlists,
+    or all three. Each scope looks the artist up first (Deezer's
+    ``artist:"..."`` term matches loosely and uselessly), then takes that
+    part of their work.
+
     The API caps a search at 100 results per request, so two pages are
     fetched to reach the 200 blindDL lists. The API takes an `order`
     parameter and quietly disregards it on track search, so the ordering is
     done here on the rank each row carries.
     """
     kind = search_kind.normalize(kind)
+    artist_scope = search_kind.normalize_artist_scope(artist_scope)
     if kind == KIND_ALBUM:
         return _search_albums(query)
     if kind == KIND_ARTIST:
+        if artist_scope == ARTIST_SCOPE_ALBUMS:
+            return _search_artist_albums(query)
+        if artist_scope == ARTIST_SCOPE_PLAYLISTS:
+            return _search_artist_playlists(query)
+        if artist_scope == ARTIST_SCOPE_ALL:
+            # Split the budget between the three kinds so songs do not
+            # crowd the albums and playlists out of the list entirely.
+            songs = _search_artist_tracks(query, _ARTIST_SCOPE_ALL_BUDGET)
+            if search_order.normalize(order) == ORDER_POPULAR:
+                songs.sort(key=lambda item: -item["rank"])
+            combined = list(songs)
+            combined.extend(
+                _search_artist_albums(query, _ARTIST_SCOPE_ALL_BUDGET))
+            combined.extend(
+                _search_artist_playlists(query, _ARTIST_SCOPE_ALL_BUDGET))
+            return combined
+        # ARTIST_SCOPE_SONGS
         items = _search_artist_tracks(query)
         if search_order.normalize(order) == ORDER_POPULAR:
             items.sort(key=lambda item: -item["rank"])

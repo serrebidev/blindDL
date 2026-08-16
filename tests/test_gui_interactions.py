@@ -29,6 +29,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         preview,
         search_kind,
         search_order,
+        sideb_backend,
         speech,
         soulseek_backend,
         updater,
@@ -912,6 +913,43 @@ class GuiInteractionTests(unittest.TestCase):
             [(panel.player, "https://media.example/audio.mp3", "One")],
         )
 
+    def test_search_full_playback_ready_uses_shared_player(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.full_playback_token = token = object()
+
+        panel._full_playback_ready(
+            token, "https://media.example/audio.mp3", "One"
+        )
+
+        self.assertEqual(
+            self.frame.play_calls,
+            [(panel.player, "https://media.example/audio.mp3", "One")],
+        )
+
+    def test_artist_scope_choice_saves_and_announces(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.kind_choice.SetSelection(
+            search_kind.KINDS.index(search_kind.KIND_ARTIST))
+        panel.on_kind_changed(None)
+        panel.artist_scope_choice.SetSelection(
+            search_kind.ARTIST_SCOPES.index(search_kind.ARTIST_SCOPE_ALBUMS))
+
+        panel.on_artist_scope_changed(None)
+
+        self.assertEqual(self.frame.config["artist_scope"], "albums")
+        self.assertIn(
+            "Artist search set to Albums", self.frame.messages[-1]
+        )
+
+    def test_artist_scope_choice_is_off_for_a_track_search(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.kind_choice.SetSelection(
+            search_kind.KINDS.index(search_kind.KIND_TRACK))
+        panel.on_kind_changed(None)
+
+        self.assertFalse(panel.artist_scope_choice.IsEnabled())
+
+
     def test_music_search_preview_uses_direct_download_url(self):
         item = {
             "title": "One",
@@ -927,6 +965,36 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(location, "https://media.example/one.mp3")
         self.assertEqual(title, "One")
 
+    def test_full_playback_of_a_deezer_result_uses_youtube_not_the_preview_clip(self):
+        item = {
+            "kind": "deezer",
+            "id": "deezer:3135556",
+            "title": "One More Time",
+            "artist": "Daft Punk",
+        }
+        with (
+            mock.patch.object(
+                ytdlp_backend, "resolve_stream",
+                return_value="https://yt.example/full",
+            ) as resolve,
+            mock.patch.object(
+                sideb_backend, "get_deezer_preview_url",
+                return_value="https://cdns.example/preview.mp3",
+            ) as preview_url,
+        ):
+            location, title = preview.resolve_full_playback(
+                item, audio_only=True, config={}
+            )
+
+        self.assertEqual(location, "https://yt.example/full")
+        self.assertEqual(title, "One More Time")
+        resolve.assert_called_once()
+        # The 30-second Deezer clip is for previews, not full playback.
+        preview_url.assert_not_called()
+        self.assertEqual(
+            resolve.call_args.args[0], "ytsearch1:Daft Punk One More Time"
+        )
+
     def test_direct_media_url_bypasses_ytdlp_extraction(self):
         with mock.patch.object(ytdlp_backend, "resolve_stream") as resolve:
             location, title = preview.resolve_url(
@@ -938,6 +1006,41 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(location, "https://media.example/live/video.mp4?token=one")
         self.assertEqual(title, location)
         resolve.assert_not_called()
+
+    def test_a_deezer_url_plays_full_not_a_preview_clip(self):
+        item = {
+            "kind": "deezer",
+            "id": "deezer:1",
+            "title": "One More Time",
+            "artist": "Daft Punk",
+        }
+        with (
+            mock.patch.object(
+                sideb_backend, "is_deezer_url", return_value=True
+            ),
+            mock.patch.object(
+                deezer_backend, "extract_flat",
+                return_value=([item], "One More Time"),
+            ),
+            mock.patch.object(
+                sideb_backend, "get_deezer_preview_url",
+                return_value="https://cdns.example/preview.mp3",
+            ) as preview_url,
+            mock.patch.object(
+                ytdlp_backend, "resolve_stream",
+                return_value="https://yt.example/full",
+            ),
+        ):
+            location, title = preview.resolve_url(
+                "https://www.deezer.com/track/1",
+                audio_only=True,
+                config={},
+            )
+
+        self.assertEqual(location, "https://yt.example/full")
+        self.assertEqual(title, "One More Time")
+        # The 30-second clip is for the Search tab's Preview, not Play URL.
+        preview_url.assert_not_called()
 
     def test_preview_accepts_the_real_config_object(self):
         # The app hands preview a Config, not a dict. Dicts have .get, so a
@@ -1104,6 +1207,39 @@ class GuiInteractionTests(unittest.TestCase):
         fake_vlc.Instance.assert_called_once_with(
             "--quiet", "--no-video-title-show", "--no-snapshot-preview"
         )
+
+    def test_vlc_playing_event_ignores_a_stale_generation(self):
+        panel = SimpleNamespace(
+            _shutting_down=False,
+            IsBeingDeleted=mock.Mock(return_value=False),
+            _load_generation=2,
+            _loaded=False,
+            _playback_started=mock.Mock(),
+        )
+
+        # A playing event from the media just replaced must not announce.
+        media_player.MediaPlayerPanel._on_vlc_playing_gui(panel, 1)
+        panel._playback_started.assert_not_called()
+
+        media_player.MediaPlayerPanel._on_vlc_playing_gui(panel, 2)
+        panel._playback_started.assert_called_once_with()
+
+    def test_media_that_finishes_before_starting_is_ignored(self):
+        panel = SimpleNamespace(
+            _shutting_down=False,
+            IsBeingDeleted=mock.Mock(return_value=False),
+            _load_generation=1,
+            _loaded=False,
+            timer=mock.Mock(),
+            play_btn=mock.Mock(),
+            position=mock.Mock(),
+            frame=mock.Mock(),
+        )
+
+        media_player.MediaPlayerPanel._playback_finished(panel, 1)
+
+        panel.timer.Stop.assert_not_called()
+        panel.frame.announce.assert_not_called()
 
     def test_completed_download_only_rescans_visible_library(self):
         frame = SimpleNamespace(
@@ -2313,10 +2449,10 @@ class GuiInteractionTests(unittest.TestCase):
         panel.results_list.SetItemCount(1)
         panel.results_list.Select(0)
 
-        with mock.patch.object(panel, "_queue_album_items") as queue_albums:
+        with mock.patch.object(panel, "_queue_collection_items") as queue_collections:
             panel.on_download_selected(None)
 
-        queue_albums.assert_called_once_with([album])
+        queue_collections.assert_called_once_with([album])
         # Nothing reached the queue directly: an album has to be read first.
         self.assertEqual(self.frame.queue.calls, [])
 
@@ -2340,8 +2476,8 @@ class GuiInteractionTests(unittest.TestCase):
                 ItemPickerDialog, "selected_items", return_value=tracks[:2]
             ),
         ):
-            panel._album_tracks_ready(
-                panel.album_token, [(album, tracks)], []
+            panel._collection_tracks_ready(
+                panel.collection_token, [(album, tracks)], []
             )
 
         self.assertEqual(
@@ -2361,15 +2497,17 @@ class GuiInteractionTests(unittest.TestCase):
         }
         tracks = [{"title": "One", "url": "https://www.deezer.com/track/1"}]
 
-        panel._album_tracks_ready(panel.album_token, [(album, tracks)], [])
+        panel._collection_tracks_ready(
+            panel.collection_token, [(album, tracks)], []
+        )
 
         self.assertEqual(self.frame.queue.folders, ["Daft Punk - Discovery"])
 
         # An album row with no artist named still gets its own folder.
         self.frame.queue.folders.clear()
-        panel._album_tracks_ready(
-            panel.album_token,
-            [({"title": "Untitled", "kind": "deezer_album"}, tracks)],
+        panel._collection_tracks_ready(
+            panel.collection_token,
+            [({ "title": "Untitled", "kind": "deezer_album"}, tracks)],
             [],
         )
         self.assertEqual(self.frame.queue.folders, ["Untitled"])
@@ -2406,7 +2544,7 @@ class GuiInteractionTests(unittest.TestCase):
              [{"title": "Two", "url": "https://music.apple.com/us/song/2"}]),
         ]
 
-        panel._album_tracks_ready(panel.album_token, resolved, [])
+        panel._collection_tracks_ready(panel.collection_token, resolved, [])
 
         self.assertEqual(
             [(call[0], call[2]) for call in self.frame.queue.calls],
@@ -2416,12 +2554,12 @@ class GuiInteractionTests(unittest.TestCase):
     def test_an_album_that_cannot_be_read_is_reported_not_silently_dropped(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_DEEZER
-        token = panel.album_token = object()
+        token = panel.collection_token = object()
 
         with mock.patch.object(
             deezer_backend, "extract_flat", side_effect=RuntimeError("gone")
         ), mock.patch.object(wx, "CallAfter") as call_after:
-            panel._resolve_album_tracks(
+            panel._resolve_collection_tracks(
                 token,
                 [{"title": "Discovery", "kind": "deezer_album", "url": "u"}],
             )

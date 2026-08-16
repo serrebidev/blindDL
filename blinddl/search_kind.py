@@ -34,6 +34,29 @@ KIND_ALBUM = "album"
 KIND_ARTIST = "artist"
 KINDS = (KIND_BEST, KIND_TRACK, KIND_ALBUM, KIND_ARTIST)
 
+# What an artist search is looking for, chosen by the extra control that
+# appears next to the search type when Artist is selected. "Artist" alone
+# can only ever mean the artist's work, so this narrows which of their
+# work: their songs, their albums, playlists about them, or all three.
+ARTIST_SCOPE_ALL = "all"
+ARTIST_SCOPE_SONGS = "songs"
+ARTIST_SCOPE_ALBUMS = "albums"
+ARTIST_SCOPE_PLAYLISTS = "playlists"
+ARTIST_SCOPES = (
+    ARTIST_SCOPE_ALL,
+    ARTIST_SCOPE_SONGS,
+    ARTIST_SCOPE_ALBUMS,
+    ARTIST_SCOPE_PLAYLISTS,
+)
+
+ARTIST_SCOPE_LABELS = {
+    ARTIST_SCOPE_ALL: "All",
+    ARTIST_SCOPE_SONGS: "Songs",
+    ARTIST_SCOPE_ALBUMS: "Albums",
+    ARTIST_SCOPE_PLAYLISTS: "Playlists",
+}
+ARTIST_SCOPE_LABEL_LIST = [ARTIST_SCOPE_LABELS[scope] for scope in ARTIST_SCOPES]
+
 # What the choice reads as, in the order the choice lists them.
 KIND_LABELS = {
     KIND_BEST: "Best match",
@@ -51,6 +74,17 @@ def normalize(kind):
     predate it, so an unknown or missing value has to mean "as before".
     """
     return kind if kind in KINDS else KIND_BEST
+
+
+def normalize_artist_scope(scope):
+    """Return a known artist scope, falling back to everything."""
+    return scope if scope in ARTIST_SCOPES else ARTIST_SCOPE_ALL
+
+
+def artist_scope_label(scope):
+    return ARTIST_SCOPE_LABELS.get(
+        normalize_artist_scope(scope), ARTIST_SCOPE_LABELS[ARTIST_SCOPE_ALL]
+    )
 
 
 def label(kind):
@@ -104,3 +138,16 @@ def album_type_label(track_count):
     if count > 1:
         return f"Album, {count} tracks"
     return "Album"
+
+
+def playlist_type_label(track_count):
+    """The Type column for one playlist row: "Playlist", plus its count."""
+    try:
+        count = int(track_count or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count == 1:
+        return "Playlist, 1 track"
+    if count > 1:
+        return f"Playlist, {count} tracks"
+    return "Playlist"

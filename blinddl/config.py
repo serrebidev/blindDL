@@ -61,6 +61,10 @@ DEFAULTS = {
     # it. Sites with no field search are named after the search, exactly as
     # with search_order above.
     "search_kind": "best",
+    # What an Artist search looks for: "all" (songs, albums, and playlists
+    # about the artist), or just "songs", "albums", or "playlists". Only the
+    # catalogue services (Deezer and Apple Music) can answer this.
+    "artist_scope": "all",
     # How the Subscriptions list is arranged: "added", "title", "site",
     # "checked", "stale", "tracked" or "enabled". Purely a view setting -- it
     # never changes which subscriptions are checked or in what order.

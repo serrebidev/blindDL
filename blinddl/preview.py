@@ -47,6 +47,30 @@ def _is_direct_media_url(url):
     return any(path.endswith(extension) for extension in DIRECT_MEDIA_EXTENSIONS)
 
 
+def _youtube_stream_for(item, title, config):
+    """Resolve a Deezer/Side B track to a full YouTube stream.
+
+    Deezer's own full stream is Blowfish-encrypted and cannot be opened by
+    a native player, so full playback of a Deezer track comes from YouTube
+    instead: search for the artist and title and play the best match.
+    """
+    query = " ".join(
+        filter(
+            None,
+            (
+                str(item.get("artist") or ""),
+                title,
+            ),
+        )
+    )
+    return ytdlp_backend.resolve_stream(
+        f"ytsearch1:{query}",
+        audio_only=True,
+        cookies_from_browser=config.get("cookies_from_browser"),
+        cookies_file=config.get("cookies_file"),
+    )
+
+
 def result_url(item):
     """Return the best shareable URL for one search result, or ``None``.
 
@@ -104,25 +128,7 @@ def resolve_search_result(item, audio_only, config):
             item.get("id", ""))
         if preview_url:
             return preview_url, title
-        query = " ".join(
-            filter(
-                None,
-                (
-                    str(item.get("artist") or ""),
-                    title,
-                ),
-            )
-        )
-        target = f"ytsearch1:{query}"
-        return (
-            ytdlp_backend.resolve_stream(
-                target,
-                audio_only=True,
-                cookies_from_browser=config.get("cookies_from_browser"),
-                cookies_file=config.get("cookies_file"),
-            ),
-            title,
-        )
+        return _youtube_stream_for(item, title, config), title
 
     direct = _first_http_url(item.get("direct_url"))
     if direct:
@@ -139,6 +145,21 @@ def resolve_search_result(item, audio_only, config):
         ),
         title,
     )
+
+
+def resolve_full_playback(item, audio_only, config):
+    """Return ``(stream URI, title)`` for full playback of one result.
+
+    Preview deliberately gives Deezer/Side B results their 30-second clip.
+    Full playback skips that and plays the whole song, which for those two
+    kinds means a YouTube match (Deezer's own stream is encrypted for the
+    downloader). Every other kind already previews from a full stream, so
+    it resolves the same way a preview would.
+    """
+    title = str(item.get("title") or "Playback")
+    if item.get("kind") in ("sideb", "deezer"):
+        return _youtube_stream_for(item, title, config), title
+    return resolve_search_result(item, audio_only, config)
 
 
 def resolve_url(url, audio_only, config):
@@ -164,7 +185,8 @@ def resolve_url(url, audio_only, config):
             items, title = sideb_backend.extract_flat(url, config)
         if not items:
             raise RuntimeError("No playable tracks were found at that URL.")
-        stream, item_title = resolve_search_result(
+        # "Play URL" means the whole thing, not Deezer's 30-second clip.
+        stream, item_title = resolve_full_playback(
             items[0], audio_only=True, config=config
         )
         return stream, item_title or title

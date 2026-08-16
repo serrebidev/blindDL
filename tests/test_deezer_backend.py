@@ -136,7 +136,8 @@ class DeezerBackendTests(unittest.TestCase):
         with mock.patch.object(deezer_backend, "_api_get",
                                side_effect=api) as calls:
             items = deezer_backend.search(
-                "daft punk", kind=search_kind.KIND_ARTIST)
+                "daft punk", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_SONGS)
 
         self.assertEqual(calls.call_args_list[0].args[0], "/search/artist")
         self.assertEqual([item["title"] for item in items],
@@ -157,9 +158,79 @@ class DeezerBackendTests(unittest.TestCase):
 
         with mock.patch.object(deezer_backend, "_api_get", side_effect=api):
             items = deezer_backend.search(
-                "example", kind=search_kind.KIND_ARTIST)
+                "example", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_SONGS)
 
         self.assertEqual([item["artist"] for item in items], ["Here"])
+
+    def test_artist_search_albums_scope_returns_album_rows(self):
+        def api(path, params=None):
+            if path == "/search/artist":
+                return {"data": [{"id": 27, "name": "Daft Punk"}]}
+            if path.startswith("/artist/27/albums"):
+                return {"data": [
+                    {"id": 7, "title": "Discovery", "nb_tracks": 14},
+                ]}
+            return {"data": []}
+
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api):
+            items = deezer_backend.search(
+                "daft punk", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_ALBUMS)
+
+        self.assertEqual([item["kind"] for item in items], ["deezer_album"])
+        self.assertEqual(items[0]["title"], "Discovery")
+        self.assertEqual(items[0]["artist"], "Daft Punk")
+        self.assertEqual(items[0]["format"], "Album, 14 tracks")
+
+    def test_artist_search_playlists_scope_returns_playlist_rows(self):
+        payload = {"data": [
+            {"id": 5, "title": "French Touch", "nb_tracks": 12,
+             "user": {"name": "Editor"},
+             "link": "https://www.deezer.com/playlist/5"},
+        ]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload) as calls:
+            items = deezer_backend.search(
+                "daft punk", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_PLAYLISTS)
+
+        self.assertEqual(calls.call_args.args[0], "/search/playlist")
+        self.assertEqual(
+            [item["kind"] for item in items], ["deezer_playlist"])
+        self.assertEqual(items[0]["title"], "French Touch")
+        self.assertEqual(items[0]["artist"], "Editor")
+        self.assertEqual(items[0]["format"], "Playlist, 12 tracks")
+
+    def test_artist_search_all_scope_combines_all_three_kinds(self):
+        def api(path, params=None):
+            if path == "/search/artist":
+                return {"data": [{"id": 27, "name": "Daft Punk"}]}
+            if path.startswith("/artist/27/top"):
+                return {"data": [
+                    {"id": 1, "title": "One More Time",
+                     "album": {"title": "Discovery"}, "rank": 9},
+                ]}
+            if path.startswith("/artist/27/albums"):
+                return {"data": [
+                    {"id": 7, "title": "Discovery", "nb_tracks": 14},
+                ]}
+            if path == "/search/playlist":
+                return {"data": [
+                    {"id": 5, "title": "French Touch", "nb_tracks": 12,
+                     "user": {"name": "Editor"}},
+                ]}
+            return {"data": []}
+
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api):
+            items = deezer_backend.search(
+                "daft punk", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_ALL)
+
+        self.assertEqual(
+            [item["kind"] for item in items],
+            ["deezer", "deezer_album", "deezer_playlist"],
+        )
 
     def test_album_search_returns_album_rows_with_their_track_counts(self):
         payload = {"data": [

@@ -66,7 +66,9 @@ class AppleMusicSearchTests(unittest.TestCase):
             best = get.call_args.kwargs["params"]
             applemusic_backend.search("query", kind=search_kind.KIND_TRACK)
             track = get.call_args.kwargs["params"]
-            applemusic_backend.search("query", kind=search_kind.KIND_ARTIST)
+            applemusic_backend.search(
+                "query", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_SONGS)
             artist = get.call_args.kwargs["params"]
 
         # Best match sends no attribute at all, which is what makes iTunes
@@ -75,6 +77,47 @@ class AppleMusicSearchTests(unittest.TestCase):
         self.assertEqual(track["attribute"], "songTerm")
         self.assertEqual(artist["attribute"], "artistTerm")
         self.assertEqual(artist["entity"], "song")
+
+    def test_artist_scope_albums_matches_the_artist_field(self):
+        response = mock.Mock()
+        response.raise_for_status = mock.Mock()
+        response.json.return_value = {"results": []}
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=response) as get:
+            applemusic_backend.search(
+                "query", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_ALBUMS)
+
+        params = get.call_args.kwargs["params"]
+        self.assertEqual(params["entity"], "album")
+        self.assertEqual(params["attribute"], "artistTerm")
+
+    def test_artist_scope_playlists_comes_from_the_catalog_api(self):
+        api = mock.Mock()
+        api.getsearchresults.return_value = {
+            "results": {"playlists": {"data": [{
+                "id": "pl.1",
+                "attributes": {
+                    "name": "Daft Punk Essentials",
+                    "curatorName": "Apple Music Electronic",
+                    "trackCount": 42,
+                },
+            }]}},
+        }
+        with mock.patch.object(
+            applemusic_backend, "_anonymous_api", return_value=api
+        ):
+            items = applemusic_backend.search(
+                "query", kind=search_kind.KIND_ARTIST,
+                artist_scope=search_kind.ARTIST_SCOPE_PLAYLISTS)
+
+        self.assertEqual(items[0]["kind"], "applemusic_playlist")
+        self.assertEqual(items[0]["title"], "Daft Punk Essentials")
+        self.assertEqual(items[0]["artist"], "Apple Music Electronic")
+        self.assertEqual(items[0]["format"], "Playlist, 42 tracks")
+        self.assertEqual(
+            items[0]["url"], "https://music.apple.com/us/playlist/pl.1"
+        )
 
     def test_album_search_returns_album_rows(self):
         payload = {"results": [{
