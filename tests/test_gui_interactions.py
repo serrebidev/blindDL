@@ -36,7 +36,9 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     )
     from blinddl.downloader import (
         DownloadItem,
+        FINISHED_STATUSES,
         STATUS_DONE,
+        STATUS_DOWNLOADING,
         STATUS_ERROR,
         STATUS_QUEUED,
     )
@@ -188,8 +190,28 @@ class _Queue:
         if item is not None:
             item.cancel_event.set()
 
+    def remove(self, item_id, delete_data=False):
+        item = self._find(item_id)
+        if (item is None or item.status == STATUS_DOWNLOADING
+                or getattr(item, "seeding", False)):
+            return False
+        if delete_data and not self.can_delete_data(item):
+            return False
+        self.items.remove(item)
+        return True
+
+    def can_delete_data(self, item):
+        return bool(getattr(item, "result_path", ""))
+
+    def mark_torrent_stopped(self, key, title=""):
+        return True
+
     def remove_finished(self):
-        self.items = [item for item in self.items if item.status != STATUS_DONE]
+        self.items = [
+            item for item in self.items
+            if item.status not in FINISHED_STATUSES
+            or getattr(item, "seeding", False)
+        ]
 
     def remove_completed(self):
         self.items = [item for item in self.items if item.status != STATUS_DONE]
@@ -3133,6 +3155,229 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(queued.cancel_event.is_set())
         panel.on_clear(None)
         self.assertEqual(self.frame.queue.items, [queued])
+
+    @staticmethod
+    def _key_event(key_code, shift=False, source=None):
+        event = mock.Mock()
+        event.GetKeyCode.return_value = key_code
+        event.ShiftDown.return_value = shift
+        event.GetEventObject.return_value = source
+        return event
+
+    def test_downloads_delete_key_removes_the_selection(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        done = DownloadItem("Done", "ytdlp", "two")
+        done.status = STATUS_DONE
+        self.frame.queue.items = [done]
+        panel.refresh_all()
+        panel.finished_list.Select(0)
+
+        panel.on_list_key(self._key_event(
+            wx.WXK_DELETE, source=panel.finished_list))
+
+        self.assertEqual(self.frame.queue.items, [])
+        self.assertIn("Removed 1 download", self.frame.messages[-1])
+        panel.Destroy()
+
+    def test_downloads_shift_delete_deletes_data_after_confirm(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        done = DownloadItem("Done", "ytdlp", "two")
+        done.status = STATUS_DONE
+        done.result_path = "/media/two.mp3"
+        self.frame.queue.items = [done]
+        panel.refresh_all()
+        panel.finished_list.Select(0)
+
+        with mock.patch("blinddl.gui.downloads_panel.wx.MessageBox",
+                        return_value=wx.YES) as box:
+            panel.on_list_key(self._key_event(
+                wx.WXK_DELETE, shift=True, source=panel.finished_list))
+
+        box.assert_called_once()
+        self.assertEqual(self.frame.queue.items, [])
+        self.assertIn("Deleted data for 1 download", self.frame.messages[-1])
+        panel.Destroy()
+
+    def test_downloads_shift_delete_cancel_deletes_nothing(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        done = DownloadItem("Done", "ytdlp", "two")
+        done.status = STATUS_DONE
+        done.result_path = "/media/two.mp3"
+        self.frame.queue.items = [done]
+        panel.refresh_all()
+        panel.finished_list.Select(0)
+
+        with mock.patch("blinddl.gui.downloads_panel.wx.MessageBox",
+                        return_value=wx.NO):
+            panel.on_list_key(self._key_event(
+                wx.WXK_DELETE, shift=True, source=panel.finished_list))
+
+        self.assertEqual(self.frame.queue.items, [done])
+        panel.Destroy()
+
+    def test_downloads_delete_ignores_a_running_or_seeding_row(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        running = DownloadItem("Running", "ytdlp", "one")
+        running.status = STATUS_DOWNLOADING
+        seeding = DownloadItem("Seeding", "torrent", "two")
+        seeding.status = STATUS_DONE
+        seeding.seeding = True
+        self.frame.queue.items = [running, seeding]
+        panel.refresh_all()
+        panel.list.Select(0)
+
+        panel.on_list_key(self._key_event(wx.WXK_DELETE, source=panel.list))
+
+        self.assertEqual(self.frame.queue.items, [running, seeding])
+        self.assertIn("still downloading or seeding", self.frame.messages[-1])
+        panel.Destroy()
+
+    def test_downloads_clear_selection_empties_both_lists(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        queued = DownloadItem("Queued", "ytdlp", "one")
+        queued.status = STATUS_QUEUED
+        done = DownloadItem("Done", "ytdlp", "two")
+        done.status = STATUS_DONE
+        self.frame.queue.items = [queued, done]
+        panel.refresh_all()
+        panel.list.Select(0)
+        panel.finished_list.Select(0)
+
+        panel._clear_selection(None, panel.list)
+        panel._clear_selection(None, panel.finished_list)
+
+        self.assertEqual(panel.list.GetSelectedItemCount(), 0)
+        self.assertEqual(panel.finished_list.GetSelectedItemCount(), 0)
+        panel.Destroy()
+
+    def test_downloads_clear_finished_keeps_active_and_seeding_rows(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        queued = DownloadItem("Queued", "ytdlp", "one")
+        queued.status = STATUS_QUEUED
+        failed = DownloadItem("Failed", "ytdlp", "two")
+        failed.status = STATUS_ERROR
+        seeding = DownloadItem("Seeding", "torrent", "three")
+        seeding.status = STATUS_DONE
+        seeding.seeding = True
+        self.frame.queue.items = [queued, failed, seeding]
+        panel.refresh_all()
+
+        panel.on_clear(None)
+
+        self.assertEqual(self.frame.queue.items, [queued, seeding])
+        self.assertIn("Cleared 1 finished download", self.frame.messages[-1])
+        panel.Destroy()
+
+    def test_uploads_delete_key_dispatches_remove(self):
+        complete = {
+            "key": "peer\\done",
+            "title": "Done.flac",
+            "service": "Soulseek",
+            "peer": "peer",
+            "status": "Complete",
+            "percent": 100,
+            "speed": 0,
+            "active": False,
+        }
+        with (
+            mock.patch.object(
+                soulseek_backend, "uploads_snapshot", return_value=[complete]
+            ),
+            mock.patch(
+                "blinddl.gui.uploads_panel.torrent_engine.uploads",
+                return_value=[],
+            ),
+        ):
+            panel = UploadsPanel(self.host, self.frame)
+        panel.finished_list.Select(0)
+
+        with mock.patch.object(panel, "_run_action") as run:
+            panel.on_list_key(self._key_event(
+                wx.WXK_DELETE, source=panel.finished_list))
+
+        run.assert_called_once()
+        rows, action = run.call_args.args[:2]
+        self.assertEqual([row["key"] for row in rows], ["peer\\done"])
+        self.assertEqual(action, panel._remove_row)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_uploads_shift_delete_deletes_data_after_confirm(self):
+        complete = {
+            "key": "peer\\done",
+            "title": "Done.flac",
+            "service": "Soulseek",
+            "peer": "peer",
+            "status": "Complete",
+            "percent": 100,
+            "speed": 0,
+            "active": False,
+            "path": "/shares/Done.flac",
+        }
+        with (
+            mock.patch.object(
+                soulseek_backend, "uploads_snapshot", return_value=[complete]
+            ),
+            mock.patch(
+                "blinddl.gui.uploads_panel.torrent_engine.uploads",
+                return_value=[],
+            ),
+        ):
+            panel = UploadsPanel(self.host, self.frame)
+        panel.finished_list.Select(0)
+
+        with (
+            mock.patch("blinddl.gui.uploads_panel.wx.MessageBox",
+                       return_value=wx.YES),
+            mock.patch.object(panel, "_run_action") as run,
+        ):
+            panel.on_list_key(self._key_event(
+                wx.WXK_DELETE, shift=True, source=panel.finished_list))
+
+        run.assert_called_once()
+        rows, action = run.call_args.args[:2]
+        self.assertEqual([row["key"] for row in rows], ["peer\\done"])
+        # The action passes delete_data through to the backend.
+        with mock.patch.object(
+            soulseek_backend, "remove_upload", return_value=True
+        ) as remove_upload:
+            self.assertTrue(action(complete))
+            remove_upload.assert_called_once_with(
+                "peer\\done", delete_data=True)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_uploads_remove_row_routes_to_torrent_or_soulseek(self):
+        panel = UploadsPanel(self.host, self.frame)
+        torrent_row = {
+            "key": "hash", "title": "Release", "service": "BitTorrent",
+        }
+        soulseek_row = {
+            "key": "peer\\file", "title": "Shared.flac",
+            "service": soulseek_backend.SOURCE,
+        }
+        with (
+            mock.patch(
+                "blinddl.gui.uploads_panel.torrent_engine.stop_seeding",
+                return_value=True,
+            ) as stop_seeding,
+            mock.patch(
+                "blinddl.gui.uploads_panel.torrent_engine.delete_seed",
+                return_value=True,
+            ) as delete_seed,
+            mock.patch.object(
+                soulseek_backend, "remove_upload", return_value=True
+            ) as remove_upload,
+        ):
+            self.assertTrue(panel._remove_row(torrent_row))
+            stop_seeding.assert_called_once_with("hash")
+            self.assertTrue(panel._remove_row(torrent_row, delete_data=True))
+            delete_seed.assert_called_once_with("hash")
+            self.assertTrue(panel._remove_row(soulseek_row))
+            remove_upload.assert_called_once_with(
+                "peer\\file", delete_data=False)
+        panel.shutdown()
+        panel.Destroy()
 
     def test_subscriptions_bulk_disable_and_selection_helpers(self):
         panel = SubsPanel(self.host, self.frame)

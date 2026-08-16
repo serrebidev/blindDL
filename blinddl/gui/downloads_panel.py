@@ -43,12 +43,14 @@ class DownloadsPanel(wx.Panel):
         self.list = self._make_list(
             "Downloads",
             "Queued and running downloads. Select one or more items; Context "
-            "Menu opens actions.")
+            "Menu opens actions. Delete removes the selection; Shift Delete "
+            "deletes its data.")
         finished_label = wx.StaticText(self, label="&Finished downloads:")
         self.finished_list = self._make_list(
             "Finished downloads",
             "Downloads that finished, failed or were cancelled. Select one "
-            "or more items; Context Menu opens actions.")
+            "or more items; Context Menu opens actions. Delete removes the "
+            "selection; Shift Delete deletes its data.")
 
         sizer.Add(active_label, 0, wx.LEFT | wx.TOP, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.ALL, 8)
@@ -64,6 +66,7 @@ class DownloadsPanel(wx.Panel):
             control.InsertColumn(index, heading)
         control.SetColumnWidth(0, 300)
         control.Bind(wx.EVT_CONTEXT_MENU, self.on_downloads_menu)
+        control.Bind(wx.EVT_KEY_DOWN, self.on_list_key)
         return control
 
     # -- updates from the queue (main thread) ------------------------------
@@ -260,16 +263,40 @@ class DownloadsPanel(wx.Panel):
         if len(items) == 1 and (path := self._result_path(items[0])):
             open_folder(path if os.path.isdir(path) else os.path.dirname(path))
 
+    def _removable(self, items):
+        """The selected rows that are neither running nor still seeding."""
+        return [item for item in items
+                if item.status != STATUS_DOWNLOADING and not item.seeding]
+
     def on_remove(self, event, control=None):
         control = control if control is not None else self.finished_list
         items = self._selected_items(control)
-        count = sum(bool(self.frame.queue.remove(item.id)) for item in items)
+        if not items:
+            self.frame.announce("Select a download to remove.")
+            return
+        removable = self._removable(items)
+        if not removable:
+            self.frame.announce(
+                "The selected downloads are still downloading or seeding; "
+                "cancel or stop them first.")
+            return
+        count = sum(bool(self.frame.queue.remove(item.id)) for item in removable)
         self.refresh_all()
         self.frame.announce(f"Removed {count} download{'s' if count != 1 else ''}.")
 
     def on_delete_data(self, event, control=None):
         control = control if control is not None else self.finished_list
-        items = [item for item in self._selected_items(control)
+        selected = self._selected_items(control)
+        if not selected:
+            self.frame.announce("Select a download first.")
+            return
+        removable = self._removable(selected)
+        if not removable:
+            self.frame.announce(
+                "The selected downloads are still downloading or seeding; "
+                "cancel or stop them first.")
+            return
+        items = [item for item in removable
                  if self.frame.queue.can_delete_data(item)]
         if not items:
             self.frame.announce("No selected downloads have known data to delete.")
@@ -287,6 +314,19 @@ class DownloadsPanel(wx.Panel):
         self.refresh_all()
         self.frame.announce(
             f"Deleted data for {count} download{'s' if count != 1 else ''}.")
+
+    def on_list_key(self, event):
+        """Delete removes the selection; Shift Delete deletes its data."""
+        if event.GetKeyCode() not in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE):
+            event.Skip()
+            return
+        control = event.GetEventObject()
+        if control is not self.list and control is not self.finished_list:
+            control = self.list
+        if event.ShiftDown():
+            self.on_delete_data(None, control)
+        else:
+            self.on_remove(None, control)
 
     def _select_all(self, event, control=None):
         control = control if control is not None else self.list

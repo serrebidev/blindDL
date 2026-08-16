@@ -46,13 +46,15 @@ class UploadsPanel(wx.Panel):
             "Uploads and torrent seeding",
             "Shows files other people are downloading from your Soulseek "
             "shares and torrents you seed. Select one or more items; Context "
-            "Menu opens actions."
+            "Menu opens actions. Delete removes the selection; Shift Delete "
+            "deletes its data."
         )
         finished_label = wx.StaticText(self, label="&Finished uploads:")
         self.finished_list = self._make_list(
             "Finished uploads",
             "Uploads that completed, failed or were stopped. Select one or "
-            "more items; Context Menu opens actions."
+            "more items; Context Menu opens actions. Delete removes the "
+            "selection; Shift Delete deletes its data."
         )
         sizer.Add(active_label, 0, wx.LEFT | wx.TOP, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.ALL, 8)
@@ -78,6 +80,7 @@ class UploadsPanel(wx.Panel):
         control.SetColumnWidth(2, 150)
         control.SetColumnWidth(3, 120)
         control.Bind(wx.EVT_CONTEXT_MENU, self.on_menu)
+        control.Bind(wx.EVT_KEY_DOWN, self.on_list_key)
         return control
 
     def shutdown(self):
@@ -314,6 +317,9 @@ class UploadsPanel(wx.Panel):
 
     def on_remove(self, event=None, control=None):
         rows = self._selected(control)
+        if not rows:
+            self.frame.announce("Select an upload to remove.")
+            return
         self._run_action(
             rows, self._remove_row,
             lambda count: f"Removed {count} upload{'s' if count != 1 else ''}.",
@@ -333,8 +339,16 @@ class UploadsPanel(wx.Panel):
         return False
 
     def on_delete_data(self, event=None, control=None):
-        rows = self._selected(control)
+        selected = self._selected(control)
+        if not selected:
+            self.frame.announce("Select an upload first.")
+            return
+        # Deleting a Soulseek upload's data removes the shared source file,
+        # which needs a local path; BitTorrent data lives with the seed.
+        rows = [row for row in selected
+                if row.get("service") == "BitTorrent" or row.get("path")]
         if not rows:
+            self.frame.announce("No selected uploads have known data to delete.")
             return
         answer = wx.MessageBox(
             f"Permanently delete the data for {len(rows)} selected "
@@ -349,6 +363,19 @@ class UploadsPanel(wx.Panel):
             rows, lambda row: self._remove_row(row, delete_data=True),
             lambda count: f"Deleted data for {count} upload{'s' if count != 1 else ''}.",
         )
+
+    def on_list_key(self, event):
+        """Delete removes the selection; Shift Delete deletes its data."""
+        if event.GetKeyCode() not in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE):
+            event.Skip()
+            return
+        control = event.GetEventObject()
+        if control is not self.list and control is not self.finished_list:
+            control = self.list
+        if event.ShiftDown():
+            self.on_delete_data(None, control)
+        else:
+            self.on_remove(None, control)
 
     def on_clear_finished(self, event=None):
         rows = list(self._finished_rows)
