@@ -2924,6 +2924,96 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(config.saved)
         dialog.Destroy()
 
+    def test_settings_pages_are_five_logical_tabs(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertEqual(
+            [dialog.notebook.GetPageText(index)
+             for index in range(dialog.notebook.GetPageCount())],
+            ["Downloads", "Torrents", "Soulseek", "Interface", "Accounts"],
+        )
+        dialog.Destroy()
+
+    def test_auto_cookies_is_opt_in_and_sets_the_combo_to_auto(self):
+        config = _SettingsConfig()
+        config["cookies_from_browser"] = ""
+        dialog = SettingsDialog(self.host, config)
+
+        # Off by default: no browser is touched, and the combo reads None.
+        self.assertFalse(dialog.cookies_auto_check.GetValue())
+        self.assertTrue(dialog.cookies_choice.IsEnabled())
+        self.assertEqual(dialog.cookies_choice.GetStringSelection(), "None")
+
+        # Turning the opt-in on selects Auto and locks the combo to it.
+        dialog.cookies_auto_check.SetValue(True)
+        dialog.cookies_auto_check.ProcessEvent(
+            wx.CommandEvent(
+                wx.wxEVT_CHECKBOX, dialog.cookies_auto_check.GetId()
+            )
+        )
+        self.assertEqual(
+            dialog.cookies_choice.GetStringSelection(),
+            "Auto (any installed browser)",
+        )
+        self.assertFalse(dialog.cookies_choice.IsEnabled())
+        dialog.apply()
+
+        self.assertEqual(config["cookies_from_browser"], "auto")
+        self.assertTrue(config.saved)
+        dialog.Destroy()
+
+    def test_auto_cookies_checkbox_off_puts_the_combo_back_to_none(self):
+        config = _SettingsConfig()
+        config["cookies_from_browser"] = "auto"
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertTrue(dialog.cookies_auto_check.GetValue())
+        self.assertFalse(dialog.cookies_choice.IsEnabled())
+        self.assertEqual(
+            dialog.cookies_choice.GetStringSelection(),
+            "Auto (any installed browser)",
+        )
+
+        dialog.cookies_auto_check.SetValue(False)
+        dialog.cookies_auto_check.ProcessEvent(
+            wx.CommandEvent(
+                wx.wxEVT_CHECKBOX, dialog.cookies_auto_check.GetId()
+            )
+        )
+        self.assertTrue(dialog.cookies_choice.IsEnabled())
+        self.assertEqual(dialog.cookies_choice.GetStringSelection(), "None")
+        dialog.Destroy()
+
+    def test_file_pickers_name_the_text_box_nvda_focuses(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        expected = {
+            "cookies_file_picker": "Cookies file",
+            "am_cookies_picker": "Apple Music cookies file",
+            "onlyfans_auth_picker": "OnlyFans auth JSON file",
+            "justforfans_auth_picker": "JustForFans auth JSON file",
+        }
+        for attribute, name in expected.items():
+            picker = getattr(dialog, attribute)
+            text = (
+                picker.GetTextCtrl() if hasattr(picker, "GetTextCtrl") else None
+            )
+            self.assertIsNotNone(text, attribute)
+            self.assertEqual(text.GetName(), name)
+        dialog.Destroy()
+
+    def test_apple_music_copy_button_says_what_it_copies(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        self.assertEqual(
+            dialog.am_from_browser.GetName(),
+            "Copy Apple Music cookies from browser",
+        )
+        dialog.Destroy()
+
     def test_failed_cookie_export_removes_secure_temporary_file(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)

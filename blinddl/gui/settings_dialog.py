@@ -101,7 +101,7 @@ class SettingsDialog(wx.Dialog):
         self.notebook.AddPage(self._downloads_page(), "Downloads")
         self.notebook.AddPage(self._torrents_page(), "Torrents")
         self.notebook.AddPage(self._soulseek_page(), "Soulseek")
-        self.notebook.AddPage(self._window_page(), "Window")
+        self.notebook.AddPage(self._interface_page(), "Interface")
         self.notebook.AddPage(self._accounts_page(), "Accounts")
 
         sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 8)
@@ -166,6 +166,9 @@ class SettingsDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         config = self.config
 
+        sizer.Add(self._heading(page, "Files and formats"), 0,
+                  wx.TOP | wx.LEFT, 8)
+
         dir_label = wx.StaticText(page, label="&Download folder:")
         # The style is spelled out because wxGTK leaves the edit box out of
         # its default: the download folder would be a bare Browse button
@@ -202,6 +205,15 @@ class SettingsDialog(wx.Dialog):
             "the site serves; AVI is re-encoded, which takes longer."
         )
 
+        sizer.Add(dir_label, 0, wx.TOP | wx.LEFT, 8)
+        sizer.Add(self.dir_picker, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
+        _row(sizer, fmt_label, self.format_choice)
+        _row(sizer, video_fmt_label, self.video_format_choice)
+
+        sizer.Add(self._heading(page, "Queue and cleanup"), 0,
+                  wx.TOP | wx.LEFT, 12)
+
         self.auto_clear_check = wx.CheckBox(
             page, label="Clear &finished downloads and uploads automatically"
         )
@@ -235,15 +247,27 @@ class SettingsDialog(wx.Dialog):
         )
         self.sub_spin.SetName("Subscription interval in hours")
 
-        sizer.Add(dir_label, 0, wx.TOP | wx.LEFT, 8)
-        sizer.Add(self.dir_picker, 0, wx.EXPAND | wx.ALL, 8)
-        sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
         sizer.Add(self.auto_clear_check, 0, wx.ALL, 8)
-        _row(sizer, fmt_label, self.format_choice)
-        _row(sizer, video_fmt_label, self.video_format_choice)
         _row(sizer, conc_label, self.conc_spin)
         _row(sizer, search_label, self.search_spin)
         _row(sizer, sub_label, self.sub_spin)
+
+        sizer.Add(self._heading(page, "Updates"), 0, wx.TOP | wx.LEFT, 12)
+        update_label = (
+            "&Automatically download and install BlindDL updates"
+            if getattr(sys, "frozen", False)
+            else "&Update download tools automatically"
+        )
+        self.update_check = wx.CheckBox(page, label=update_label)
+        self.update_check.SetValue(bool(config["auto_update"]))
+        self.update_check.SetHelpText(
+            "Checks at startup and every "
+            f"{int(config['update_check_hours'])} hours after that. Released "
+            "builds download and verify an update automatically, wait for "
+            "active and queued downloads to finish, then install and restart."
+        )
+        sizer.Add(self.update_check, 0, wx.ALL, 8)
+
         page.SetSizer(sizer)
         return page
 
@@ -284,7 +308,9 @@ class SettingsDialog(wx.Dialog):
         self.torrent_down_spin = wx.SpinCtrl(
             page, min=0, max=1000000, initial=int(config["torrent_max_down_kib"])
         )
-        self.torrent_down_spin.SetName("Torrent download limit in kilobytes per second")
+        self.torrent_down_spin.SetName(
+            "Torrent download limit in kilobytes per second, 0 is unlimited"
+        )
 
         up_label = wx.StaticText(
             page, label="&Upload limit, KB per second (0 = unlimited):"
@@ -292,7 +318,9 @@ class SettingsDialog(wx.Dialog):
         self.torrent_up_spin = wx.SpinCtrl(
             page, min=0, max=1000000, initial=int(config["torrent_max_up_kib"])
         )
-        self.torrent_up_spin.SetName("Torrent upload limit in kilobytes per second")
+        self.torrent_up_spin.SetName(
+            "Torrent upload limit in kilobytes per second, 0 is unlimited"
+        )
 
         active_label = wx.StaticText(page, label="Torrents downloading at &once:")
         self.torrent_active_spin = wx.SpinCtrl(
@@ -312,7 +340,7 @@ class SettingsDialog(wx.Dialog):
         self.torrent_ratio_text = wx.TextCtrl(
             page, value=f"{float(config['torrent_seed_ratio']):g}"
         )
-        self.torrent_ratio_text.SetName("Stop seeding at ratio")
+        self.torrent_ratio_text.SetName("Stop seeding at ratio, 0 keeps seeding")
         self.torrent_ratio_text.SetHelpText(
             "A ratio of 2 uploads twice what was downloaded, then stops. "
             "0 keeps seeding until blindDL exits."
@@ -324,7 +352,7 @@ class SettingsDialog(wx.Dialog):
         self.torrent_minutes_spin = wx.SpinCtrl(
             page, min=0, max=100000, initial=int(config["torrent_seed_minutes"])
         )
-        self.torrent_minutes_spin.SetName("Stop seeding after minutes")
+        self.torrent_minutes_spin.SetName("Stop seeding after minutes, 0 is no limit")
 
         port_label = wx.StaticText(
             page, label="Incoming &port (0 = pick one at random):"
@@ -332,11 +360,12 @@ class SettingsDialog(wx.Dialog):
         self.torrent_port_spin = wx.SpinCtrl(
             page, min=0, max=65535, initial=int(config["torrent_port"])
         )
-        self.torrent_port_spin.SetName("Incoming port")
+        self.torrent_port_spin.SetName("Incoming port, 0 picks one at random")
 
         enc_label = wx.StaticText(page, label="&Encryption:")
         self.torrent_enc_choice = self._choice(
-            page, ENCRYPTION_CHOICES, config["torrent_encryption"], "Encryption"
+            page, ENCRYPTION_CHOICES, config["torrent_encryption"],
+            "Torrent encryption",
         )
         self.torrent_enc_choice.SetHelpText(
             "Hides the protocol from an internet provider that slows "
@@ -375,7 +404,9 @@ class SettingsDialog(wx.Dialog):
 
         proxy_label = wx.StaticText(page, label="Torrent pro&xy (blank = direct):")
         self.torrent_proxy_text = wx.TextCtrl(page, value=config["torrent_proxy"])
-        self.torrent_proxy_text.SetName("Torrent proxy")
+        self.torrent_proxy_text.SetName(
+            "Torrent proxy, blank means a direct connection"
+        )
         self.torrent_proxy_text.SetHelpText(
             "Something like socks5://host:1080, or "
             "socks5://user:password@host:1080. Carries peer traffic as well "
@@ -388,23 +419,35 @@ class SettingsDialog(wx.Dialog):
         self.torrent_version_text = wx.TextCtrl(
             page, value=config["torrent_client_version"]
         )
-        self.torrent_version_text.SetName("Report as qBittorrent version")
+        self.torrent_version_text.SetName(
+            "Report as qBittorrent version, blank means newest"
+        )
         self.torrent_version_text.SetHelpText(
             "blindDL joins swarms as the current qBittorrent release, which "
             "trackers that check the client accept. Type a version such as "
             "5.2.3 to pin one."
         )
 
+        sizer.Add(self._heading(page, "Engine"), 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.torrent_engine_check, 0, wx.ALL, 8)
         sizer.Add(self.engine_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        sizer.Add(self._heading(page, "Files"), 0, wx.TOP | wx.LEFT, 12)
         sizer.Add(torrent_dir_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.torrent_dir_picker, 0, wx.EXPAND | wx.ALL, 8)
+
+        sizer.Add(self._heading(page, "Speed and limits"), 0,
+                  wx.TOP | wx.LEFT, 12)
         _row(sizer, down_label, self.torrent_down_spin)
         _row(sizer, up_label, self.torrent_up_spin)
         _row(sizer, active_label, self.torrent_active_spin)
         _row(sizer, conn_label, self.torrent_conn_spin)
+
+        sizer.Add(self._heading(page, "Seeding"), 0, wx.TOP | wx.LEFT, 12)
         _row(sizer, ratio_label, self.torrent_ratio_text)
         _row(sizer, minutes_label, self.torrent_minutes_spin)
+
+        sizer.Add(self._heading(page, "Network"), 0, wx.TOP | wx.LEFT, 12)
         _row(sizer, port_label, self.torrent_port_spin)
         _row(sizer, enc_label, self.torrent_enc_choice)
         sizer.Add(self.torrent_dht_check, 0, wx.ALL, 8)
@@ -412,6 +455,8 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.torrent_sequential_check, 0, wx.ALL, 8)
         sizer.Add(self.torrent_delete_check, 0, wx.ALL, 8)
         _row(sizer, proxy_label, self.torrent_proxy_text)
+
+        sizer.Add(self._heading(page, "Identity"), 0, wx.TOP | wx.LEFT, 12)
         _row(sizer, version_label, self.torrent_version_text)
         page.SetSizer(sizer)
 
@@ -618,7 +663,9 @@ class SettingsDialog(wx.Dialog):
         self.soulseek_down_spin = wx.SpinCtrl(
             page, min=0, max=1000000, initial=int(config["soulseek_max_download_kib"])
         )
-        self.soulseek_down_spin.SetName("Soulseek download speed limit")
+        self.soulseek_down_spin.SetName(
+            "Soulseek download limit in KiB per second, 0 is unlimited"
+        )
 
         up_label = wx.StaticText(
             page, label="Upload limit, KiB per &second (0 = unlimited):"
@@ -626,14 +673,19 @@ class SettingsDialog(wx.Dialog):
         self.soulseek_up_spin = wx.SpinCtrl(
             page, min=0, max=1000000, initial=int(config["soulseek_max_upload_kib"])
         )
-        self.soulseek_up_spin.SetName("Soulseek upload speed limit")
+        self.soulseek_up_spin.SetName(
+            "Soulseek upload limit in KiB per second, 0 is unlimited"
+        )
 
+        sizer.Add(self._heading(page, "Account"), 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.soulseek_enabled_check, 0, wx.ALL, 8)
         _row(sizer, username_label, self.soulseek_username_text)
         _row(sizer, password_label, self.soulseek_password_text)
         sizer.Add(self.soulseek_account_button, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
         sizer.Add(self.soulseek_account_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         _row(sizer, description_label, self.soulseek_description_text)
+
+        sizer.Add(self._heading(page, "Sharing"), 0, wx.TOP | wx.LEFT, 12)
         sizer.Add(self.soulseek_share_library_check, 0, wx.ALL, 8)
         sizer.Add(self.soulseek_block_leechers_check, 0, wx.ALL, 8)
         sizer.Add(shared_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
@@ -648,18 +700,23 @@ class SettingsDialog(wx.Dialog):
             8,
         )
 
-        network = wx.FlexGridSizer(cols=4, vgap=4, hgap=8)
+        sizer.Add(self._heading(page, "Network"), 0, wx.TOP | wx.LEFT, 12)
+        network = wx.FlexGridSizer(cols=2, vgap=4, hgap=8)
         network.Add(listen_label, 0, wx.ALIGN_CENTER_VERTICAL)
         network.Add(self.soulseek_listen_spin, 0)
         network.Add(obfuscated_port_label, 0, wx.ALIGN_CENTER_VERTICAL)
         network.Add(self.soulseek_obfuscated_port_spin, 0)
-        network.Add(slots_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        network.Add(self.soulseek_slots_spin, 0)
-        network.Add(results_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        network.Add(self.soulseek_results_spin, 0)
         sizer.Add(network, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.soulseek_upnp_check, 0, wx.ALL, 8)
         sizer.Add(self.soulseek_obfuscate_check, 0, wx.ALL, 8)
+
+        sizer.Add(self._heading(page, "Limits"), 0, wx.TOP | wx.LEFT, 12)
+        limits = wx.FlexGridSizer(cols=2, vgap=4, hgap=8)
+        limits.Add(slots_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        limits.Add(self.soulseek_slots_spin, 0)
+        limits.Add(results_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        limits.Add(self.soulseek_results_spin, 0)
+        sizer.Add(limits, 0, wx.EXPAND | wx.ALL, 8)
         _row(sizer, down_label, self.soulseek_down_spin)
         _row(sizer, up_label, self.soulseek_up_spin)
 
@@ -776,11 +833,14 @@ class SettingsDialog(wx.Dialog):
         for index in reversed(self.soulseek_priority_list.GetSelections()):
             self.soulseek_priority_list.Delete(index)
 
-    def _window_page(self):
+    def _interface_page(self):
         page = wx.Panel(self.notebook)
-        page.SetName("Window settings")
+        page.SetName("Interface settings")
         sizer = wx.BoxSizer(wx.VERTICAL)
         config = self.config
+
+        sizer.Add(self._heading(page, "Window behavior"), 0,
+                  wx.TOP | wx.LEFT, 8)
 
         self.tray_check = wx.CheckBox(
             page, label="Closing the window hides blindDL in the s&ystem tray"
@@ -810,6 +870,11 @@ class SettingsDialog(wx.Dialog):
             "Opens blindDL with the window filling the screen."
         )
 
+        sizer.Add(self.tray_check, 0, wx.ALL, 8)
+        sizer.Add(self.tray_minimize_check, 0, wx.ALL, 8)
+        sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
+
+        sizer.Add(self._heading(page, "Speech"), 0, wx.TOP | wx.LEFT, 12)
         self.speak_status_check = wx.CheckBox(
             page, label="S&peak status messages as they appear"
         )
@@ -820,63 +885,8 @@ class SettingsDialog(wx.Dialog):
             "so it does not have to be checked with NVDA plus End. Messages "
             "wait their turn rather than interrupting what is being read."
         )
-
-        update_label = (
-            "&Automatically download and install BlindDL updates"
-            if getattr(sys, "frozen", False)
-            else "&Update download tools automatically"
-        )
-        self.update_check = wx.CheckBox(page, label=update_label)
-        self.update_check.SetValue(bool(config["auto_update"]))
-        self.update_check.SetHelpText(
-            "Checks at startup and every "
-            f"{int(config['update_check_hours'])} hours after that. Released "
-            "builds download and verify an update automatically, wait for "
-            "active and queued downloads to finish, then install and restart."
-        )
-
-        cookies_label = wx.StaticText(page, label="Use cookies from &browser:")
-        self.cookies_choice = self._choice(
-            page,
-            BROWSER_COOKIE_CHOICES,
-            config["cookies_from_browser"],
-            "Browser cookies",
-        )
-        self.cookies_choice.SetHelpText(
-            "Lets yt-dlp read an existing signed-in browser profile when a "
-            "site requires login."
-        )
-
-        cookies_file_label = wx.StaticText(page, label="Cookies &file:")
-        self.cookies_file_picker = wx.FilePickerCtrl(
-            page,
-            path=config["cookies_file"],
-            message="Select a cookies.txt file",
-            wildcard="Cookies files (*.txt)|*.txt|All files (*.*)|*.*",
-        )
-        self.cookies_file_picker.SetName("Cookies file")
-        self.cookies_file_picker.SetHelpText(
-            "A Netscape cookies.txt used for YouTube and other sites that "
-            "need a sign-in. Copy from browser exports one, or leave blank "
-            "to read the browser above live."
-        )
-        self.cookies_copy_btn = wx.Button(page, label="Copy from &browser")
-        self.cookies_copy_btn.SetName("Copy cookies from browser")
-        self.cookies_copy_btn.SetHelpText(
-            "Exports cookies from a signed-in browser to a cookies.txt file."
-        )
-        self.cookies_copy_btn.Bind(wx.EVT_BUTTON, self._on_copy_cookies)
-        cookies_file_box = wx.BoxSizer(wx.HORIZONTAL)
-        cookies_file_box.Add(self.cookies_file_picker, 1, wx.RIGHT, 6)
-        cookies_file_box.Add(self.cookies_copy_btn, 0)
-
-        sizer.Add(self.tray_check, 0, wx.ALL, 8)
-        sizer.Add(self.tray_minimize_check, 0, wx.ALL, 8)
-        sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
         sizer.Add(self.speak_status_check, 0, wx.ALL, 8)
-        sizer.Add(self.update_check, 0, wx.ALL, 8)
-        _row(sizer, cookies_label, self.cookies_choice)
-        _row(sizer, cookies_file_label, cookies_file_box)
+
         page.SetSizer(sizer)
         return page
 
@@ -913,20 +923,23 @@ class SettingsDialog(wx.Dialog):
 
         am_label = wx.StaticText(page, label="Apple Music cookies &file:")
         am_box = wx.BoxSizer(wx.HORIZONTAL)
-        self.am_cookies_picker = wx.FilePickerCtrl(
-            page,
-            path=config["apple_music_cookies"],
-            message="Select Apple Music cookies.txt file",
-            wildcard="Cookies files (*.txt)|*.txt|All files (*.*)|*.*",
+        self.am_cookies_picker = _name_picker(
+            wx.FilePickerCtrl(
+                page,
+                path=config["apple_music_cookies"],
+                message="Select Apple Music cookies.txt file",
+                wildcard="Cookies files (*.txt)|*.txt|All files (*.*)|*.*",
+            ),
+            "Apple Music cookies file",
         )
-        self.am_cookies_picker.SetName("Apple Music cookies file")
-        am_from_browser = wx.Button(page, label="&Copy from browser")
-        am_from_browser.SetHelpText(
-            "Export Apple Music cookies from the browser selected on the General tab."
+        self.am_from_browser = wx.Button(page, label="&Copy from browser")
+        self.am_from_browser.SetName("Copy Apple Music cookies from browser")
+        self.am_from_browser.SetHelpText(
+            "Exports Apple Music cookies from a signed-in browser."
         )
-        am_from_browser.Bind(wx.EVT_BUTTON, self._on_am_copy_cookies)
+        self.am_from_browser.Bind(wx.EVT_BUTTON, self._on_am_copy_cookies)
         am_box.Add(self.am_cookies_picker, 1, wx.RIGHT, 6)
-        am_box.Add(am_from_browser, 0)
+        am_box.Add(self.am_from_browser, 0)
 
         annas_label = wx.StaticText(page, label="Anna's Archive &membership key:")
         self.annas_text = wx.TextCtrl(
@@ -945,24 +958,28 @@ class SettingsDialog(wx.Dialog):
         )
 
         onlyfans_label = wx.StaticText(page, label="OnlyFans auth &JSON file:")
-        self.onlyfans_auth_picker = wx.FilePickerCtrl(
-            page,
-            path=config["onlyfans_auth_file"],
-            message="Choose an ofd-compatible OnlyFans auth JSON file",
-            wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
-            style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+        self.onlyfans_auth_picker = _name_picker(
+            wx.FilePickerCtrl(
+                page,
+                path=config["onlyfans_auth_file"],
+                message="Choose an ofd-compatible OnlyFans auth JSON file",
+                wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
+                style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+            ),
+            "OnlyFans auth JSON file",
         )
-        self.onlyfans_auth_picker.SetName("OnlyFans auth JSON file")
 
         justforfans_label = wx.StaticText(page, label="JustForFans auth JSON &file:")
-        self.justforfans_auth_picker = wx.FilePickerCtrl(
-            page,
-            path=config["justforfans_auth_file"],
-            message="Choose a JustForFans auth JSON file",
-            wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
-            style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+        self.justforfans_auth_picker = _name_picker(
+            wx.FilePickerCtrl(
+                page,
+                path=config["justforfans_auth_file"],
+                message="Choose a JustForFans auth JSON file",
+                wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
+                style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+            ),
+            "JustForFans auth JSON file",
         )
-        self.justforfans_auth_picker.SetName("JustForFans auth JSON file")
 
         def enable_adult_auth(_event=None):
             enabled = self.adult_sites_check.GetValue()
@@ -1013,6 +1030,72 @@ class SettingsDialog(wx.Dialog):
             "LAME; V0 is roughly the same bitrate as the original."
         )
         _row(sizer, am_format_label, self.am_format_choice)
+
+        sizer.Add(self._heading(page, "Browser cookies"), 0,
+                  wx.TOP | wx.LEFT, 12)
+        self.cookies_auto_check = wx.CheckBox(
+            page, label="Automatically use cookies from any installed &browser"
+        )
+        self.cookies_auto_check.SetValue(config["cookies_from_browser"] == "auto")
+        self.cookies_auto_check.SetHelpText(
+            "Reads cookies from whichever installed browser has them, "
+            "without asking which one. Off by default, so no browser is "
+            "read until you turn this on."
+        )
+        cookies_label = wx.StaticText(page, label="Use cookies from &browser:")
+        self.cookies_choice = self._choice(
+            page,
+            BROWSER_COOKIE_CHOICES,
+            config["cookies_from_browser"],
+            "Use cookies from browser",
+        )
+        self.cookies_choice.SetHelpText(
+            "A specific browser to read when a site requires login. None "
+            "uses no browser cookies at all."
+        )
+        cookies_file_label = wx.StaticText(page, label="Cookies &file:")
+        self.cookies_file_picker = _name_picker(
+            wx.FilePickerCtrl(
+                page,
+                path=config["cookies_file"],
+                message="Select a cookies.txt file",
+                wildcard="Cookies files (*.txt)|*.txt|All files (*.*)|*.*",
+            ),
+            "Cookies file",
+        )
+        self.cookies_file_picker.SetHelpText(
+            "A Netscape cookies.txt used for YouTube and other sites that "
+            "need a sign-in. Copy from browser exports one."
+        )
+        self.cookies_copy_btn = wx.Button(page, label="Copy from &browser")
+        self.cookies_copy_btn.SetName("Copy cookies from browser")
+        self.cookies_copy_btn.SetHelpText(
+            "Exports cookies from a signed-in browser to a cookies.txt file."
+        )
+        self.cookies_copy_btn.Bind(wx.EVT_BUTTON, self._on_copy_cookies)
+        cookies_file_box = wx.BoxSizer(wx.HORIZONTAL)
+        cookies_file_box.Add(self.cookies_file_picker, 1, wx.RIGHT, 6)
+        cookies_file_box.Add(self.cookies_copy_btn, 0)
+
+        def sync_cookies_auto(_event=None):
+            if self.cookies_auto_check.GetValue():
+                self.cookies_choice.SetSelection(
+                    [value for _label, value in BROWSER_COOKIE_CHOICES].index(
+                        "auto"
+                    )
+                )
+                self.cookies_choice.Disable()
+            else:
+                self.cookies_choice.Enable()
+                if self.cookies_choice.GetStringSelection().startswith("Auto"):
+                    self.cookies_choice.SetSelection(0)
+
+        self.cookies_auto_check.Bind(wx.EVT_CHECKBOX, sync_cookies_auto)
+        sync_cookies_auto()
+
+        sizer.Add(self.cookies_auto_check, 0, wx.ALL, 8)
+        _row(sizer, cookies_label, self.cookies_choice)
+        _row(sizer, cookies_file_label, cookies_file_box)
 
         sizer.Add(self._heading(page, "Anna's Archive"), 0, wx.TOP | wx.LEFT, 12)
         _row(sizer, annas_label, self.annas_text)
@@ -1238,9 +1321,10 @@ class SettingsDialog(wx.Dialog):
         # Kept in saved configs for backward compatibility; automatic update
         # is now one unambiguous setting.
         self.config["auto_install_update"] = self.update_check.GetValue()
-        self.config["cookies_from_browser"] = BROWSER_COOKIE_CHOICES[
-            self.cookies_choice.GetSelection()
-        ][1]
+        self.config["cookies_from_browser"] = (
+            "auto" if self.cookies_auto_check.GetValue()
+            else BROWSER_COOKIE_CHOICES[self.cookies_choice.GetSelection()][1]
+        )
         self.config["cookies_file"] = self.cookies_file_picker.GetPath().strip()
 
         self.config["sideb_lyrics"] = self.lyrics_check.GetValue()
