@@ -89,18 +89,26 @@ def is_deezer_url(url):
 
 
 _DEEZER_TRACK_ID_RE = re.compile(
-    r"deezer\.com/(?:[a-z]{2}/)?track/(\d+)", re.IGNORECASE)
+    r"(?:deezer\.com/(?:[a-z]{2}/)?track/|(?:deezer|sideb):)(\d+)",
+    re.IGNORECASE)
 
 
 def get_deezer_preview_url(track_url_or_id):
     """Return the 30-second preview MP3 URL for a Deezer track.
 
-    Accepts either a full deezer.com/track/… URL or a bare track id.
-    Returns ``None`` when the public API call fails (the track may be
-    geo-blocked or the API may be down).
+    Accepts a full deezer.com/track/… URL, a bare track id, or the
+    ``deezer:<id>`` / ``sideb:<id>`` ids that search results carry. Returns
+    ``None`` when the public API call fails (the track may be geo-blocked or
+    the API may be down).
     """
-    match = _DEEZER_TRACK_ID_RE.search(str(track_url_or_id))
-    track_id = match.group(1) if match else str(track_url_or_id)
+    text = str(track_url_or_id)
+    match = _DEEZER_TRACK_ID_RE.search(text)
+    if match:
+        track_id = match.group(1)
+    elif text.isdigit():
+        track_id = text
+    else:
+        return None
     try:
         resp = requests.get(
             f"https://api.deezer.com/track/{track_id}", timeout=10)

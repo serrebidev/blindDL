@@ -546,6 +546,35 @@ class SidebDeezerPreviewTests(unittest.TestCase):
                 "https://www.deezer.com/track/3135556")
         self.assertEqual(url, "https://cdns-preview.dzcdn.net/stream/abc123")
 
+    def test_preview_url_from_search_result_id(self):
+        # Search results carry their track id as "deezer:<id>" or
+        # "sideb:<id>"; preview.py hands that straight in and the id must be
+        # pulled out of the prefix, not sent to the API verbatim.
+        for item_id in ("deezer:3135556", "sideb:3135556"):
+            with self.subTest(item_id=item_id):
+                with mock.patch.object(sideb_backend.requests, "get") as get:
+                    get.return_value.json.return_value = {
+                        "id": 3135556,
+                        "preview": "https://cdns-preview.dzcdn.net/stream/abc123",
+                    }
+                    get.return_value.raise_for_status = mock.Mock()
+                    url = sideb_backend.get_deezer_preview_url(item_id)
+                self.assertEqual(
+                    get.call_args.args[0],
+                    "https://api.deezer.com/track/3135556",
+                )
+                self.assertEqual(
+                    url, "https://cdns-preview.dzcdn.net/stream/abc123"
+                )
+
+    def test_preview_url_ignores_non_track_ids(self):
+        # An album or playlist id must not be mistaken for a track; the API
+        # is never asked about it and the caller falls back to a search.
+        with mock.patch.object(sideb_backend.requests, "get") as get:
+            url = sideb_backend.get_deezer_preview_url("deezer:album:3135556")
+        self.assertIsNone(url)
+        get.assert_not_called()
+
     def test_preview_url_returns_none_on_error(self):
         with mock.patch.object(sideb_backend.requests, "get") as get:
             get.side_effect = OSError("network down")
