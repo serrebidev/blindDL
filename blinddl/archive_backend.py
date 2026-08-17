@@ -93,6 +93,14 @@ HTTP_TIMEOUT_S = 20
 # host quickly, then be patient with a live one that is simply slow.
 METADATA_TIMEOUT_S = (5, 45)
 DOWNLOAD_TIMEOUT_S = 600
+# How many times one file is fetched before it is called a failure. The
+# Archive closes long transfers part-way through often enough that a
+# twenty-megabyte chapter fails a first attempt and finishes a second, and
+# a run that gives up there abandons every file after it as well.
+DOWNLOAD_ATTEMPTS = 5
+# Grows with each retry: their servers shed load rather than refuse it, so
+# the wait is what the next attempt is worth having.
+DOWNLOAD_RETRY_WAIT_S = 2.0
 SEARCH_ROWS = 200
 MAX_RESULTS_PER_SOURCE = 200
 MIN_MATCH_SCORE = 30.0
@@ -475,27 +483,99 @@ def download(item, out_dir, progress_cb=None, cancel_event=None):
             if progress_cb is not None:
                 progress_cb(downloaded_total, total_expected)
             continue
-        partial = path + ".part"
+        written = _download_file(
+            entry["direct_url"], path,
+            already=downloaded_total, total=total_expected,
+            progress_cb=progress_cb, cancel_event=cancel_event)
+        downloaded_total += written
+    return last_path if single else folder
+
+
+def _download_file(url, path, already, total, progress_cb, cancel_event):
+    """Fetch one file to *path*, resuming where an interrupted try stopped.
+
+    The Archive drops long transfers: a connection that has been serving a
+    twenty-megabyte recording for a minute is closed mid-body often enough
+    that one bad file used to abandon a whole audiobook, several files in,
+    with nothing kept. Each attempt therefore continues from the bytes
+    already on disk with a Range request rather than starting again, and a
+    file only fails once it has run out of attempts.
+
+    Returns the number of bytes this call added, so the caller's running
+    total stays right across resumes.
+    """
+    partial = path + ".part"
+    last_error = None
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ArchiveDownloadCancelled()
+        resume_from = 0
+        if os.path.exists(partial):
+            resume_from = os.path.getsize(partial)
+        headers = {"Range": f"bytes={resume_from}-"} if resume_from else {}
         try:
-            with _http().get(entry["direct_url"], stream=True,
+            with _http().get(url, stream=True, headers=headers,
                              timeout=DOWNLOAD_TIMEOUT_S,
                              allow_redirects=True) as response:
+                # 416 means the file is already whole: the previous attempt
+                # wrote the last byte and lost the connection before it
+                # could say so.
+                if resume_from and response.status_code == 416:
+                    os.replace(partial, path)
+                    return 0
                 response.raise_for_status()
-                with open(partial, "wb") as handle:
+                # A server that ignored the Range answers 200 with the whole
+                # file, so what is on disk is worthless and the write starts
+                # over rather than appending a second copy behind the first.
+                if resume_from and response.status_code != 206:
+                    resume_from = 0
+                mode = "ab" if resume_from else "wb"
+                written = 0
+                with open(partial, mode) as handle:
                     for chunk in response.iter_content(chunk_size=64 * 1024):
                         if cancel_event is not None and cancel_event.is_set():
                             raise ArchiveDownloadCancelled()
                         if not chunk:
                             continue
                         handle.write(chunk)
-                        downloaded_total += len(chunk)
+                        written += len(chunk)
                         if progress_cb is not None:
-                            progress_cb(downloaded_total, total_expected)
+                            progress_cb(
+                                already + resume_from + written, total)
             os.replace(partial, path)
-        except BaseException:
+            return resume_from + written
+        except ArchiveDownloadCancelled:
             try:
                 os.remove(partial)
             except OSError:
                 pass
             raise
-    return last_path if single else folder
+        except requests.exceptions.HTTPError as exc:
+            last_error = exc
+            status = getattr(exc.response, "status_code", 0)
+            # A file the Archive says is not there will not be there on the
+            # fifth ask either. Only the answers that mean "not now" are
+            # worth another attempt.
+            if 400 <= status < 500 and status not in (408, 429):
+                break
+            if attempt + 1 < DOWNLOAD_ATTEMPTS:
+                time.sleep(DOWNLOAD_RETRY_WAIT_S * (attempt + 1))
+        except (requests.exceptions.RequestException, OSError) as exc:
+            last_error = exc
+            if attempt + 1 < DOWNLOAD_ATTEMPTS:
+                time.sleep(DOWNLOAD_RETRY_WAIT_S * (attempt + 1))
+    # The part file is deliberately left where it is: it is how a second
+    # run of the same download picks up where this one stopped instead of
+    # fetching twenty megabytes again.
+    name = os.path.basename(path)
+    status = getattr(getattr(last_error, "response", None), "status_code", 0)
+    if 400 <= status < 500:
+        raise RuntimeError(
+            f"The Internet Archive will not serve {name}: {last_error}."
+        ) from last_error
+    raise RuntimeError(
+        f"The Internet Archive kept dropping {name} after "
+        f"{DOWNLOAD_ATTEMPTS} attempts: {last_error}. Their servers do this "
+        "with large files; starting this download again picks up where it "
+        "stopped."
+    ) from last_error

@@ -243,6 +243,98 @@ class ArchiveDownloadTests(unittest.TestCase):
 
             self.assertEqual(os.listdir(folder), [])
 
+    def test_a_dropped_transfer_resumes_instead_of_starting_again(self):
+        # The Archive closes long transfers part-way through. Chapter seven
+        # of a thirteen-chapter book used to end the whole download there.
+        class _Dropped(_Response):
+            def iter_content(self, chunk_size=1):
+                yield b"first half "
+                raise requests.exceptions.ChunkedEncodingError("connection lost")
+
+        responses = [_Dropped(), _Response(content=b"second half",
+                                           status_code=206)]
+        entry = {"title": "Seven", "file_name": "07.mp3", "identifier": "d",
+                 "direct_url": "https://x/07.mp3", "size_bytes": 22}
+        with tempfile.TemporaryDirectory() as folder:
+            with (mock.patch.object(archive_backend, "_http") as http,
+                  mock.patch.object(archive_backend.time, "sleep")):
+                http.return_value.get.side_effect = (
+                    lambda *args, **kwargs: responses.pop(0))
+                path = archive_backend.download(entry, folder)
+
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), b"first half second half")
+            # The second attempt asked only for what was missing.
+            self.assertEqual(
+                http.return_value.get.call_args.kwargs["headers"],
+                {"Range": "bytes=11-"})
+
+    def test_a_server_that_ignores_the_range_is_not_appended_to_twice(self):
+        class _Dropped(_Response):
+            def iter_content(self, chunk_size=1):
+                yield b"partial"
+                raise requests.exceptions.ChunkedEncodingError("connection lost")
+
+        # Answering 200 to a Range request means the whole file again, so
+        # what is already on disk is worthless rather than a head start.
+        responses = [_Dropped(), _Response(content=b"whole file",
+                                           status_code=200)]
+        entry = {"title": "Seven", "file_name": "07.mp3", "identifier": "d",
+                 "direct_url": "https://x/07.mp3", "size_bytes": 10}
+        with tempfile.TemporaryDirectory() as folder:
+            with (mock.patch.object(archive_backend, "_http") as http,
+                  mock.patch.object(archive_backend.time, "sleep")):
+                http.return_value.get.side_effect = (
+                    lambda *args, **kwargs: responses.pop(0))
+                path = archive_backend.download(entry, folder)
+
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), b"whole file")
+
+    def test_a_file_the_archive_keeps_dropping_says_what_to_do(self):
+        class _Dropped(_Response):
+            def iter_content(self, chunk_size=1):
+                yield b"some"
+                raise requests.exceptions.ChunkedEncodingError("connection lost")
+
+        entry = {"title": "Seven", "file_name": "07.mp3", "identifier": "d",
+                 "direct_url": "https://x/07.mp3", "size_bytes": 99}
+        with tempfile.TemporaryDirectory() as folder:
+            with (mock.patch.object(archive_backend, "_http") as http,
+                  mock.patch.object(archive_backend.time, "sleep")):
+                http.return_value.get.side_effect = (
+                    lambda *args, **kwargs: _Dropped())
+                with self.assertRaises(RuntimeError) as caught:
+                    archive_backend.download(entry, folder)
+
+            self.assertEqual(
+                http.return_value.get.call_count,
+                archive_backend.DOWNLOAD_ATTEMPTS)
+            self.assertIn("picks up where it stopped", str(caught.exception))
+            # The part file is what the next run resumes from.
+            self.assertEqual(os.listdir(folder), ["07.mp3.part"])
+
+    def test_a_file_the_archive_does_not_have_is_not_asked_for_five_times(self):
+        error = requests.exceptions.HTTPError("404")
+        error.response = SimpleNamespace(status_code=404)
+
+        class _Missing(_Response):
+            def raise_for_status(self):
+                raise error
+
+        entry = {"title": "Seven", "file_name": "07.mp3", "identifier": "d",
+                 "direct_url": "https://x/07.mp3", "size_bytes": 1}
+        with tempfile.TemporaryDirectory() as folder:
+            with (mock.patch.object(archive_backend, "_http") as http,
+                  mock.patch.object(archive_backend.time, "sleep")):
+                http.return_value.get.side_effect = (
+                    lambda *args, **kwargs: _Missing())
+                with self.assertRaises(RuntimeError) as caught:
+                    archive_backend.download(entry, folder)
+
+        self.assertEqual(http.return_value.get.call_count, 1)
+        self.assertIn("will not serve", str(caught.exception))
+
 
 class AudiobookTests(unittest.TestCase):
     def test_an_audiobooker_book_becomes_a_result_row(self):
