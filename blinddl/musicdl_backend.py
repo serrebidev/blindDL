@@ -52,7 +52,18 @@ from rich.progress import Progress  # noqa: E402
 
 from .config import app_data_dir  # noqa: E402
 
-ALL_SOURCES = sorted(MusicClientBuilder.REGISTERED_MODULES.keys())
+# Sources blindDL searches better itself, so musicdl is not asked for them.
+# Its Deezer client hands back Deezer's own stream URL, which is Blowfish
+# encrypted: nothing can play it, and its rows collide with the native
+# Deezer backend's under the same "Deezer" name, so whichever answered
+# first silently hid the other. blindDL searches Deezer through its own
+# backend and through Side B in the same music search, both of which
+# return something that plays and downloads.
+SUPERSEDED_SOURCES = ("DeezerMusicClient",)
+ALL_SOURCES = sorted(
+    source for source in MusicClientBuilder.REGISTERED_MODULES
+    if source not in SUPERSEDED_SOURCES
+)
 
 # Per-search wall clock budget. Sites that answer later are dropped.
 SEARCH_TIMEOUT_S = 30.0

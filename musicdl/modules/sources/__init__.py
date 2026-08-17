@@ -33,7 +33,8 @@ from ..audiobooks import XimalayaMusicClient, LizhiMusicClient, QingtingMusicCli
 from ..common import GDStudioMusicClient, TuneHubMusicClient, MP3JuiceMusicClient, MyFreeMP3MusicClient, JBSouMusicClient, XiaoBaiMusicClient
 from ..thirdpartysites import (
     MituMusicClient, BuguyyMusicClient, YinyuedaoMusicClient, FiveSongMusicClient, FangpiMusicClient, TwoT58MusicClient, ZhuolinMusicClient, HTQYYMusicClient, XiagebaMusicClient, GequbaoMusicClient,
-    KKWSMusicClient, GequhaiMusicClient, LivePOOMusicClient, LiziYYMusicClient, MGMP3MusicClient, ITingWaMusicClient, SgogoMusicClient, XMFWAVMusicClient
+    KKWSMusicClient, GequhaiMusicClient, LivePOOMusicClient, LiziYYMusicClient, MGMP3MusicClient, ITingWaMusicClient, SgogoMusicClient, XMFWAVMusicClient,
+    Zvu4ITMusicClient, FreeMp3CloudMusicClient, FreeQobuzMusicClient
 )
 
 
@@ -48,6 +49,7 @@ class MusicClientBuilder(BaseModuleBuilder):
         'YouTubeMusicClient' : YouTubeMusicClient,     'JooxMusicClient'       : JooxMusicClient,           'AppleMusicClient'      : AppleMusicClient,          'JamendoMusicClient'         : JamendoMusicClient,             'SoundCloudMusicClient': SoundCloudMusicClient,
         'DeezerMusicClient'  : DeezerMusicClient,      'QobuzMusicClient'      : QobuzMusicClient,          'SpotifyMusicClient'    : SpotifyMusicClient,        'TIDALMusicClient'           : TIDALMusicClient,               'FMAMusicClient'       : FMAMusicClient,
         'JioSaavnMusicClient': JioSaavnMusicClient,    'OpenGameArtMusicClient': OpenGameArtMusicClient,    'SunoMusicClient'       : SunoMusicClient,           'WikimediaCommonsMusicClient': WikimediaCommonsMusicClient,    'AudiusMusicClient'    : AudiusMusicClient,
+        'FreeQobuzMusicClient'  : FreeQobuzMusicClient,
         'CCMixterMusicClient': CCMixterMusicClient,
         # Audio / Radio
         'XimalayaMusicClient': XimalayaMusicClient,    'LizhiMusicClient'      : LizhiMusicClient,          'QingtingMusicClient'   : QingtingMusicClient,       'LRTSMusicClient'            : LRTSMusicClient,                'ITunesMusicClient'    : ITunesMusicClient,
@@ -59,6 +61,8 @@ class MusicClientBuilder(BaseModuleBuilder):
         'FangpiMusicClient'  : FangpiMusicClient,      'FiveSongMusicClient'   : FiveSongMusicClient,       'KKWSMusicClient'       : KKWSMusicClient,           'GequhaiMusicClient'         : GequhaiMusicClient,             'LivePOOMusicClient'   : LivePOOMusicClient,
         'HTQYYMusicClient'   : HTQYYMusicClient,       'TwoT58MusicClient'     : TwoT58MusicClient,         'ZhuolinMusicClient'    : ZhuolinMusicClient,        'LiziYYMusicClient'          : LiziYYMusicClient,              'MGMP3MusicClient'     : MGMP3MusicClient,
         'ITingWaMusicClient' : ITingWaMusicClient,     'SgogoMusicClient'      : SgogoMusicClient,          'XMFWAVMusicClient'     : XMFWAVMusicClient,
+        # blindDL additions: ported from MusicGrabber (The Unlicense)
+        'Zvu4ITMusicClient'  : Zvu4ITMusicClient,      'FreeMp3CloudMusicClient': FreeMp3CloudMusicClient,
     }
 
 
