@@ -873,13 +873,19 @@ class SearchPanel(wx.Panel):
 
         self.search_btn = wx.Button(self, label="&Search")
         self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
-        self.stop_btn = wx.Button(self, label="&Stop search")
+        self.stop_btn = wx.Button(self, label="S&top search")
         self.stop_btn.SetName("Stop search")
         self.stop_btn.SetHelpText(
-            "Stops the current search. Results already found stay in the list."
+            "Stops the current search. Results already found stay in the "
+            "list. Every site is searched on its own thread, so stopping "
+            "keeps whatever the quick ones already answered."
         )
         self.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop_search)
-        self.stop_btn.Hide()
+        # Kept on the page rather than shown only while a search runs: a
+        # control that comes and goes is one a screen reader user has to
+        # re-find, and the row it sits in would shuffle underneath them
+        # every time a search started or ended. Off means no search to stop.
+        self.stop_btn.Disable()
 
         # Every control on this row is a way of describing the search, so
         # Enter runs it from any of them, exactly as it does from the query
@@ -924,6 +930,11 @@ class SearchPanel(wx.Panel):
         )
         self.play_full_btn.Bind(wx.EVT_BUTTON, self.on_play_full_selected)
         self.player = MediaPlayerPanel(self, frame, video_height=150)
+        # With nothing loaded, Play means "play what I have selected".
+        # Reaching the player at all takes several tabs past the results
+        # list, so arriving there and being told to choose something first
+        # is a dead end: the choice was already made in the list.
+        self.player.play_request = self.play_selection
 
         top = wx.BoxSizer(wx.HORIZONTAL)
         top.Add(engine_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
@@ -955,6 +966,17 @@ class SearchPanel(wx.Panel):
         if self.closing:
             return
         self.query_text.SetFocus()
+
+    def play_selection(self):
+        """Play the selected result, asked for from the player's Play button.
+
+        Returns whether the request was taken on, which is what tells the
+        player to stay quiet rather than say there is nothing to play.
+        """
+        if self.closing or not _plays(self.result_engine):
+            return False
+        self.on_play_full_selected(None)
+        return True
 
     def _visible_engine_labels(self):
         engines = list(GENERAL_ENGINES)
@@ -1345,12 +1367,12 @@ class SearchPanel(wx.Panel):
         self._apply_engine_columns(engine)
 
         # A Soulseek search never times out: it keeps finding peers until the
-        # user starts another search or presses Stop. Every search shows the
-        # Stop button, so a slow source can be cut off whatever the category.
+        # user starts another search or presses Stop. Stop is live for every
+        # search, so a slow source can be cut off whatever the category.
         self._soulseek_streaming = _is_soulseek_engine(engine)
         if self._soulseek_streaming:
             self.asked = [soulseek_backend.SOURCE]
-        self.stop_btn.Show()
+        self.stop_btn.Enable()
 
         if _is_soulseek_engine(engine):
             self.frame.announce(
@@ -1632,14 +1654,14 @@ class SearchPanel(wx.Panel):
         self.search_btn.Enable()
         self.done = True
         self._soulseek_streaming = False
-        self.stop_btn.Hide()
+        self.stop_btn.Disable()
         self.frame.announce(f"Soulseek unavailable: {error}")
 
     def _search_failed(self, token, error):
         if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
-        self.stop_btn.Hide()
+        self.stop_btn.Disable()
         self.frame.announce("Search failed.")
         wx.MessageBox(
             f"Search failed:\n{error}", "blindDL", wx.OK | wx.ICON_ERROR, self
@@ -1695,6 +1717,7 @@ class SearchPanel(wx.Panel):
             )
             if not self._pending():
                 self.timer.Stop()
+                self.stop_btn.Disable()
 
     def _add_soulseek_batch(self, token, batch):
         """Fold one streaming Soulseek batch into the list. Runs on the GUI thread.
@@ -1720,7 +1743,7 @@ class SearchPanel(wx.Panel):
         self.token = None
         self.done = True
         self._soulseek_streaming = False
-        self.stop_btn.Hide()
+        self.stop_btn.Disable()
         self.search_btn.Enable()
         self.timer.Stop()
         self.frame.announce("Search stopped.")
@@ -2003,7 +2026,6 @@ class SearchPanel(wx.Panel):
         if self.closing or token is not self.token:
             return
         self.search_btn.Enable()
-        self.stop_btn.Hide()
         # yt-dlp hands back everything at once; music results arrived per site.
         source = soulseek_backend.SOURCE if _is_soulseek_engine(engine) else ""
         self._add_site(token, engine, source, items)
@@ -2011,6 +2033,9 @@ class SearchPanel(wx.Panel):
         self.done = True
         self._flush_results()
         pending = self._pending()
+        # Sites each run on their own thread, so some are still working when
+        # the search as a whole reports in. Stop stays live for them.
+        self.stop_btn.Enable(bool(pending))
         order_phrase = _order_phrase(
             self.current_order, self.order_unable, self.order_source_count
         )

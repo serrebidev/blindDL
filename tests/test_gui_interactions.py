@@ -888,6 +888,28 @@ class GuiInteractionTests(unittest.TestCase):
         holder._start_update_checks.assert_called_once_with()
         holder._apply_soulseek_setting.assert_called_once_with()
 
+    def test_playback_status_gets_its_own_status_field_and_is_never_spoken(self):
+        holder = SimpleNamespace(
+            _closing=False,
+            SetStatusText=mock.Mock(),
+            config={"speak_status": True},
+        )
+
+        MainFrame.set_playback_status(holder, "Playing: One — 0:05 of 3:20")
+
+        # Field 2, so the queue counts and the last thing that happened both
+        # stay where NVDA+End and the other fields already found them.
+        holder.SetStatusText.assert_called_once_with(
+            "Playing: One — 0:05 of 3:20", 2)
+
+    def test_a_closing_window_is_not_written_to(self):
+        holder = SimpleNamespace(
+            _closing=True, SetStatusText=mock.Mock(), config={})
+
+        MainFrame.set_playback_status(holder, "Playing: One")
+
+        holder.SetStatusText.assert_not_called()
+
     def test_search_queues_every_selected_result(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = 1
@@ -913,6 +935,50 @@ class GuiInteractionTests(unittest.TestCase):
             self.frame.play_calls,
             [(panel.player, "https://media.example/audio.mp3", "One")],
         )
+
+    def test_the_players_play_button_starts_the_selected_result(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        panel.results = [{"title": "One", "url": "https://example/one"}]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+        panel.results_list.Focus(0)
+
+        with mock.patch.object(panel, "on_play_full_selected") as play:
+            handled = panel.player.play_request()
+
+        self.assertTrue(handled)
+        play.assert_called_once_with(None)
+
+    def test_play_with_nothing_loaded_asks_the_panel_before_giving_up(self):
+        panel = SimpleNamespace(
+            _loaded=False,
+            play_request=mock.Mock(return_value=True),
+            frame=mock.Mock(),
+        )
+
+        media_player.MediaPlayerPanel.on_play_pause(panel, None)
+
+        panel.play_request.assert_called_once_with()
+        panel.frame.announce.assert_not_called()
+
+    def test_play_still_says_so_when_the_panel_has_nothing_either(self):
+        panel = SimpleNamespace(
+            _loaded=False,
+            play_request=mock.Mock(return_value=False),
+            frame=mock.Mock(),
+        )
+
+        media_player.MediaPlayerPanel.on_play_pause(panel, None)
+
+        panel.frame.announce.assert_called_once_with(
+            "Choose media to play first.")
+
+    def test_a_book_search_leaves_the_play_button_to_say_so(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_BOOKS
+
+        self.assertFalse(panel.play_selection())
 
     def test_search_full_playback_ready_uses_shared_player(self):
         panel = SearchPanel(self.host, self.frame)
@@ -966,7 +1032,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(location, "https://media.example/one.mp3")
         self.assertEqual(title, "One")
 
-    def test_full_playback_of_a_deezer_result_uses_youtube_not_the_preview_clip(self):
+    def test_full_playback_without_an_arl_falls_back_to_youtube(self):
         item = {
             "kind": "deezer",
             "id": "deezer:3135556",
@@ -995,6 +1061,98 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(
             resolve.call_args.args[0], "ytsearch1:Daft Punk One More Time"
         )
+
+    def test_full_playback_of_a_deezer_result_plays_deezers_own_recording(self):
+        item = {
+            "kind": "deezer",
+            "id": "deezer:3135556",
+            "title": "One More Time",
+            "artist": "Daft Punk",
+            "url": "https://www.deezer.com/track/3135556",
+        }
+        with (
+            mock.patch.object(
+                deezer_backend, "playback_file",
+                return_value=r"C:\cache\3135556.mp3",
+            ) as playback_file,
+            mock.patch.object(ytdlp_backend, "resolve_stream") as resolve,
+            mock.patch.object(sideb_backend, "get_deezer_preview_url") as clip,
+        ):
+            location, title = preview.resolve_full_playback(
+                item, audio_only=True, config={"deezer_arl": "an-arl"}
+            )
+
+        self.assertEqual(location, r"C:\cache\3135556.mp3")
+        self.assertEqual(title, "One More Time")
+        self.assertEqual(
+            playback_file.call_args.args[0],
+            "https://www.deezer.com/track/3135556")
+        # Deezer holds the recording that was searched for. Hunting YouTube
+        # for a match risks the wrong one, and risks being refused outright.
+        resolve.assert_not_called()
+        clip.assert_not_called()
+
+    def test_deezer_falls_back_to_youtube_when_deezer_refuses_the_track(self):
+        item = {
+            "kind": "deezer",
+            "id": "deezer:3135556",
+            "title": "One More Time",
+            "artist": "Daft Punk",
+        }
+        with (
+            mock.patch.object(
+                deezer_backend, "playback_file",
+                side_effect=RuntimeError("region-locked"),
+            ),
+            mock.patch.object(
+                ytdlp_backend, "resolve_stream",
+                return_value="https://yt.example/full",
+            ) as resolve,
+        ):
+            location, _title = preview.resolve_full_playback(
+                item, audio_only=True, config={"deezer_arl": "an-arl"}
+            )
+
+        self.assertEqual(location, "https://yt.example/full")
+        resolve.assert_called_once()
+
+    def test_a_deezer_row_from_musicdl_never_plays_its_encrypted_stream(self):
+        # musicdl's own Deezer client hands back Deezer's stream URL, which
+        # is Blowfish encrypted: a player opens it and produces silence.
+        item = {
+            "source": "Deezer",
+            "title": "One More Time",
+            "url": "https://www.deezer.com/track/3135556",
+            "song_info": SimpleNamespace(
+                download_url="https://cdns-proxy.dzcdn.net/media/1/encrypted"
+            ),
+        }
+        with mock.patch.object(
+            sideb_backend, "get_deezer_preview_url",
+            return_value="https://cdns.example/preview.mp3",
+        ):
+            location, _title = preview.resolve_search_result(
+                item, audio_only=True, config={}
+            )
+
+        self.assertEqual(location, "https://cdns.example/preview.mp3")
+
+    def test_a_deezer_track_is_recognised_wherever_its_id_is_carried(self):
+        self.assertEqual(
+            preview.deezer_track_url(
+                {"kind": "sideb", "id": "sideb:3135556"}),
+            "https://www.deezer.com/track/3135556")
+        self.assertEqual(
+            preview.deezer_track_url(
+                {"source": "Deezer",
+                 "url": "https://www.deezer.com/fr/track/3135556"}),
+            "https://www.deezer.com/track/3135556")
+        # An album row is not a track, and has nothing to play on its own.
+        self.assertIsNone(preview.deezer_track_url(
+            {"kind": "deezer_album", "id": "deezer:album:302127",
+             "url": "https://www.deezer.com/album/302127"}))
+        self.assertIsNone(preview.deezer_track_url(
+            {"source": "YouTube", "url": "https://youtu.be/one"}))
 
     def test_direct_media_url_bypasses_ytdlp_extraction(self):
         with mock.patch.object(ytdlp_backend, "resolve_stream") as resolve:
@@ -1157,6 +1315,8 @@ class GuiInteractionTests(unittest.TestCase):
             _loaded=True,
             _length=lambda: 10_000,
             _tell=lambda: 1_000,
+            _is_playing=lambda: True,
+            _report_status=mock.Mock(),
             _updating_position=False,
             time_text=mock.Mock(),
             position=mock.Mock(),
@@ -1178,6 +1338,8 @@ class GuiInteractionTests(unittest.TestCase):
             _loaded=True,
             _length=lambda: 10_000,
             _tell=lambda: 5_000,
+            _is_playing=lambda: True,
+            _report_status=mock.Mock(),
             _updating_position=False,
             time_text=mock.Mock(),
             position=mock.Mock(),
@@ -1192,6 +1354,57 @@ class GuiInteractionTests(unittest.TestCase):
 
         panel.time_text.SetLabel.assert_called_once_with("0:05 / 0:10")
         panel.position.SetValue.assert_not_called()
+
+    def test_the_playback_status_line_reads_position_and_length(self):
+        self.assertEqual(
+            media_player.playback_status("Playing", "One More Time",
+                                         83_000, 320_000),
+            "Playing: One More Time — 1:23 of 5:20, 3:57 left",
+        )
+        self.assertEqual(
+            media_player.playback_status("Paused", "One More Time", 5_000, 0),
+            "Paused: One More Time — 0:05",
+        )
+        # Nothing playing is nothing to read.
+        self.assertEqual(media_player.playback_status("", "One", 0, 0), "")
+
+    def test_the_timer_puts_the_playback_clock_on_the_status_bar(self):
+        frame = SimpleNamespace(set_playback_status=mock.Mock())
+        panel = SimpleNamespace(
+            _loaded=True,
+            _length=lambda: 320_000,
+            _tell=lambda: 83_000,
+            _is_playing=lambda: True,
+            _title="One More Time",
+            _updating_position=False,
+            frame=frame,
+            time_text=mock.Mock(),
+            position=mock.Mock(),
+        )
+        panel.time_text.GetLabel.return_value = ""
+        panel.position.HasFocus.return_value = True
+        panel._set_time = mock.Mock()
+        panel._report_status = lambda state: (
+            media_player.MediaPlayerPanel._report_status(panel, state))
+
+        media_player.MediaPlayerPanel._on_timer(panel, None)
+
+        frame.set_playback_status.assert_called_once_with(
+            "Playing: One More Time — 1:23 of 5:20, 3:57 left")
+
+    def test_stopping_clears_the_playback_status_field(self):
+        frame = SimpleNamespace(set_playback_status=mock.Mock())
+        panel = SimpleNamespace(frame=frame, _title="One")
+
+        media_player.MediaPlayerPanel._report_status(panel, "")
+
+        frame.set_playback_status.assert_called_once_with("")
+
+    def test_a_frame_without_a_playback_field_is_left_alone(self):
+        # Panels are built against hosts that have no status bar at all.
+        panel = SimpleNamespace(frame=SimpleNamespace(), _title="One")
+
+        media_player.MediaPlayerPanel._report_status(panel, "Playing")
 
     def test_media_players_share_one_vlc_runtime(self):
         runtime = object()
@@ -1253,6 +1466,7 @@ class GuiInteractionTests(unittest.TestCase):
             now_playing=mock.Mock(),
             frame=mock.Mock(),
             _enable_controls=mock.Mock(),
+            _report_status=mock.Mock(),
         )
 
         media_player.MediaPlayerPanel._playback_error(panel, 1)
@@ -2203,6 +2417,43 @@ class GuiInteractionTests(unittest.TestCase):
         stop_set.assert_called_once_with()
         self.assertFalse(panel._soulseek_streaming)
         self.assertEqual(self.frame.messages[-1], "Search stopped.")
+
+    def test_stop_search_stays_on_the_page_and_switches_on_with_a_search(self):
+        panel = SearchPanel(self.host, self.frame)
+
+        # Always there to be tabbed to, so its place in the row never moves
+        # under a screen reader; off until there is a search to stop.
+        self.assertTrue(panel.stop_btn.IsShown())
+        self.assertFalse(panel.stop_btn.IsEnabled())
+
+        panel.query_text.SetValue("ambient")
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_YOUTUBE))
+        with mock.patch.object(panel, "_search"):
+            panel.on_search(None)
+        self.assertTrue(panel.stop_btn.IsEnabled())
+
+        panel.on_stop_search(None)
+        self.assertTrue(panel.stop_btn.IsShown())
+        self.assertFalse(panel.stop_btn.IsEnabled())
+        self.assertTrue(panel.search_btn.IsEnabled())
+
+    def test_stop_stays_live_while_slow_sites_are_still_answering(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.query_text.SetValue("ambient")
+        with mock.patch.object(panel, "_search"):
+            panel.on_search(None)
+        panel.shown_sources = {"Quick"}
+
+        # Each site runs on its own thread, so the search reports in while
+        # the slow ones are still going. Stop belongs to them too.
+        panel._search_done(panel.token, [], ENGINE_MUSIC,
+                           asked=["Quick", "Slow"])
+        self.assertTrue(panel.stop_btn.IsEnabled())
+
+        panel._add_site(panel.token, ENGINE_MUSIC, "Slow",
+                        [{"title": "Late", "url": "https://example/late"}])
+        self.assertFalse(panel.stop_btn.IsEnabled())
 
     def test_deezer_choice_searches_and_downloads_only_deezer(self):
         panel = SearchPanel(self.host, self.frame)

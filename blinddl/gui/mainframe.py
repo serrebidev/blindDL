@@ -145,8 +145,11 @@ class MainFrame(wx.Frame):
         self.notebook.AddPage(self.uploads_panel, "Uploads")
         self.notebook.AddPage(self.library_panel, "Library")
         self.notebook.AddPage(self.subs_panel, "Subscriptions")
-        self.CreateStatusBar(2)
-        self.SetStatusWidths([-3, -1])
+        # Three fields, so a screen reader can be asked for one of them:
+        # what just happened, how the download queue stands, and how far
+        # into the current track playback has got.
+        self.CreateStatusBar(3)
+        self.SetStatusWidths([-3, -1, -2])
         self._sync_soulseek_tabs()
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
 
@@ -248,6 +251,17 @@ class MainFrame(wx.Frame):
         self.SetStatusText(message, 0)
         if speak and self.config["speak_status"]:
             speech.announce(message)
+
+    def set_playback_status(self, text):
+        """Show how far the playing track has got, on its own status field.
+
+        Called about once a second by whichever player is running, so it is
+        never spoken: it is written for NVDA's read-status-bar command, and
+        speaking it would talk over everything else.
+        """
+        if self._closing:
+            return
+        self.SetStatusText(text or "", 2)
 
     def show_tab(self, index):
         self.notebook.SetSelection(index)

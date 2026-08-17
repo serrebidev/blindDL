@@ -105,12 +105,34 @@ def _clock(milliseconds):
     return f"{minutes}:{seconds:02d}"
 
 
+def playback_status(state, title, current, length):
+    """The status-bar line for one moment of playback.
+
+    "Playing" on its own says nothing a listener did not already know. What
+    is worth reading off the status bar is how far in the track is and how
+    much of it is left, which is exactly what a sighted user reads off the
+    seek bar.
+    """
+    if not state:
+        return ""
+    line = f"{state}: {title}" if title else state
+    if length > 0:
+        return (f"{line} — {_clock(current)} of {_clock(length)}, "
+                f"{_clock(length - current)} left")
+    return f"{line} — {_clock(current)}"
+
+
 class MediaPlayerPanel(wx.Panel):
     """VLC-backed playback with a native wx media fallback."""
 
     def __init__(self, parent, frame, video_height=180):
         super().__init__(parent)
         self.frame = frame
+        # Set by a panel that has something to play when nothing is loaded
+        # yet, so the Play button starts the selected result instead of
+        # answering that there is nothing to play. Returns True when it
+        # took the request on.
+        self.play_request = None
         self._title = ""
         self._loaded = False
         self._updating_position = False
@@ -135,6 +157,10 @@ class MediaPlayerPanel(wx.Panel):
 
         self.play_btn = wx.Button(self, label="&Play")
         self.play_btn.SetName("Play or pause")
+        self.play_btn.SetHelpText(
+            "Plays or pauses. With nothing loaded, plays whatever is "
+            "selected in the list above."
+        )
         self.stop_btn = wx.Button(self, label="&Stop")
         self.play_btn.Bind(wx.EVT_BUTTON, self.on_play_pause)
         self.stop_btn.Bind(wx.EVT_BUTTON, self.on_stop)
@@ -217,7 +243,9 @@ class MediaPlayerPanel(wx.Panel):
             self._vlc_player.set_xwindow(handle)
 
     def _enable_controls(self, enabled):
-        self.play_btn.Enable(enabled)
+        # Play stays usable with nothing loaded when a panel has given it
+        # something to start: that is the whole point of the hook.
+        self.play_btn.Enable(enabled or self.play_request is not None)
         self.stop_btn.Enable(enabled)
         self.position.Enable(enabled)
 
@@ -285,6 +313,7 @@ class MediaPlayerPanel(wx.Panel):
         self.now_playing.SetLabel(f"Now playing: {self._title}")
         self.play_btn.SetLabel("&Pause")
         self.timer.Start(PLAYBACK_TIMER_MS)
+        self._report_status("Playing")
         self.frame.announce(f"Playing: {self._title}")
 
     def _on_finished(self, event):
@@ -320,6 +349,7 @@ class MediaPlayerPanel(wx.Panel):
         self.timer.Stop()
         self.play_btn.SetLabel("&Play")
         self.position.SetValue(1000)
+        self._report_status("")
         self.frame.announce(f"Finished playing: {self._title}")
 
     def _on_vlc_error(self, event):
@@ -338,10 +368,16 @@ class MediaPlayerPanel(wx.Panel):
         # way to retry is to start a whole new selection.
         self._enable_controls(True)
         self.now_playing.SetLabel(f"Could not play: {self._title}")
+        self._report_status("")
         self.frame.announce("The player could not decode or open this media.")
 
     def on_play_pause(self, event):
         if not self._loaded:
+            # Nothing is loaded, but the tab this player belongs to may have
+            # a selected result that Play is obviously meant to start. Only
+            # say there is nothing to play when there really is not.
+            if self.play_request is not None and self.play_request():
+                return
             self.frame.announce("Choose media to play first.")
             return
         if self._is_playing():
@@ -353,10 +389,12 @@ class MediaPlayerPanel(wx.Panel):
             # the time itself, and resuming below starts the clock again.
             self.timer.Stop()
             self.play_btn.SetLabel("&Play")
+            self._report_status("Paused")
             self.frame.announce("Paused.")
         elif self._play():
             self.play_btn.SetLabel("&Pause")
             self.timer.Start(PLAYBACK_TIMER_MS)
+            self._report_status("Playing")
             self.frame.announce(f"Playing: {self._title}")
 
     def on_stop(self, event):
@@ -369,6 +407,7 @@ class MediaPlayerPanel(wx.Panel):
             self._stop()
         self.play_btn.SetLabel("&Play")
         self._set_time(0, length)
+        self._report_status("")
         if self._loaded and self._title:
             self.now_playing.SetLabel(f"Stopped: {self._title}")
         if not silent and self._title:
@@ -381,6 +420,8 @@ class MediaPlayerPanel(wx.Panel):
         if length > 0:
             self._seek(int(length * self.position.GetValue() / 1000))
             self._set_time(self._tell(), length)
+            self._report_status(
+                "Playing" if self._is_playing() else "Paused")
 
     def on_volume(self, event):
         self._set_volume(self.volume.GetValue())
@@ -435,12 +476,28 @@ class MediaPlayerPanel(wx.Panel):
         if label != self.time_text.GetLabel():
             self.time_text.SetLabel(label)
 
+    def _report_status(self, state):
+        """Put where playback has got to on the main window's status bar.
+
+        Written, never spoken: it changes once a second, and a screen
+        reader is asked for the status bar rather than told it.
+        """
+        report = getattr(self.frame, "set_playback_status", None)
+        if report is None:
+            return
+        if not state:
+            report("")
+            return
+        report(playback_status(
+            state, self._title, self._tell(), self._length()))
+
     def _on_timer(self, event):
         if not self._loaded:
             return
         length = self._length()
         current = self._tell()
         self._set_time(current, length)
+        self._report_status("Playing" if self._is_playing() else "Paused")
         # Do not send unsolicited accessibility value-change events while a
         # screen-reader user is positioned on the seek control. Their own
         # arrow-key changes still go through on_seek immediately.
@@ -459,6 +516,7 @@ class MediaPlayerPanel(wx.Panel):
             return
         self._shutting_down = True
         self.timer.Stop()
+        self._report_status("")
         if self._loaded:
             self._stop()
         if self._vlc_player is not None:
