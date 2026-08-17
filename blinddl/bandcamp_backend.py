@@ -34,6 +34,15 @@ def _item_from_result(result):
     rtype = result.get("type", "")
     title = result.get("name", "Unknown")
     url = result.get("url", "")
+    # Bandcamp's fuzzysearch API has (as of 2026-08) started returning
+    # doubled URLs like ``https://host.bandcamp.comhttps://host.bandcamp.com/...``
+    # which break every downstream consumer (yt-dlp, previews).  Keep the
+    # last well-formed ``https://`` part.
+    if url.count("https://") > 1:
+        url = url[url.rfind("https://"):]
+    # Bare host URLs (no scheme) from the API get a leading scheme too.
+    if url and not url.startswith("http"):
+        url = "https://" + url
     item = {
         "id": f"bandcamp:{result['id']}",
         "kind": "bandcamp",
