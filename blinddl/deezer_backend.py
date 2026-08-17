@@ -22,6 +22,7 @@ import requests
 from Crypto.Cipher import Blowfish  # nosec B413
 
 from . import search_kind, search_order
+from .config import app_data_dir
 from .search_kind import (
     ARTIST_SCOPE_ALBUMS,
     ARTIST_SCOPE_ALL,
@@ -64,6 +65,12 @@ _PREFERRED_FORMATS = {
 }
 # FLAC is the default when the setting is missing or unrecognized.
 _DEFAULT_FORMATS = ["FLAC", "MP3_320"]
+# What playback asks for, cheapest first. Nothing is kept, so the smallest
+# stream that starts soonest is the right one; the better qualities are
+# only there for an account whose plan withholds 128.
+_PLAYBACK_FORMATS = ["MP3_128", "MP3_320", "FLAC"]
+# How many decrypted tracks the playback cache keeps before the oldest go.
+PLAYBACK_CACHE_FILES = 12
 # /search/track caps a request at 100 rows; two pages reach the 200 blindDL
 # lists per search.
 _SEARCH_LIMIT = 100
@@ -742,6 +749,107 @@ def _sanitize(name):
     for char in '<>:"/\\|?*':
         name = name.replace(char, "_")
     return name.strip() or "track"
+
+
+def playback_cache_dir():
+    """Where decrypted tracks live while they are being played."""
+    path = os.path.join(app_data_dir(), "deezer-playback")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _prune_playback_cache(keep=PLAYBACK_CACHE_FILES):
+    """Keep the cache to the last few tracks played."""
+    try:
+        entries = sorted(
+            (entry for entry in os.scandir(playback_cache_dir())
+             if entry.is_file()),
+            key=lambda entry: entry.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for entry in entries[keep:]:
+        try:
+            os.remove(entry.path)
+        except OSError:
+            pass
+
+
+def playback_file(url, config, cancel_event=None):
+    """Decrypt one Deezer track to a local file and return its path.
+
+    Deezer's own stream is Blowfish-encrypted, so no player can open it
+    directly -- but blindDL already holds the key, and decrypting is what
+    the downloader does anyway. Full playback of a Deezer track therefore
+    comes from Deezer itself whenever an ARL cookie is configured, instead
+    of hunting for a YouTube match that may not exist, may be the wrong
+    recording, or may be refused by YouTube's bot wall.
+
+    MP3 128 is asked for first: it is what a free account is always allowed
+    and it is a third of the bytes of MP3 320, which is the difference
+    between playback starting in a second and in five. Playing is not
+    keeping, so quality here is not the download setting's business.
+
+    Raises RuntimeError when no ARL is configured or Deezer will not serve
+    the track, which is the caller's cue to fall back to YouTube.
+    """
+    arl = (config["deezer_arl"] or "").strip()
+    if not arl:
+        raise RuntimeError("No Deezer ARL cookie configured.")
+    track_id = _track_id(url)
+    session = _login(arl)
+    with session["http_lock"]:
+        results = _gw_call(session["http"], "deezer.pageTrack",
+                           session["api_token"], {"sng_id": track_id})
+    meta = results.get("DATA") or {}
+    track_token = meta.get("TRACK_TOKEN")
+    if not track_token:
+        raise RuntimeError(
+            f"Deezer gave no stream token for track {track_id} "
+            "(region-locked or unavailable).")
+
+    candidates = []
+    chosen = ""
+    for requested_format in _PLAYBACK_FORMATS:
+        returned, _details = _request_media_sources(
+            session, requested_format, track_token)
+        matching = [
+            candidate for candidate in returned
+            if candidate[0] is None or candidate[0] == requested_format
+        ]
+        if matching:
+            candidates = matching
+            chosen = requested_format
+            break
+    if not candidates:
+        raise RuntimeError(
+            "Deezer would not serve a playable stream for this track.")
+
+    fmt, source = candidates[0]
+    fmt = (fmt or chosen).upper()
+    extension = "flac" if fmt == "FLAC" else "mp3"
+    dest = os.path.join(playback_cache_dir(), f"{track_id}.{extension}")
+    # The same track played twice in a row is already sitting here.
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        os.utime(dest, None)
+        return dest
+    partial = dest + ".part"
+    try:
+        with requests.get(source["url"], stream=True,
+                          headers={"User-Agent": _USER_AGENT},
+                          timeout=HTTP_TIMEOUT_S) as stream:
+            stream.raise_for_status()
+            _decrypt_stream(stream, track_id, partial, None, cancel_event)
+        os.replace(partial, dest)
+    except BaseException:
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        raise
+    _prune_playback_cache()
+    return dest
 
 
 def download(url, out_dir, config, progress_cb=None, cancel_event=None):

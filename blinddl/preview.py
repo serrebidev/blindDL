@@ -6,12 +6,20 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
 from . import (
     adult_backend, archive_backend, audiobook_backend, deezer_backend,
     sideb_backend, torrent_backend, ytdlp_backend,
+)
+
+# A Deezer track id, wherever it is carried: a deezer.com link, or the
+# "deezer:<id>" / "sideb:<id>" ids that search results are keyed by.
+_DEEZER_TRACK_RE = re.compile(
+    r"(?:deezer\.com/(?:[a-z]{2}/)?track/|(?:deezer|sideb):)(\d+)",
+    re.IGNORECASE,
 )
 
 DIRECT_MEDIA_EXTENSIONS = {
@@ -50,25 +58,63 @@ def _is_direct_media_url(url):
 def _youtube_stream_for(item, title, config):
     """Resolve a Deezer/Side B track to a full YouTube stream.
 
-    Deezer's own full stream is Blowfish-encrypted and cannot be opened by
-    a native player, so full playback of a Deezer track comes from YouTube
-    instead: search for the artist and title and play the best match.
+    The last resort for a Deezer track: used when no ARL cookie is
+    configured, or when Deezer itself will not serve the recording. Search
+    YouTube for the artist and title and play the best match.
     """
-    query = " ".join(
-        filter(
-            None,
-            (
-                str(item.get("artist") or ""),
-                title,
-            ),
-        )
-    )
+    artist = item.get("artist") or item.get("singers") or ""
+    if isinstance(artist, (list, tuple)):
+        artist = ", ".join(str(name) for name in artist if name)
+    query = " ".join(filter(None, (str(artist), title)))
     return ytdlp_backend.resolve_stream(
         f"ytsearch1:{query}",
         audio_only=True,
         cookies_from_browser=config.get("cookies_from_browser"),
         cookies_file=config.get("cookies_file"),
     )
+
+
+def deezer_track_url(item):
+    """The deezer.com track URL of one result, or ``None``.
+
+    Deezer tracks reach the results list by three different routes -- the
+    native Deezer backend, Side B, and musicdl's own Deezer client -- and
+    only the first two carry a ``kind`` that says so. All three do carry
+    the track id somewhere, and that id is what both playback paths need,
+    so it is read off whichever field has it rather than trusted to the
+    kind alone.
+    """
+    if str(item.get("source") or "").startswith("Deezer") or item.get(
+            "kind") in ("sideb", "deezer"):
+        for value in (item.get("url"), item.get("id")):
+            match = _DEEZER_TRACK_RE.search(str(value or ""))
+            if match:
+                return f"https://www.deezer.com/track/{match.group(1)}"
+    return None
+
+
+def _deezer_stream(item, title, config, full):
+    """Resolve one Deezer track to something a player can actually open.
+
+    A preview is the 30-second clip Deezer publishes for everyone: no
+    sign-in, no transcode, and it starts at once. Full playback wants the
+    whole recording, which means decrypting Deezer's own stream with the
+    configured ARL cookie. Either way YouTube is the fallback, not the
+    first answer -- a YouTube match can be the wrong recording, and
+    YouTube can refuse the request outright.
+    """
+    track_url = deezer_track_url(item)
+    if not full:
+        preview_url = sideb_backend.get_deezer_preview_url(
+            track_url or item.get("id", ""))
+        if preview_url:
+            return preview_url
+    if track_url and (config.get("deezer_arl") or "").strip():
+        try:
+            return deezer_backend.playback_file(track_url, config)
+        except Exception:  # noqa: BLE001 - YouTube is the fallback
+            pass
+    return _youtube_stream_for(item, title, config)
 
 
 def result_url(item):
@@ -84,6 +130,12 @@ def result_url(item):
         magnet = torrent_backend.magnet_for(item)
         if magnet:
             return magnet
+    # A Deezer row from musicdl has no page URL of its own, and its stream
+    # URL is an encrypted CDN link that opens as nothing. The track page is
+    # what a copied Deezer link is meant to be.
+    deezer_url = deezer_track_url(item)
+    if deezer_url:
+        return deezer_url
     for key in ("url", "direct_url"):
         found = _first_http_url(item.get(key))
         if found:
@@ -98,6 +150,22 @@ def resolve_search_result(item, audio_only, config):
     """Return ``(stream URI, title)`` for one normalized search result."""
     title = str(item.get("title") or "Preview")
     kind = item.get("kind")
+
+    # Deezer is checked before the generic music-site branch below. A row
+    # that came from musicdl's own Deezer client carries a song_info whose
+    # download URL is Deezer's encrypted stream: handing that to a player
+    # produces silence, not music. Every Deezer row therefore plays the
+    # same way, whichever backend found it.
+    if deezer_track_url(item) is not None:
+        return _deezer_stream(item, title, config, full=False), title
+
+    if item.get("kind") == "applemusic":
+        # blindDL previews Apple Music rows without Apple credentials: the
+        # applemusic search results carry Apple's own short preview m4a, and
+        # the track's page URL is something yt-dlp cannot open at all.
+        preview_url = item.get("preview_url") or ""
+        if str(preview_url).startswith("http"):
+            return str(preview_url), title
 
     if item.get("song_info") is not None:
         stream = _first_http_url(getattr(item["song_info"], "download_url", None))
@@ -121,15 +189,6 @@ def resolve_search_result(item, audio_only, config):
             raise RuntimeError("This audiobook has no playable chapter.")
         return stream, title
 
-    if kind in ("sideb", "deezer"):
-        # Use Deezer's own 30-second preview clip when available — it is
-        # faster and more reliable than searching YouTube.
-        preview_url = sideb_backend.get_deezer_preview_url(
-            item.get("id", ""))
-        if preview_url:
-            return preview_url, title
-        return _youtube_stream_for(item, title, config), title
-
     direct = _first_http_url(item.get("direct_url"))
     if direct:
         return direct, title
@@ -150,15 +209,15 @@ def resolve_search_result(item, audio_only, config):
 def resolve_full_playback(item, audio_only, config):
     """Return ``(stream URI, title)`` for full playback of one result.
 
-    Preview deliberately gives Deezer/Side B results their 30-second clip.
-    Full playback skips that and plays the whole song, which for those two
-    kinds means a YouTube match (Deezer's own stream is encrypted for the
-    downloader). Every other kind already previews from a full stream, so
-    it resolves the same way a preview would.
+    Preview deliberately gives Deezer results their 30-second clip. Full
+    playback skips that and plays the whole recording: Deezer's own stream
+    decrypted with the configured ARL cookie, or a YouTube match when
+    there is no ARL. Every other kind already previews from a full stream,
+    so it resolves the same way a preview would.
     """
     title = str(item.get("title") or "Playback")
-    if item.get("kind") in ("sideb", "deezer"):
-        return _youtube_stream_for(item, title, config), title
+    if deezer_track_url(item) is not None:
+        return _deezer_stream(item, title, config, full=True), title
     return resolve_search_result(item, audio_only, config)
 
 

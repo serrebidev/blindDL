@@ -2,6 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
+import os
 import tempfile
 import threading
 import unittest
@@ -593,6 +594,103 @@ class DeezerBackendTests(unittest.TestCase):
 
         self.assertEqual(
             get.call_args.args[0], "https://api.deezer.com/track/3135556")
+
+
+class DeezerPlaybackFileTests(unittest.TestCase):
+    """Full playback comes from Deezer itself, decrypted, not from YouTube."""
+
+    def setUp(self):
+        deezer_backend._sessions.clear()
+        self.cache = tempfile.TemporaryDirectory()
+        self.addCleanup(self.cache.cleanup)
+        patcher = mock.patch.object(
+            deezer_backend, "playback_cache_dir", return_value=self.cache.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _session(self):
+        return {
+            "api_token": "csrf",
+            "license_token": "license",
+            "http": mock.Mock(),
+            "http_lock": threading.Lock(),
+        }
+
+    def _metadata(self):
+        return {"DATA": {"SNG_ID": "3135556", "SNG_TITLE": "Test track",
+                         "ART_NAME": "Test artist",
+                         "TRACK_TOKEN": "track-token"}}
+
+    def test_playback_asks_for_the_cheapest_quality_first(self):
+        media_response = mock.Mock()
+        media_response.json.return_value = {"data": [{"media": [{
+            "format": "MP3_128",
+            "sources": [{"url": "https://media.invalid/track"}],
+        }]}]}
+        with mock.patch.object(deezer_backend, "_login",
+                               return_value=self._session()), \
+                mock.patch.object(deezer_backend, "_gw_call",
+                                  return_value=self._metadata()), \
+                mock.patch.object(deezer_backend.requests, "post",
+                                  return_value=media_response) as post, \
+                mock.patch.object(deezer_backend.requests, "get",
+                                  return_value=mock.MagicMock()), \
+                mock.patch.object(deezer_backend, "_decrypt_stream") as write:
+            write.side_effect = lambda *args, **kwargs: open(
+                args[2], "wb").write(b"audio")
+            path = deezer_backend.playback_file(
+                "https://www.deezer.com/track/3135556",
+                {"deezer_arl": "test-arl", "deezer_format": "flac"})
+
+        # Playing keeps nothing, so the download setting's FLAC is not what
+        # playback waits on: the smallest stream that starts soonest is.
+        self.assertEqual(
+            post.call_args_list[0].kwargs["json"]["media"][0]["formats"],
+            [{"cipher": "BF_CBC_STRIPE", "format": "MP3_128"}])
+        self.assertTrue(path.endswith("3135556.mp3"))
+        self.assertEqual(os.path.getsize(path), len(b"audio"))
+
+    def test_the_same_track_twice_is_not_fetched_twice(self):
+        ready = os.path.join(self.cache.name, "3135556.mp3")
+        with open(ready, "wb") as handle:
+            handle.write(b"already decrypted")
+        media_response = mock.Mock()
+        media_response.json.return_value = {"data": [{"media": [{
+            "format": "MP3_128",
+            "sources": [{"url": "https://media.invalid/track"}],
+        }]}]}
+        with mock.patch.object(deezer_backend, "_login",
+                               return_value=self._session()), \
+                mock.patch.object(deezer_backend, "_gw_call",
+                                  return_value=self._metadata()), \
+                mock.patch.object(deezer_backend.requests, "post",
+                                  return_value=media_response), \
+                mock.patch.object(deezer_backend.requests, "get") as get:
+            path = deezer_backend.playback_file(
+                "https://www.deezer.com/track/3135556",
+                {"deezer_arl": "test-arl", "deezer_format": "flac"})
+
+        self.assertEqual(path, ready)
+        get.assert_not_called()
+
+    def test_playback_without_an_arl_says_so(self):
+        with self.assertRaises(RuntimeError):
+            deezer_backend.playback_file(
+                "https://www.deezer.com/track/3135556",
+                {"deezer_arl": "", "deezer_format": "flac"})
+
+    def test_the_cache_keeps_only_the_last_few_tracks(self):
+        for index in range(deezer_backend.PLAYBACK_CACHE_FILES + 4):
+            path = os.path.join(self.cache.name, f"{index}.mp3")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+            os.utime(path, (index, index))
+
+        deezer_backend._prune_playback_cache()
+
+        self.assertEqual(
+            len(os.listdir(self.cache.name)),
+            deezer_backend.PLAYBACK_CACHE_FILES)
 
 
 class SidebDeezerPreviewTests(unittest.TestCase):
