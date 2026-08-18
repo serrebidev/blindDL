@@ -223,6 +223,13 @@ DEFAULTS = {
     "apple_music_format": "m4a",
     # Embed synced lyrics into Side B (Deezer) downloads.
     "sideb_lyrics": True,
+    # Look music downloads up on MusicBrainz and TheAudioDB to fill in the
+    # tags the site itself did not carry -- album artist, track and disc
+    # numbers, year, genre, artwork and the MusicBrainz ids a library files
+    # by. What the site did send is always written; this only adds to it, at
+    # the cost of a second or two per file. Off writes the site's own
+    # metadata and nothing more.
+    "music_metadata_lookup": True,
     # Closing the window hides blindDL in the system tray instead of exiting,
     # so queued downloads, seeding torrents and subscription checks keep
     # running. File > Exit, and the tray's own Exit, always exit for real.

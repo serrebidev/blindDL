@@ -1100,7 +1100,9 @@ class DownloadQueue:
     def _run_musicdl(self, item):
         # musicdl exposes no progress callbacks; the item stays in the
         # indeterminate "Downloading" state until it returns.
-        downloaded = musicdl_backend.download(item.payload, self._out_dir(item))
+        downloaded = musicdl_backend.download(
+            item.payload, self._out_dir(item),
+            online_lookup=bool(self.config["music_metadata_lookup"]))
         if isinstance(downloaded, (list, tuple)) and len(downloaded) == 1:
             path = getattr(downloaded[0], "save_path", "")
             if path:

@@ -2982,6 +2982,19 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(config.saved)
         dialog.Destroy()
 
+    def test_settings_offers_the_online_metadata_lookup_and_saves_it(self):
+        config = _SettingsConfig()
+        dialog = SettingsDialog(self.host, config)
+
+        # On by default: a music file with no album artist, track number or
+        # artwork is one a library cannot file.
+        self.assertTrue(dialog.metadata_check.GetValue())
+        dialog.metadata_check.SetValue(False)
+        dialog.apply()
+
+        self.assertFalse(config["music_metadata_lookup"])
+        dialog.Destroy()
+
     def test_settings_opens_on_the_download_folder_not_the_ok_button(self):
         config = _SettingsConfig()
         dialog = SettingsDialog(self.host, config)

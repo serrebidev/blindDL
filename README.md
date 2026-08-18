@@ -12,6 +12,7 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Downloads single videos, playlists, and whole channels from any link yt-dlp supports.
 - Plays audio or video straight from a pasted URL, and previews search results before you commit to a download.
 - Searches dozens of music services from one box, and saves tracks tagged, with cover art and synced lyrics where a service provides them.
+- Fills in the details a music site left out — album artist, track and disc numbers, year, genre, cover art, and the MusicBrainz ids a music library files by — from MusicBrainz and TheAudioDB. Turn it off in Settings, Downloads.
 - Finds free ebooks, audiobooks, and Internet Archive media — old-time radio, live concerts, movies, and classic TV — from the same search box.
 - Starts every selected music site concurrently on background threads, returns results as each site answers, and batches GUI updates so screen readers stay responsive.
 - Asks supported sites for best-match, newest, or most-popular results, while clearly naming sites that cannot provide the chosen order.

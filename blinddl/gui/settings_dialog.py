@@ -205,11 +205,24 @@ class SettingsDialog(wx.Dialog):
             "the site serves; AVI is re-encoded, which takes longer."
         )
 
+        self.metadata_check = wx.CheckBox(
+            page, label="Look up &missing song details online"
+        )
+        self.metadata_check.SetValue(bool(config["music_metadata_lookup"]))
+        self.metadata_check.SetHelpText(
+            "Fills in what a music site did not send with a music file: "
+            "album artist, track and disc numbers, year, genre and cover "
+            "art, looked up on MusicBrainz and TheAudioDB. Whatever the site "
+            "did send is always written either way. Adds a second or two per "
+            "file, and never changes a detail the file already has."
+        )
+
         sizer.Add(dir_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.dir_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
         _row(sizer, fmt_label, self.format_choice)
         _row(sizer, video_fmt_label, self.video_format_choice)
+        sizer.Add(self.metadata_check, 0, wx.ALL, 8)
 
         sizer.Add(self._heading(page, "Queue and cleanup"), 0,
                   wx.TOP | wx.LEFT, 12)
@@ -1252,6 +1265,7 @@ class SettingsDialog(wx.Dialog):
         self.config["video_format"] = VIDEO_FORMAT_CHOICES[
             self.video_format_choice.GetSelection()
         ][1]
+        self.config["music_metadata_lookup"] = self.metadata_check.GetValue()
         self.config["auto_clear_finished"] = self.auto_clear_check.GetValue()
         self.config["max_concurrent"] = self.conc_spin.GetValue()
         self.config["search_timeout_s"] = self.search_spin.GetValue()

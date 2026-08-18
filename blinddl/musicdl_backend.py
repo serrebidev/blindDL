@@ -50,6 +50,7 @@ finally:
 from requests.adapters import HTTPAdapter  # noqa: E402
 from rich.progress import Progress  # noqa: E402
 
+from . import music_tags  # noqa: E402
 from .config import app_data_dir  # noqa: E402
 
 # Sources blindDL searches better itself, so musicdl is not asked for them.
@@ -577,7 +578,7 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
             [_short_source(s) for s in sorted(clients)])
 
 
-def download(song_info, out_dir):
+def download(song_info, out_dir, online_lookup=True):
     """Download one SongInfo through musicdl (handles headers/HLS/etc).
 
     The song still points at the scratch folder its search ran in, so the
@@ -586,6 +587,14 @@ def download(song_info, out_dir):
 
     No granular progress is exposed by musicdl, so the caller should treat
     this as an indeterminate operation that either returns or raises.
+
+    musicdl writes three tags of its own -- title, album, artist -- and
+    stops there, which leaves a file no library can file: no album artist to
+    group it under, no track number to order it by, no year, no artwork.
+    Every finished file is therefore tagged from the search result it came
+    from, and, unless *online_lookup* is off, from what MusicBrainz and
+    TheAudioDB can add on top. That step is deliberately last and cannot
+    fail the download.
     """
     clients = _get_clients()
     os.makedirs(out_dir, exist_ok=True)
@@ -603,4 +612,8 @@ def download(song_info, out_dir):
         pass
     if not downloaded:
         raise RuntimeError(f"musicdl could not download: {song_info.song_name}")
+    for done in downloaded:
+        music_tags.tag_download(
+            str(getattr(done, "save_path", "") or ""), done,
+            online=online_lookup)
     return downloaded
