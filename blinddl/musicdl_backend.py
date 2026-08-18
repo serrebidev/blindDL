@@ -50,7 +50,7 @@ finally:
 from requests.adapters import HTTPAdapter  # noqa: E402
 from rich.progress import Progress  # noqa: E402
 
-from . import music_tags  # noqa: E402
+from . import music_match, music_tags  # noqa: E402
 from .config import app_data_dir  # noqa: E402
 
 # Sources blindDL searches better itself, so musicdl is not asked for them.
@@ -516,7 +516,8 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     if sources is not None:
         wanted = set(sources)
         clients = {s: c for s, c in clients.items() if s in wanted}
-    found = {}  # source -> normalized items, filled in by the worker threads
+    found = {}  # source -> ranked items, filled in by the worker threads
+    raw = {}  # source -> the same rows before the relevance floor
     found_lock = threading.Lock()
     def search_one(source, client):
         # Published for the page loop inside musicdl, which otherwise runs
@@ -541,9 +542,16 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
                 ) or []
         except Exception:  # noqa: BLE001 - one bad site must not kill the rest
             songs = []
-        items = _normalize(source, songs)
+        # Rank and filter before the row ever reaches the list. A music
+        # search fans out over three dozen sites, and several of them answer
+        # a query they could not match with whatever their front page had:
+        # unfiltered, one search buries the site that answered properly
+        # under a hundred rows from sites that did not.
+        scored = _normalize(source, songs)
+        items = music_match.rank_music(scored, keyword, allow_empty=True)
         with found_lock:
             found[source] = items
+            raw[source] = scored
         if on_site is not None and (stop is None or not stop.is_set()):
             try:
                 on_site(_short_source(source), items)
@@ -569,10 +577,31 @@ def search(keyword, timeout_s=SEARCH_TIMEOUT_S, on_site=None, stop=None,
     # otherwise change the dict while we walk it.
     with found_lock:
         answered = dict(found)
+        unfiltered = dict(raw)
 
     items = []
     for source in sorted(answered):
         items.extend(answered[source])
+    # Nothing cleared the floor anywhere, but sites did reply. An obscure
+    # query that no site could match properly should still show their best
+    # guesses rather than an empty list, so the floor is lifted -- once,
+    # across the whole search, rather than per site, which would have let
+    # every site that answered nothing at all put its front page back in.
+    if not items and any(unfiltered.values()):
+        pooled = [row for source in sorted(unfiltered)
+                  for row in unfiltered[source]]
+        items = music_match.rank_music(pooled, keyword, floor=0.0)
+        if on_site is not None and (stop is None or not stop.is_set()):
+            for source in sorted(unfiltered):
+                if not unfiltered[source]:
+                    continue
+                try:
+                    on_site(_short_source(source), music_match.rank_music(
+                        unfiltered[source], keyword, floor=0.0))
+                except Exception:  # noqa: BLE001 - see above
+                    pass
+    else:
+        items = music_match.rank_music(items, keyword, floor=0.0)
     return (items,
             [_short_source(s) for s in sorted(answered)],
             [_short_source(s) for s in sorted(clients)])

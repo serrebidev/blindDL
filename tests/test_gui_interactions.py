@@ -1945,6 +1945,48 @@ class GuiInteractionTests(unittest.TestCase):
             ["Zulu", "Bravo", "Alpha"],
         )
 
+    def test_best_match_ranks_by_score_not_by_which_site_replied_first(self):
+        """Music fans out over three dozen sites, so arrival order is
+        near enough alphabetical by site name."""
+        items = [
+            {"title": "noise", "source": "FiveSing", "score": 8.0,
+             "_search_order": 0},
+            {"title": "the answer", "source": "FreeQobuz", "score": 93.0,
+             "_search_order": 1},
+            {"title": "half an answer", "source": "JioSaavn", "score": 50.0,
+             "_search_order": 2},
+        ]
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(
+                items, SORT_RELEVANCE, ENGINE_MUSIC,
+                search_order.ORDER_RELEVANCE)],
+            ["the answer", "half an answer", "noise"],
+        )
+
+    def test_most_recent_keeps_the_order_the_sites_replied_in(self):
+        """This slot is holding the order that was asked of the sites;
+        re-sorting it by score would undo what the user chose."""
+        items = [
+            {"title": "newest", "score": 20.0, "_search_order": 0},
+            {"title": "older", "score": 90.0, "_search_order": 1},
+        ]
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(
+                items, SORT_RELEVANCE, ENGINE_BOOKS,
+                search_order.ORDER_RECENT)],
+            ["newest", "older"],
+        )
+
+    def test_rows_without_a_score_are_still_ordered_as_they_arrived(self):
+        items = [
+            {"title": "second", "_search_order": 1},
+            {"title": "first", "_search_order": 0},
+        ]
+        self.assertEqual(
+            [item["title"] for item in _sorted_results(items, SORT_RELEVANCE)],
+            ["first", "second"],
+        )
+
     def test_search_order_is_saved_without_searching_on_every_step(self):
         # Arrowing through the choices used to fire a search per step and
         # throw the focus into the results at the end of each one, so the

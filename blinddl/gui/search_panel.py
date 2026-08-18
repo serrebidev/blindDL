@@ -21,6 +21,7 @@ from .. import (
     bandcamp_backend,
     book_backend,
     deezer_backend,
+    music_match,
     musicdl_backend,
     preview,
     search_order,
@@ -577,7 +578,7 @@ def _year(item):
         return None
 
 
-def _sorted_results(items, mode, engine=None):
+def _sorted_results(items, mode, engine=None, order=None):
     """Return results in a stable, deterministic display order."""
     indexed = list(enumerate(items))
 
@@ -662,6 +663,25 @@ def _sorted_results(items, mode, engine=None):
             return None
 
     if mode == SORT_RELEVANCE:
+        # A backend that ranked its own rows says so by putting a score on
+        # them, and best match should then mean the best match rather than
+        # whichever site replied first -- a music search fans out over three
+        # dozen sites, so arrival order is close to alphabetical by site.
+        # Only when relevance is what was asked of the sites, though: under
+        # newest or most popular this slot is deliberately holding the order
+        # the sites themselves replied in, and re-sorting would undo it.
+        ranked = search_order.normalize(order) == ORDER_RELEVANCE
+        if ranked and any(item.get("score") is not None for item in items):
+            return [
+                item
+                for index, item in sorted(
+                    indexed,
+                    key=lambda pair: (
+                        -float(pair[1].get("score") or 0.0),
+                        pair[1].get("_search_order", pair[0]),
+                    ),
+                )
+            ]
         return [
             item
             for index, item in sorted(
@@ -762,6 +782,7 @@ class SearchPanel(wx.Panel):
         self.results = []
         self._result_index = {}
         self.result_engine = 0
+        self.query = ""  # what the running search asked for
         self.token = None  # identifies the current search
         self.stop = None  # set to silence a superseded search's late sites
         self.shown_sources = set()
@@ -1430,6 +1451,12 @@ class SearchPanel(wx.Panel):
             )
         else:
             self.frame.announce(f"Searching {ENGINE_LABELS[engine]}...")
+        # Kept for the results list, which scores a row against what was
+        # asked for as it arrives. The box itself is not read instead: a
+        # user is free to type the next search into it while this one is
+        # still answering, and rows would then be ranked against a query
+        # nobody has run yet.
+        self.query = query
         threading.Thread(
             target=self._search,
             args=(query, engine, self.token, self.stop, sources, order, kind,
@@ -1769,7 +1796,8 @@ class SearchPanel(wx.Panel):
         selected = self._selected_result_objects()
         focused = self._focused_result_object()
         self.results = _sorted_results(
-            self.results, self.sort_choice.GetSelection(), self.result_engine
+            self.results, self.sort_choice.GetSelection(), self.result_engine,
+            self.current_order,
         )
         self._result_index = {
             self._key_for(item): index for index, item in enumerate(self.results)
@@ -1850,6 +1878,17 @@ class SearchPanel(wx.Panel):
         key = self._key_for(item)
         if not key:
             return False
+        # Deezer and Side B answer the music search beside the three dozen
+        # sites musicdl asks, and they score their own rows no more than
+        # Bandcamp does. Left unscored they would sort as zero -- below every
+        # row that does carry a score -- so the same measure is applied here
+        # to whatever arrives without one. Nothing is dropped on this path:
+        # it decides the order of what a site sent, not whether to keep it.
+        if (self.result_engine == ENGINE_MUSIC
+                and item.get("score") is None):
+            item["score"] = music_match.score_music(
+                self.query, item.get("title", ""), item.get("artist", ""),
+                item.get("album", ""))
         # Tests and integrations occasionally seed ``results`` directly.
         # Rebuild once when that happens; ordinary provider inserts keep this
         # index current in constant time.
@@ -1979,7 +2018,8 @@ class SearchPanel(wx.Panel):
         selected = self._selected_result_objects()
         focused = self._focused_result_object()
         mode = self.sort_choice.GetSelection()
-        self.results = _sorted_results(self.results, mode, self.result_engine)
+        self.results = _sorted_results(self.results, mode, self.result_engine,
+                                       self.current_order)
         self._result_index = {
             self._key_for(item): index for index, item in enumerate(self.results)
         }
