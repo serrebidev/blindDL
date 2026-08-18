@@ -14,7 +14,7 @@ import threading
 
 import wx
 
-from .. import soulseek_backend, torrent_engine
+from .. import associations, soulseek_backend, torrent_engine
 
 # Label, stored value. "Original" means the file is kept exactly as the site
 # serves it: no ffmpeg pass, no quality lost, whatever container comes down.
@@ -302,6 +302,20 @@ class SettingsDialog(wx.Dialog):
 
         self.engine_status = wx.StaticText(page, label=self._engine_status())
 
+        self.assoc_status = wx.StaticText(page, label=self._assoc_status())
+        self.assoc_btn = wx.Button(
+            page, label="&Open torrents and magnet links with blindDL"
+        )
+        self.assoc_btn.SetName("Open torrents and magnet links with blindDL")
+        self.assoc_btn.SetHelpText(
+            "Makes blindDL the program that opens torrent files and magnet "
+            "links, so one clicked in a browser or a file manager is added "
+            "straight to the Downloads tab."
+        )
+        self.assoc_btn.Bind(wx.EVT_BUTTON, self._on_set_associations)
+        if not associations.supported():
+            self.assoc_btn.Disable()
+
         torrent_dir_label = wx.StaticText(
             page, label="Torrent download &folder (blank = same as downloads):"
         )
@@ -445,6 +459,10 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.torrent_engine_check, 0, wx.ALL, 8)
         sizer.Add(self.engine_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        sizer.Add(self._heading(page, "File types"), 0, wx.TOP | wx.LEFT, 12)
+        sizer.Add(self.assoc_status, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sizer.Add(self.assoc_btn, 0, wx.ALL, 8)
+
         sizer.Add(self._heading(page, "Files"), 0, wx.TOP | wx.LEFT, 12)
         sizer.Add(torrent_dir_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.torrent_dir_picker, 0, wx.EXPAND | wx.ALL, 8)
@@ -476,6 +494,22 @@ class SettingsDialog(wx.Dialog):
         self.torrent_engine_check.Bind(wx.EVT_CHECKBOX, self._on_engine_toggle)
         self._on_engine_toggle()
         return page
+
+    def _assoc_status(self):
+        """One line saying whether blindDL opens torrents and magnets."""
+        if not associations.supported():
+            return ("Setting the program that opens a file type is not "
+                    "something blindDL can do on this system.")
+        if associations.is_registered():
+            return "blindDL opens torrent files and magnet links."
+        return "Torrent files and magnet links open in another program."
+
+    def _on_set_associations(self, event):
+        self.frame.register_torrent_associations()
+        self.assoc_status.SetLabel(self._assoc_status())
+        # Answered once and for all, however it was reached: a user who has
+        # been to this page has no need of the first-run question.
+        self.config["torrent_assoc_prompted"] = True
 
     def _engine_status(self):
         """One line saying whether the engine can run, and as what."""

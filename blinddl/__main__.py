@@ -193,14 +193,28 @@ def main() -> int | None:
 
     import wx
 
+    from . import torrent_backend
     from .config import app_data_dir
     from .gui.mainframe import MainFrame
     from .single_instance import RestoreServer, notify_existing
 
+    # A magnet link or a torrent file blindDL was launched to open. Windows
+    # and the Linux desktops both start the program afresh for one of these
+    # and pass it as the only argument.
+    opening = ""
+    for argument in sys.argv[1:]:
+        if torrent_backend.is_torrent_link(argument):
+            opening = argument.strip().strip('"')
+            break
+
     app = wx.App()
     checker = wx.SingleInstanceChecker(_instance_name(), app_data_dir())
     if checker.IsAnotherRunning():
-        restored = notify_existing()
+        # The queue lives in the instance that is already running, so the
+        # link is handed to it rather than started here.
+        restored = notify_existing(link=opening or None)
+        if restored and opening:
+            return 0
         if not restored:
             wx.MessageBox(
                 "blindDL is already running. Look for the blue B icon in the "
@@ -212,7 +226,8 @@ def main() -> int | None:
     frame = MainFrame()
     try:
         restore_server = RestoreServer(
-            lambda: wx.CallAfter(frame.restore_from_tray)
+            lambda: wx.CallAfter(frame.restore_from_tray),
+            on_open=lambda link: wx.CallAfter(frame.open_torrent_link, link),
         ).start()
     except OSError as exc:
         restore_server = None
@@ -225,6 +240,10 @@ def main() -> int | None:
         )
     frame.Show()
     frame.Raise()
+    if opening:
+        # After the window exists, so the queue is there to add to and the
+        # announcement has somewhere to be said.
+        wx.CallAfter(frame.open_torrent_link, opening)
     try:
         code = app.MainLoop()
     finally:

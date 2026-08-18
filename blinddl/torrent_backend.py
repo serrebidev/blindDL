@@ -37,7 +37,7 @@ import time
 import defusedxml.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import requests
 
@@ -404,6 +404,12 @@ def fetch_torrent_file(item, out_dir, timeout=HTTP_TIMEOUT_S):
     and opening that is what carries the tracker's passkey through to the
     client; handing the client the URL would not.
     """
+    # A torrent opened from the file manager is already on this disk. There
+    # is nothing to fetch, and fetching is not merely wasteful: the file the
+    # user picked is the only copy that carries a private tracker's passkey.
+    local = str(item.get("torrent_path") or "").strip()
+    if local and os.path.isfile(local):
+        return local
     url = str(item.get("download_url") or "").strip()
     if not url:
         raise RuntimeError("That result carries no torrent file to fetch.")
@@ -438,7 +444,54 @@ def hand_off(item, out_dir=None):
         path = fetch_torrent_file(item, out_dir)
         open_file(path)
         return path
+    if item.get("torrent_path") and os.path.isfile(item["torrent_path"]):
+        open_file(item["torrent_path"])
+        return item["torrent_path"]
     raise RuntimeError("That result carries no magnet link or info hash.")
+
+
+def is_torrent_link(text):
+    """Whether *text* is a magnet link or the path of a torrent file."""
+    candidate = str(text or "").strip().strip('"')
+    if candidate.lower().startswith("magnet:"):
+        return True
+    return (candidate.lower().endswith(".torrent")
+            and os.path.isfile(candidate))
+
+
+def item_from_link(link):
+    """A queue payload for a magnet link or a .torrent file on disk.
+
+    This is what a torrent handed to blindDL from outside becomes -- opened
+    from a file manager, or clicked in a browser -- so that it joins the
+    download queue as the same kind of row a search result does, and every
+    part of blindDL downstream of the queue treats it identically.
+    """
+    candidate = str(link or "").strip().strip('"')
+    if candidate.lower().startswith("magnet:"):
+        query = parse_qs(urlparse(candidate).query)
+        # A magnet names itself in dn=, though it is not obliged to. Falling
+        # back to the info hash beats a row called "Untitled": it is what
+        # the swarm knows the torrent by, and it is what the row will be
+        # replaced with once metadata arrives anyway.
+        name = (query.get("dn") or [""])[0].strip()
+        infohash = ""
+        for urn in query.get("xt") or []:
+            if str(urn).lower().startswith("urn:btih:"):
+                infohash = str(urn)[len("urn:btih:"):].strip().lower()
+                break
+        item = _item("Magnet link", infohash, name or infohash or "Torrent")
+        item["magnet"] = candidate
+        return item
+    path = os.path.abspath(candidate)
+    if not os.path.isfile(path):
+        raise RuntimeError(f"There is no torrent file at {candidate}.")
+    item = _item("Torrent file", "", os.path.splitext(
+        os.path.basename(path))[0])
+    # Kept rather than fetched: the file is already on this disk, and it is
+    # the only copy that carries a private tracker's passkey.
+    item["torrent_path"] = path
+    return item
 
 
 # -- The Pirate Bay ---------------------------------------------------------

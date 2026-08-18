@@ -488,7 +488,7 @@ class TorrentEngine:
         magnet = torrent_backend.resolve_magnet(item)
         if magnet:
             atp = lt.parse_magnet_uri(magnet)
-        elif item.get("download_url"):
+        elif item.get("download_url") or item.get("torrent_path"):
             # Some rows carry a .torrent rather than a magnet: a private
             # tracker's is authenticated, its announce URL carrying the
             # passkey, and an Archive item's carries the webseed that makes

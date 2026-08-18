@@ -221,6 +221,12 @@ DEFAULTS = {
     # "mp3_*" values re-encode it through LAME (V0 and V2 are VBR quality
     # settings, mp3_320 a constant bitrate).
     "apple_music_format": "m4a",
+    # Whether blindDL has already offered to open torrent files and magnet
+    # links. The offer is made once, with "Don't ask again" already ticked,
+    # so saying no is the end of it; the Torrents settings page keeps a
+    # button for anyone who changes their mind. Unticking the box is what
+    # asks to be reminded next time.
+    "torrent_assoc_prompted": False,
     # Embed synced lyrics into Side B (Deezer) downloads.
     "sideb_lyrics": True,
     # Look music downloads up on MusicBrainz and TheAudioDB to fill in the

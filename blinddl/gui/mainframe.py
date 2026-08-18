@@ -13,8 +13,10 @@ import wx
 
 from .. import (
     APP_NAME,
+    associations,
     soulseek_backend,
     speech,
+    torrent_backend,
     torrent_engine,
     updater,
 )
@@ -128,6 +130,66 @@ class MainFrame(wx.Frame):
         self._start_update_checks()
         if self.config["soulseek_enabled"]:
             self._apply_soulseek_setting()
+        # Behind the first-run tools window, which has the stronger claim on
+        # a new install's attention: that one is about blindDL working at
+        # all, this one is about it being convenient.
+        self._assoc_prompt_timer = wx.CallLater(
+            1500, self._maybe_offer_torrent_associations)
+
+    def _maybe_offer_torrent_associations(self):
+        """Offer to open torrent files and magnet links. Asked once.
+
+        The checkbox is ticked when the question appears, so the ordinary
+        way of answering -- read it, pick Yes or No, press Enter -- settles
+        it for good. Unticking it is a deliberate act meaning "ask me again",
+        which is the right way round for a question nobody wants twice.
+        """
+        if self._closing or not associations.supported():
+            return
+        if self.config["torrent_assoc_prompted"]:
+            return
+        if associations.is_registered():
+            # Already the handler, so there is nothing to ask. Recorded as
+            # asked so that unregistering later does not bring the question
+            # back unprompted.
+            self.config["torrent_assoc_prompted"] = True
+            self.config.save()
+            return
+        dialog = wx.RichMessageDialog(
+            self,
+            "Open torrent files and magnet links with blindDL?\n\n"
+            "Torrents you open from a browser or a file manager would be "
+            "added straight to the Downloads tab. You can change this later "
+            "in Settings, Torrents.",
+            "blindDL",
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        dialog.ShowCheckBox("&Don't ask again", checked=True)
+        answer = dialog.ShowModal()
+        remember = dialog.IsCheckBoxChecked()
+        dialog.Destroy()
+        if remember:
+            self.config["torrent_assoc_prompted"] = True
+            self.config.save()
+        if answer == wx.ID_YES:
+            self.register_torrent_associations()
+
+    def register_torrent_associations(self):
+        """Claim torrents and magnets, and say plainly what happened."""
+        if associations.register():
+            self.announce("blindDL now opens torrent files and magnet links.")
+            return True
+        # The entries are written; what could not be confirmed is blindDL
+        # being the default, which on Windows only the user can grant.
+        self.announce("blindDL is now offered for torrents and magnet links.")
+        wx.MessageBox(
+            "blindDL is now listed as a program that opens torrent files "
+            "and magnet links.\n\n"
+            "Windows only lets you choose the default yourself. To finish, "
+            "open Settings, Apps, Default apps, search for blindDL, and set "
+            "it for .torrent files and magnet links.",
+            "blindDL", wx.OK | wx.ICON_INFORMATION, self)
+        return False
 
     # -- UI construction -----------------------------------------------------
 
@@ -273,6 +335,28 @@ class MainFrame(wx.Frame):
 
     def show_downloads_tab(self):
         self.show_tab(TAB_DOWNLOADS)
+
+    def open_torrent_link(self, link):
+        """Queue a magnet or torrent file blindDL was asked to open.
+
+        Reached from a file manager, a browser, or a second launch handing
+        it over. The Downloads tab is shown and the row announced, because
+        the user did this from outside blindDL and needs telling that it
+        landed somewhere rather than being left to go and look.
+        """
+        if self._closing:
+            return
+        try:
+            item = torrent_backend.item_from_link(link)
+        except Exception as exc:  # noqa: BLE001 - said, not raised
+            self.announce(f"Could not open that torrent: {exc}")
+            wx.MessageBox(f"Could not open that torrent:\n{exc}", "blindDL",
+                          wx.OK | wx.ICON_ERROR, self)
+            return
+        title = item.get("title") or "Torrent"
+        self.queue.add_torrent(item, title)
+        self.show_downloads_tab()
+        self.announce(f"Added to downloads: {title}")
 
     def _show_optional_tab(self, panel, name):
         if panel is None:
@@ -762,6 +846,7 @@ class MainFrame(wx.Frame):
         self._closing = True
         for timer_name in (
             "_background_start_timer",
+            "_assoc_prompt_timer",
             "_tray_hide_timer",
             "_update_timer",
             "_update_idle_timer",

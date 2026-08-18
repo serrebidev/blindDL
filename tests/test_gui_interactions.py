@@ -878,6 +878,7 @@ class GuiInteractionTests(unittest.TestCase):
             _housekeeping_worker=mock.Mock(),
             _start_update_checks=mock.Mock(),
             _apply_soulseek_setting=mock.Mock(),
+            _maybe_offer_torrent_associations=mock.Mock(),
         )
 
         MainFrame._start_background_services(holder)
@@ -887,6 +888,115 @@ class GuiInteractionTests(unittest.TestCase):
         holder.subs.start.assert_called_once_with()
         holder._start_update_checks.assert_called_once_with()
         holder._apply_soulseek_setting.assert_called_once_with()
+        # The file-type question is scheduled, not asked here: it waits
+        # behind the first-run tools window.
+        holder._maybe_offer_torrent_associations.assert_not_called()
+
+    def test_a_magnet_handed_in_from_outside_joins_the_queue(self):
+        holder = SimpleNamespace(
+            _closing=False,
+            queue=SimpleNamespace(add_torrent=mock.Mock()),
+            show_downloads_tab=mock.Mock(),
+            announce=mock.Mock(),
+        )
+        magnet = ("magnet:?xt=urn:btih:"
+                  "0123456789abcdef0123456789abcdef01234567&dn=A+Release")
+
+        MainFrame.open_torrent_link(holder, magnet)
+
+        item, title = holder.queue.add_torrent.call_args[0]
+        self.assertEqual(title, "A Release")
+        self.assertEqual(item["magnet"], magnet)
+        # Shown and said, because the user did this from outside blindDL and
+        # would otherwise have to go looking for where it went.
+        holder.show_downloads_tab.assert_called_once_with()
+        self.assertIn("A Release", holder.announce.call_args[0][0])
+
+    def test_a_torrent_that_cannot_be_read_is_said_not_raised(self):
+        holder = SimpleNamespace(
+            _closing=False,
+            queue=SimpleNamespace(add_torrent=mock.Mock()),
+            show_downloads_tab=mock.Mock(),
+            announce=mock.Mock(),
+        )
+
+        with mock.patch("blinddl.gui.mainframe.wx.MessageBox"):
+            MainFrame.open_torrent_link(holder, "C:\\nowhere\\gone.torrent")
+
+        holder.queue.add_torrent.assert_not_called()
+        self.assertIn("Could not open", holder.announce.call_args[0][0])
+
+    def test_the_file_type_question_is_asked_once(self):
+        holder = SimpleNamespace(
+            _closing=False,
+            config={"torrent_assoc_prompted": True},
+        )
+        with mock.patch("blinddl.gui.mainframe.associations.supported",
+                           return_value=True), \
+                mock.patch("blinddl.gui.mainframe.wx.RichMessageDialog") as dialog:
+            MainFrame._maybe_offer_torrent_associations(holder)
+        dialog.assert_not_called()
+
+    def test_already_the_handler_means_there_is_nothing_to_ask(self):
+        config = _SavingConfig({"torrent_assoc_prompted": False})
+        holder = SimpleNamespace(_closing=False, config=config)
+        with mock.patch("blinddl.gui.mainframe.associations.supported",
+                           return_value=True), \
+                mock.patch("blinddl.gui.mainframe.associations.is_registered",
+                           return_value=True), \
+                mock.patch("blinddl.gui.mainframe.wx.RichMessageDialog") as dialog:
+            MainFrame._maybe_offer_torrent_associations(holder)
+        dialog.assert_not_called()
+        self.assertTrue(config["torrent_assoc_prompted"])
+
+    def test_saying_yes_claims_the_file_types(self):
+        config = _SavingConfig({"torrent_assoc_prompted": False})
+        holder = SimpleNamespace(
+            _closing=False, config=config,
+            register_torrent_associations=mock.Mock(),
+        )
+        answered = mock.Mock(
+            ShowCheckBox=mock.Mock(),
+            ShowModal=mock.Mock(return_value=wx.ID_YES),
+            IsCheckBoxChecked=mock.Mock(return_value=True),
+            Destroy=mock.Mock(),
+        )
+        with mock.patch("blinddl.gui.mainframe.associations.supported",
+                           return_value=True), \
+                mock.patch("blinddl.gui.mainframe.associations.is_registered",
+                           return_value=False), \
+                mock.patch("blinddl.gui.mainframe.wx.RichMessageDialog",
+                           return_value=answered):
+            MainFrame._maybe_offer_torrent_associations(holder)
+
+        # The box is ticked when the question appears, so the ordinary way
+        # of answering settles it for good.
+        self.assertEqual(answered.ShowCheckBox.call_args[1]["checked"], True)
+        holder.register_torrent_associations.assert_called_once_with()
+        self.assertTrue(config["torrent_assoc_prompted"])
+
+    def test_unticking_the_box_asks_again_next_time(self):
+        config = _SavingConfig({"torrent_assoc_prompted": False})
+        holder = SimpleNamespace(
+            _closing=False, config=config,
+            register_torrent_associations=mock.Mock(),
+        )
+        answered = mock.Mock(
+            ShowCheckBox=mock.Mock(),
+            ShowModal=mock.Mock(return_value=wx.ID_NO),
+            IsCheckBoxChecked=mock.Mock(return_value=False),
+            Destroy=mock.Mock(),
+        )
+        with mock.patch("blinddl.gui.mainframe.associations.supported",
+                           return_value=True), \
+                mock.patch("blinddl.gui.mainframe.associations.is_registered",
+                           return_value=False), \
+                mock.patch("blinddl.gui.mainframe.wx.RichMessageDialog",
+                           return_value=answered):
+            MainFrame._maybe_offer_torrent_associations(holder)
+
+        holder.register_torrent_associations.assert_not_called()
+        self.assertFalse(config["torrent_assoc_prompted"])
 
     def test_playback_status_gets_its_own_status_field_and_is_never_spoken(self):
         holder = SimpleNamespace(

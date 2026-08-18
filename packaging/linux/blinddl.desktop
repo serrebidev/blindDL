@@ -4,7 +4,11 @@
 Type=Application
 Name=blindDL
 Comment=Accessible media downloader
-Exec=blinddl
+Exec=blinddl %u
 Terminal=false
 Categories=AudioVideo;Audio;Network;
 StartupNotify=true
+# Claims the two types blindDL can be handed from outside. Being listed is
+# not the same as being the default: that is set from Settings, Torrents, or
+# by the question blindDL asks the first time it runs.
+MimeType=application/x-bittorrent;x-scheme-handler/magnet;
