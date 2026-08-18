@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from html.parser import HTMLParser
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
@@ -124,6 +124,45 @@ _GAY_MALE_RESULT_PATTERN = re.compile(
 )
 _TRUSTED_GAY_CATALOGS = {
     "mymusclevideo", "thisvid", "xhamster", "xnxx",
+    "gay0day", "gayporno", "gayfuckporn", "icegay", "machotube", "homo",
+}
+
+# Gay-only catalogs blindDL parses directly.  Their own search is already the
+# orientation filter, so the user's query travels unchanged, and their results
+# are trusted gay catalog entries even when a title uses the "straight cop"
+# kink label.
+_GAY_ONLY_CATALOGS = {
+    "mymusclevideo", "gay0day", "gayporno", "gayfuckporn",
+    "icegay", "machotube", "homo",
+}
+
+# Search URL template (receives the quoted query) and the video-page URL
+# pattern for each directly-parsed gay catalog.
+_GAY_CATALOG_SEARCH = {
+    "gay0day": (
+        "https://gay0day.com/search/{}/",
+        r"https://gay0day\.com/videos/\d+/[^/]+/?",
+    ),
+    "gayporno": (
+        "https://www.gayporno.fm/search/{}",
+        r"https://www\.gayporno\.fm/[^/]+_\d+\.html",
+    ),
+    "gayfuckporn": (
+        "https://www.gayfuckporn.com/?search={}",
+        r"https://www\.gayfuckporn\.com/[^/]+/\d+\.html",
+    ),
+    "icegay": (
+        "https://www.icegay.tv/search/{}",
+        r"https://www\.icegay\.tv/movies/\d+/[^/]+",
+    ),
+    "machotube": (
+        "https://www.machotube.tv/search/{}",
+        r"https://www\.machotube\.tv/movies/\d+/[^/]+",
+    ),
+    "homo": (
+        "https://homo.xxx/search/{}/",
+        r"https://homo\.xxx/videos/\d+/",
+    ),
 }
 
 
@@ -154,9 +193,36 @@ PROVIDERS = {
             "DownloadConfigRAW", "eporner",
         ),
         Provider(
+            "gay0day", "Gay0Day", "yt_dlp", ("gay0day.com",), "search",
+            download_style="ytdlp", search_categories=(CONTENT_GAY,),
+        ),
+        Provider(
+            "gayfuckporn", "GayFuckPorn", "yt_dlp",
+            ("gayfuckporn.com",), "search",
+            download_style="ytdlp", search_categories=(CONTENT_GAY,),
+        ),
+        Provider(
+            "gayporno", "GayPorno.fm", "yt_dlp", ("gayporno.fm",),
+            "search", download_style="ytdlp",
+            search_categories=(CONTENT_GAY,),
+        ),
+        Provider(
+            "homo", "HomoXXX", "yt_dlp", ("homo.xxx",), "search",
+            download_style="ytdlp", search_categories=(CONTENT_GAY,),
+        ),
+        Provider(
             "hqporner", "HQPorner", "hqporner_api", ("hqporner.com",),
             "search_videos", {"pages": 1, "load_html": False},
             "DownloadConfigRAW", search_categories=(CONTENT_STRAIGHT,),
+        ),
+        Provider(
+            "icegay", "IceGay", "yt_dlp", ("icegay.tv",), "search",
+            download_style="ytdlp", search_categories=(CONTENT_GAY,),
+        ),
+        Provider(
+            "machotube", "MachoTube", "yt_dlp", ("machotube.tv",),
+            "search", download_style="ytdlp",
+            search_categories=(CONTENT_GAY,),
         ),
         Provider(
             "justforfans", "JustForFans", "requests", ("justfor.fans",),
@@ -229,7 +295,8 @@ PROVIDERS = {
             "search_videos", {"pages": 1, "load_html": False},
         ),
         Provider(
-            "xvideos", "XVideos", "xvideos_api", ("xvideos.com",),
+            "xvideos", "XVideos", "xvideos_api",
+            ("xvideos.com", "xvideos2.com"),
             "search", {"pages": 1, "load_html": False},
         ),
         Provider(
@@ -499,6 +566,58 @@ class _XHamsterSearchParser(HTMLParser):
         self.items.append((url, title))
 
 
+class _GaySearchParser(HTMLParser):
+    """Extract titled video cards from the gay tube sites blindDL parses.
+
+    Cards put the title in the anchor's ``title`` attribute on most sites;
+    GayFuckPorn leaves the anchor bare and titles the ``<img alt=...>`` inside
+    it instead, so the first ``alt`` text seen under a pending card is adopted
+    when the anchor itself is unnamed.
+    """
+
+    def __init__(self, url_pattern, base_url):
+        super().__init__(convert_charrefs=True)
+        self.url_pattern = re.compile(url_pattern)
+        self.base_url = base_url
+        self.items = []
+        self.seen = set()
+        # Python 3.14.7 added HTMLParser._pending for its input buffer. Keep
+        # card state under a distinct name instead of clobbering that buffer.
+        self._pending_item = None
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if self._pending_item is not None and not self._pending_item[1]:
+            alt = html.unescape((values.get("alt") or "").strip())
+            if alt:
+                self._pending_item = (self._pending_item[0], alt)
+        if tag.casefold() != "a":
+            return
+        url = urljoin(self.base_url, values.get("href") or "")
+        if not self.url_pattern.search(url):
+            return
+        title = html.unescape((values.get("title") or "").strip())
+        self._pending_item = (url, title)
+
+    def handle_endtag(self, tag):
+        if tag.casefold() != "a" or self._pending_item is None:
+            return
+        url, title = self._pending_item
+        self._pending_item = None
+        if title and url not in self.seen:
+            self.seen.add(url)
+            self.items.append((url, title))
+
+    def close(self):
+        super().close()
+        if self._pending_item is not None:
+            url, title = self._pending_item
+            self._pending_item = None
+            if title and url not in self.seen:
+                self.seen.add(url)
+                self.items.append((url, title))
+
+
 def _search_xhamster_fallback(query, category, order=ORDER_RELEVANCE):
     from curl_cffi.requests import Session
 
@@ -569,6 +688,39 @@ def _search_mymusclevideo(query, category):
             "adult_category": category,
         }
         for url, title in parser.items[:MAX_RESULTS_PER_SITE]
+    ]
+
+
+def _search_gay_catalog(key, query, category):
+    """Search a directly-parsed gay-only catalog for titled video cards."""
+    categorized_query, _kwargs = _search_parameters(
+        PROVIDERS[key], query, category)
+    search_url, url_pattern = _GAY_CATALOG_SEARCH[key]
+    parsed = urlparse(search_url.format(""))
+    base_url = f"{parsed.scheme}://{parsed.netloc}/"
+    response = requests.get(
+        search_url.format(quote(categorized_query, safe="")),
+        headers={"User-Agent": _UA},
+        timeout=30,
+    )
+    response.raise_for_status()
+    parser = _GaySearchParser(url_pattern, base_url)
+    parser.feed(response.text)
+    parser.close()
+    return [
+        {
+            "id": f"adult:{key}:{video_url}",
+            "kind": "adult",
+            "provider": key,
+            "title": title,
+            "artist": "",
+            "source": PROVIDERS[key].label,
+            "duration_s": None,
+            "file_size": "",
+            "url": video_url,
+            "adult_category": category,
+        }
+        for video_url, title in parser.items[:MAX_RESULTS_PER_SITE]
     ]
 
 
@@ -866,6 +1018,10 @@ def _import_provider(provider):
 
 
 def _unwrap(result):
+    # eaf_base_api 4.x ScrapeResult carries a loaded ``item`` and exposes
+    # ``succeeded``; older releases used ``is_success`` and ``video``.
+    if hasattr(result, "succeeded") and hasattr(result, "item"):
+        return result.item if result.succeeded else None
     if hasattr(result, "is_success"):
         return result.video if result.is_success else None
     return result
@@ -917,6 +1073,35 @@ def _duration_seconds(value):
     return None
 
 
+def _performer_names(value):
+    """Filter a performer list to entries that look like person names.
+
+    Some provider extractors grab every ``click-trigger`` link on a page, so
+    their ``pornstars`` field mixes navigation labels, tags, and page text
+    with the actual performers.  Real performer names on these catalogs are
+    multi-word with every word capitalized; everything else is dropped.
+    """
+    names = []
+    seen = set()
+    for entry in value:
+        text = str(entry).strip()
+        if not text or text in seen:
+            continue
+        words = text.split()
+        if len(words) < 2:
+            continue
+        if all(word.isupper() for word in words):
+            continue
+        if any(not word[0].isupper() for word in words):
+            continue
+        if any(not all(ch.isalpha() or ch in "'-." for ch in word)
+               for word in words):
+            continue
+        seen.add(text)
+        names.append(text)
+    return ", ".join(names)
+
+
 def _normalize(provider, media):
     if media is None:
         return None
@@ -927,7 +1112,7 @@ def _normalize(provider, media):
         "pornstar", "pornstars", "actors", "models",
     ) or ""
     if isinstance(artist, (list, tuple, set)):
-        artist = ", ".join(str(value) for value in artist if value)
+        artist = _performer_names(artist)
     duration = _first_attr(
         media, "duration", "length_seconds", "length_sec", "video_duration",
         "length",
@@ -959,6 +1144,36 @@ def _normalize(provider, media):
         "url": str(url),
         "content_tags": str(content_tags),
     }
+
+
+# Every field name :func:`_normalize` reads.  The 4.x provider models load
+# these lazily, so they are requested before normalization and any name a
+# particular provider does not define is skipped.
+_NORMALIZE_FIELDS = (
+    "title", "name", "duration", "length", "length_seconds", "length_sec",
+    "video_duration", "author_name", "uploader", "author", "uploader_name",
+    "pornstar", "pornstars", "actors", "models", "video_id", "id", "key",
+    "keywords", "tags", "categories", "pornstars_urls", "author_link",
+)
+
+
+async def _load_normalize_fields(media):
+    """Load the BaseMedia fields blindDL normalizes, tolerantly.
+
+    The 4.x provider models fetch metadata lazily, so reading an unrequested
+    field raises ``DataNotLoadedError``.  Most providers already load ``title``
+    (and with it the rest of their source) inside the iterator, which makes
+    this a no-op; it fills any remaining gaps and degrades gracefully when a
+    provider exposes no ``get_field``.
+    """
+    get_field = getattr(media, "get_field", None)
+    if not callable(get_field):
+        return
+    for name in _NORMALIZE_FIELDS:
+        try:
+            await get_field(name)
+        except Exception:  # noqa: BLE001 - unknown or failing fields are skipped
+            continue
 
 
 def _matches_content_category(item, category):
@@ -1026,9 +1241,10 @@ def _search_parameters(provider, query, category, order=ORDER_RELEVANCE):
             CONTENT_STRAIGHT, CONTENT_GAY):
         native_filter = True
 
-    # MyMuscleVideo is a gay-only catalog, so its own video search is already
-    # the category filter and should receive the user's terms unchanged.
-    if provider.key == "mymusclevideo":
+    # Gay-only catalogs already filter by orientation, so their own video
+    # search is the category filter and should receive the user's terms
+    # unchanged.
+    if provider.key in _GAY_ONLY_CATALOGS:
         native_filter = True
 
     # The site's own sort, where it has one. It goes on last so a provider
@@ -1041,10 +1257,16 @@ def _search_parameters(provider, query, category, order=ORDER_RELEVANCE):
         kwargs.update(sort)
         kwargs["keep_original_order"] = True
 
+    # Straight is the default orientation on tube sites, so appending the
+    # "straight" term only drags in lesbian "straight girl" titles and buries
+    # the user's terms.  The other orientation terms stay, because they are
+    # what pulls in-category results out of a site's relevance ranking.
     term = CONTENT_QUERY_TERMS[category]
     words = set(re.findall(r"[a-z]+", query.casefold()))
-    categorized_query = (
-        query if native_filter or term in words else f"{query} {term}")
+    categorized_query = query
+    if (category != CONTENT_STRAIGHT and not native_filter
+            and term not in words):
+        categorized_query = f"{query} {term}"
     return categorized_query, kwargs
 
 
@@ -1060,7 +1282,7 @@ def _supported_search_kwargs(method, kwargs):
     return {key: value for key, value in kwargs.items() if key in parameters}
 
 
-def _iterator_config(method):
+def _iterator_config(method, module=None):
     """Bound nested work while all top-level providers run concurrently."""
     try:
         parameters = inspect.signature(method).parameters
@@ -1072,11 +1294,37 @@ def _iterator_config(method):
         from base_api.modules.config import IteratorConfig
     except ImportError:
         return None
-    return IteratorConfig(
-        max_page_concurrency=1,
-        max_item_concurrency=1,
-        order="original",
-    )
+    # Load the metadata blindDL normalizes inside the iterator, where the
+    # provider's item tasks fetch concurrently, instead of field-by-field in
+    # blindDL's single-threaded drain loop.  The field list is intersected
+    # with the provider's own Video model so an unknown name can never fail
+    # an item; ``title`` is requested even when the model cannot be
+    # introspected because every current provider declares it.  A modest item
+    # concurrency lets those per-item loads overlap instead of serializing a
+    # 200-result page; the ordered buffer still yields them in page order.
+    load_fields = ("title",)
+    constructor = getattr(module, "Video", None) if module is not None else None
+    if constructor is not None:
+        try:
+            model_fields = {f.name for f in fields(constructor)}
+        except TypeError:
+            model_fields = set()
+        load_fields = tuple(
+            name for name in _NORMALIZE_FIELDS if name in model_fields)
+    try:
+        return IteratorConfig(
+            max_page_concurrency=1,
+            max_item_concurrency=6,
+            order="original",
+            load_specific_fields=load_fields,
+        )
+    except TypeError:
+        # Older base-api releases have no load_specific_fields option.
+        return IteratorConfig(
+            max_page_concurrency=1,
+            max_item_concurrency=6,
+            order="original",
+        )
 
 
 def _search_eporner(query, category, order):
@@ -1124,6 +1372,9 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
             _search_eporner, query, category, order)
     if provider.key == "thisvid":
         return await asyncio.to_thread(_search_thisvid, query, category)
+    if provider.key in _GAY_CATALOG_SEARCH:
+        return await asyncio.to_thread(
+            _search_gay_catalog, provider.key, query, category)
     if provider.key == "mymusclevideo":
         return await asyncio.to_thread(
             _search_mymusclevideo, query, category)
@@ -1135,7 +1386,7 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
     categorized_query, kwargs = _search_parameters(
         provider, query, category, order)
     kwargs = _supported_search_kwargs(method, kwargs)
-    iterator_config = _iterator_config(method)
+    iterator_config = _iterator_config(method, _module)
     if iterator_config is not None:
         kwargs["iterator_config"] = iterator_config
     results = method(categorized_query, **kwargs)
@@ -1146,7 +1397,10 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
         async for result in results:
             if stop is not None and stop.is_set():
                 break
-            item = _normalize(provider, _unwrap(result))
+            media = _unwrap(result)
+            if media is not None:
+                await _load_normalize_fields(media)
+            item = _normalize(provider, media)
             if item:
                 item["adult_category"] = category
                 items.append(item)
@@ -1283,7 +1537,9 @@ def inspect_url(url, config=None):
         _module, client = _import_provider(provider)
         if provider.download_style == "pin":
             return await client.get_pin(url)
-        return await client.get_video(url)
+        media = await client.get_video(url)
+        await _load_normalize_fields(media)
+        return media
 
     with _silence_provider_logging():
         item = _normalize(provider, asyncio.run(resolve()))

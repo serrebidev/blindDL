@@ -29,11 +29,12 @@ class AdultProviderTests(unittest.TestCase):
         self.assertEqual(
             set(adult_backend.PROVIDERS),
             {
-                "aebn", "beeg", "eporner", "hqporner", "missav",
-                "justforfans", "mymusclevideo", "onlyfans", "porngo",
-                "pornhub", "porntrex", "redtube", "sex", "spankbang",
-                "thumbzilla", "thisvid", "tube8", "xfreehd", "xhamster",
-                "xnxx", "xvideos", "youporn",
+                "aebn", "beeg", "eporner", "gay0day", "gayfuckporn",
+                "gayporno", "homo", "hqporner", "icegay", "justforfans",
+                "machotube", "missav", "mymusclevideo", "onlyfans",
+                "porngo", "pornhub", "porntrex", "redtube", "sex",
+                "spankbang", "thumbzilla", "thisvid", "tube8", "xfreehd",
+                "xhamster", "xnxx", "xvideos", "youporn",
             },
         )
         self.assertTrue(adult_backend.is_supported_url(
@@ -44,9 +45,26 @@ class AdultProviderTests(unittest.TestCase):
             "https://gay.aebn.com/gay/movies/123/example"))
         self.assertTrue(adult_backend.is_supported_url(
             "https://mymusclevideo.com/123/example/"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://gay0day.com/videos/123/example/"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://www.gayporno.fm/example_123.html"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://www.gayfuckporn.com/example/123.html"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://www.icegay.tv/movies/123/example"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://www.machotube.tv/movies/123/example"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://homo.xxx/videos/123/"))
         self.assertEqual(
             adult_backend.provider_for_url(
                 "https://subdomain.xvideos.com/video.test").key,
+            "xvideos",
+        )
+        self.assertEqual(
+            adult_backend.provider_for_url(
+                "https://xvideos2.com/video.test").key,
             "xvideos",
         )
 
@@ -111,7 +129,7 @@ class AdultProviderTests(unittest.TestCase):
                 adult_backend.CONTENT_STRAIGHT))
 
         self.assertEqual(items, [])
-        self.assertEqual(calls[0][0], "amateur straight")
+        self.assertEqual(calls[0][0], "amateur")
         self.assertEqual(calls[0][1], 1)
         self.assertIsNotNone(calls[0][2])
 
@@ -177,6 +195,35 @@ class AdultProviderTests(unittest.TestCase):
 
         self.assertEqual(query, "massage trans")
         self.assertNotIn("category", kwargs)
+
+    def test_straight_search_never_appends_straight_term(self):
+        provider = adult_backend.PROVIDERS["pornhub"]
+
+        for query in ("cop", "cop straight", "Straight cop"):
+            with self.subTest(query=query):
+                categorized, _kwargs = adult_backend._search_parameters(
+                    provider, query, adult_backend.CONTENT_STRAIGHT)
+                self.assertEqual(categorized, query)
+
+    def test_gay_catalog_search_passes_query_through_unchanged(self):
+        for key in adult_backend._GAY_CATALOG_SEARCH:
+            with self.subTest(provider=key):
+                self.assertEqual(
+                    adult_backend.PROVIDERS[key].search_categories,
+                    (adult_backend.CONTENT_GAY,),
+                )
+                query, _kwargs = adult_backend._search_parameters(
+                    adult_backend.PROVIDERS[key], "straight cop",
+                    adult_backend.CONTENT_GAY)
+                self.assertEqual(query, "straight cop")
+
+    def test_gay_catalog_titles_keep_straight_cop_kink_label(self):
+        for key in adult_backend._GAY_CATALOG_SEARCH:
+            with self.subTest(provider=key):
+                self.assertTrue(adult_backend._matches_content_category({
+                    "provider": key,
+                    "title": "Straight Cop Gets Fucked",
+                }, adult_backend.CONTENT_GAY))
 
     def test_provider_order_uses_its_native_sort_parameter(self):
         _query, kwargs = adult_backend._search_parameters(
@@ -300,15 +347,66 @@ class AdultProviderTests(unittest.TestCase):
             url="https://example.invalid/video",
             video_id="42",
             title="Example",
-            pornstars=["One", "Two"],
+            pornstars=["One Two", "Three Four"],
             length_seconds="125",
         )
         item = adult_backend._normalize(
             adult_backend.PROVIDERS["pornhub"], video)
         self.assertEqual(item["title"], "Example")
-        self.assertEqual(item["artist"], "One, Two")
+        self.assertEqual(item["artist"], "One Two, Three Four")
         self.assertEqual(item["duration_s"], 125)
         self.assertEqual(item["provider"], "pornhub")
+
+    def test_performer_names_drops_page_navigation_garbage(self):
+        garbage = [
+            "HQPORNER", "Categories", "Girls", "Brynn Tyler", "blonde",
+            "ass licking", "i want you to put it in my ass, sir",
+            "1080p", "Nacho Vidal", "brynn tyler", "See all recent porn",
+        ]
+        self.assertEqual(
+            adult_backend._performer_names(garbage),
+            "Brynn Tyler, Nacho Vidal",
+        )
+        self.assertEqual(adult_backend._performer_names([]), "")
+        self.assertEqual(adult_backend._performer_names(["One Two"]),
+                         "One Two")
+
+    def test_unwrap_reads_current_scraperesult_shape(self):
+        ok = types.SimpleNamespace(succeeded=True, item="video",
+                                   is_success=True, video="old")
+        failed = types.SimpleNamespace(succeeded=False, item="video",
+                                       is_success=False, video="old")
+
+        self.assertEqual(adult_backend._unwrap(ok), "video")
+        self.assertIsNone(adult_backend._unwrap(failed))
+
+    def test_unwrap_keeps_legacy_scraperesult_shape(self):
+        ok = types.SimpleNamespace(is_success=True, video="old")
+        failed = types.SimpleNamespace(is_success=False, video="old")
+
+        self.assertEqual(adult_backend._unwrap(ok), "old")
+        self.assertIsNone(adult_backend._unwrap(failed))
+        self.assertEqual(adult_backend._unwrap("plain"), "plain")
+
+    def test_load_normalize_fields_skips_unknown_and_missing_fields(self):
+        class Media:
+            def __init__(self):
+                self.loaded = []
+
+            async def get_field(self, name):
+                if name not in ("title", "duration"):
+                    raise ValueError(f"no field {name}")
+                self.loaded.append(name)
+                return name
+
+        media = Media()
+        asyncio.run(adult_backend._load_normalize_fields(media))
+        self.assertEqual(media.loaded, ["title", "duration"])
+
+    def test_load_normalize_fields_skips_plain_objects(self):
+        plain = {"url": "https://example.invalid/video", "title": "X"}
+        asyncio.run(adult_backend._load_normalize_fields(plain))
+        self.assertEqual(plain["title"], "X")
 
     def test_normalize_skips_callable_author_and_keeps_loaded_context(self):
         video = types.SimpleNamespace(
@@ -501,6 +599,75 @@ class AdultProviderTests(unittest.TestCase):
             headers={"User-Agent": adult_backend._UA},
             timeout=30,
         )
+
+    def test_gay_catalog_search_uses_site_url_and_pattern(self):
+        expected = {
+            "gay0day": ("https://gay0day.com/search/cop/",
+                         "https://gay0day.com/videos/167371/good-cop-bad-cop/"),
+            "gayporno": ("https://www.gayporno.fm/search/cop",
+                          "https://www.gayporno.fm/damon-phoenix_1880321.html"),
+            "gayfuckporn": ("https://www.gayfuckporn.com/?search=cop",
+                             "https://www.gayfuckporn.com/aaron-trainer/3050866.html"),
+            "icegay": ("https://www.icegay.tv/search/cop",
+                        "https://www.icegay.tv/movies/1435531/ballsy-cops"),
+            "machotube": ("https://www.machotube.tv/search/cop",
+                           "https://www.machotube.tv/movies/1457751/bold-cops"),
+            "homo": ("https://homo.xxx/search/cop/",
+                      "https://homo.xxx/videos/40170/"),
+        }
+        for key, (search_url, video_url) in expected.items():
+            with self.subTest(provider=key), mock.patch.object(
+                    adult_backend.requests, "get",
+                    return_value=_Response("")) as get:
+                items = adult_backend._search_gay_catalog(
+                    key, "cop", adult_backend.CONTENT_GAY)
+
+            self.assertEqual(items, [])
+            self.assertEqual(get.call_args.args[0], search_url)
+            self.assertEqual(get.call_args.kwargs["headers"]["User-Agent"],
+                             adult_backend._UA)
+            self.assertEqual(get.call_args.kwargs["timeout"], 30)
+
+    def test_gay_search_parser_reads_anchor_titles_and_dedupes(self):
+        page = """
+            <a href="https://gay0day.com/videos/1/good-cop/"
+               title="Good Cop"></a>
+            <a href="/videos/2/bad-cop/" title="Bad &amp; Cop"></a>
+            <a href="https://gay0day.com/videos/1/good-cop/"
+               title="Duplicate"></a>
+            <a href="/categories/" title="Not a video"></a>
+        """
+        parser = adult_backend._GaySearchParser(
+            r"https://gay0day\.com/videos/\d+/[^/]+/?",
+            "https://gay0day.com/")
+
+        parser.feed(page)
+
+        self.assertEqual(parser.items, [
+            ("https://gay0day.com/videos/1/good-cop/", "Good Cop"),
+            ("https://gay0day.com/videos/2/bad-cop/", "Bad & Cop"),
+        ])
+
+    def test_gay_search_parser_reads_card_image_alt_title(self):
+        page = """
+            <a class="js-gallery-link"
+               href="/aaron-trainer/3050866.html">
+              <img src="thumb.jpg" alt="Aaron Trainer">
+            </a>
+            <a class="js-gallery-link" href="/other/123.html">
+              <img src="thumb.jpg">
+            </a>
+        """
+        parser = adult_backend._GaySearchParser(
+            r"https://www\.gayfuckporn\.com/[^/]+/\d+\.html",
+            "https://www.gayfuckporn.com/")
+
+        parser.feed(page)
+
+        self.assertEqual(parser.items, [
+            ("https://www.gayfuckporn.com/aaron-trainer/3050866.html",
+             "Aaron Trainer"),
+        ])
 
     def test_mymusclevideo_playlist_url_expands_to_queue_items(self):
         page = """
