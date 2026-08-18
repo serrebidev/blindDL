@@ -364,6 +364,172 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36"
 )
 
+# These tube sites sign every CDN URL with an expiry, and a cached page can
+# serve a key that has already run out: previewing or downloading then fails
+# with HTTP 403. The site's own player POSTs the page's <source> URLs to its
+# /ah/sign endpoint and receives freshly signed URLs, so blindDL does the
+# same before previewing or downloading anything from them.
+_TUBE_SIGN_KEYS = frozenset(("gayporno", "icegay", "machotube", "gayfuckporn"))
+_TUBE_END_RE = re.compile(r"end(?:%3D|=)(\d+)")
+_tube_sign_endpoints = {}
+
+
+def _tube_sign_endpoint(page_url):
+    """The /ah/sign token endpoint the site's own player uses, if any."""
+    if not page_url:
+        return None
+    host = urlparse(page_url).netloc
+    if host in _tube_sign_endpoints:
+        return _tube_sign_endpoints[host]
+    endpoint = None
+    try:
+        response = requests.get(
+            page_url, headers={"User-Agent": _UA}, timeout=30)
+        response.raise_for_status()
+        match = re.search(r'data-v-update-url="([^"]+)"', response.text)
+        if match:
+            update = urlparse(match.group(1))
+            endpoint = f"{update.scheme}://{update.netloc}/ah/sign"
+    except requests.RequestException:
+        endpoint = None
+    _tube_sign_endpoints[host] = endpoint
+    return endpoint
+
+
+def _tube_sign_info(info):
+    """Re-sign expired CDN keys through the tube network's /ah/sign endpoint.
+
+    Formats whose ``end`` timestamp is still comfortably ahead are left
+    alone; a stale or soon-expiring key is re-signed in place so previews
+    and downloads see a URL the CDN will actually serve.
+    """
+    formats = info.get("formats") or []
+    now = time.time()
+    stale = False
+    for fmt in formats:
+        match = _TUBE_END_RE.search(fmt.get("url") or "")
+        if not match:
+            continue
+        try:
+            end = int(match.group(1))
+        except ValueError:
+            continue
+        if end - now <= 3600:
+            stale = True
+            break
+    if not stale:
+        return
+    sign = _tube_sign_endpoint(
+        info.get("webpage_url") or info.get("original_url") or "")
+    if not sign:
+        return
+    urls = {"mp4": {}}
+    for fmt in formats:
+        url = fmt.get("url") or ""
+        if not url:
+            continue
+        if "m3u8" in url.lower() or "mpegurl" in (fmt.get("protocol") or ""):
+            urls["hls"] = url
+        else:
+            urls["mp4"][
+                str(fmt.get("height") or fmt.get("format_id") or "720")
+            ] = url
+    try:
+        response = requests.post(
+            sign, json={"urls": urls},
+            headers={
+                "User-Agent": _UA,
+                "Content-Type": "application/json;charset=UTF-8",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        fresh = (response.json() or {}).get("urls") or {}
+    except (requests.RequestException, ValueError):
+        return
+    fresh_mp4 = fresh.get("mp4")
+    if isinstance(fresh_mp4, str):
+        fresh_mp4 = {"720": fresh_mp4}
+    if isinstance(fresh_mp4, dict) and fresh_mp4:
+        for fmt in formats:
+            url = fmt.get("url") or ""
+            if "m3u8" in url.lower():
+                continue
+            key = str(fmt.get("height") or fmt.get("format_id") or "720")
+            if key in fresh_mp4:
+                fmt["url"] = fresh_mp4[key]
+        if info.get("url"):
+            info["url"] = next(iter(fresh_mp4.values()))
+    fresh_hls = fresh.get("hls")
+    if fresh_hls:
+        for fmt in formats:
+            if "m3u8" in (fmt.get("url") or "").lower():
+                fmt["url"] = fresh_hls
+
+
+# HomoXXX serves its streams as an HLS master playlist behind a get_file URL
+# that ends in .mp4/, which yt-dlp's generic extractor mistakes for a direct
+# file and would save as playlist text. Resolving the master to its best
+# variant gives previews and downloads a real .m3u8 stream.
+_HLS_WRAPPER_KEYS = frozenset(("homo",))
+
+
+def _best_hls_variant(master):
+    """The highest-bandwidth variant URL in an HLS master playlist."""
+    best_url = None
+    best_bw = -1
+    pending_bw = None
+    for line in master.splitlines():
+        match = re.search(r"BANDWIDTH=(\d+)", line)
+        if match:
+            pending_bw = int(match.group(1))
+            continue
+        line = line.strip()
+        if line.startswith("http"):
+            if pending_bw is not None and pending_bw > best_bw:
+                best_bw, best_url = pending_bw, line
+            pending_bw = None
+    return best_url
+
+
+def _hls_wrapper_fix(info):
+    """Resolve a get_file URL that serves an HLS master playlist.
+
+    Returns the best variant URL (or None when there is nothing to resolve);
+    the extracted formats are rewritten to point at it either way.
+    """
+    url = info.get("url") or ""
+    if "get_file" not in url:
+        return None
+    try:
+        response = requests.get(
+            url, headers={"User-Agent": _UA,
+                          "Referer": info.get("webpage_url") or url},
+            timeout=30,
+        )
+        response.raise_for_status()
+        text = response.text
+    except requests.RequestException:
+        return None
+    if "#EXTM3U" not in text:
+        return None
+    best = _best_hls_variant(text)
+    if not best:
+        return None
+    info["url"] = best
+    for fmt in info.get("formats") or []:
+        fmt["url"] = best
+    return best
+
+
+def stream_fix_for(provider_key):
+    """Return the fix callback a provider's streams need, or None."""
+    if provider_key in _TUBE_SIGN_KEYS:
+        return _tube_sign_info
+    if provider_key in _HLS_WRAPPER_KEYS:
+        return _hls_wrapper_fix
+    return None
+
 
 @contextmanager
 def _silence_provider_logging():
@@ -1513,7 +1679,8 @@ def inspect_url(url, config=None):
             return _inspect_thisvid_playlist(
                 url, cookies_from_browser=browser, cookies_file=cookies_file)
         extracted, title = ytdlp_backend.extract_flat(
-            url, cookies_from_browser=browser, cookies_file=cookies_file)
+            url, cookies_from_browser=browser, cookies_file=cookies_file,
+            fix_stream=stream_fix_for(provider.key))
         items = []
         for entry in extracted:
             items.append({
@@ -1782,6 +1949,7 @@ def download(payload, out_dir, progress_cb=None, cancel_event=None,
             progress_cb=progress_cb, cancel_event=cancel_event,
             cookies_from_browser=payload.get("cookies_from_browser"),
             cookies_file=payload.get("cookies_file"),
+            fix_stream=stream_fix_for(provider_key),
         )
         return
 

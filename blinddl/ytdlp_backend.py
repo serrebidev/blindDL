@@ -288,7 +288,7 @@ def _iter_entries(entries, depth=MAX_NESTED_DEPTH):
 
 
 def extract_flat(url, cookies_from_browser=None, cookies_file=None,
-                 limit=None, order=ORDER_RELEVANCE):
+                 limit=None, order=ORDER_RELEVANCE, fix_stream=None):
     """Inspect a URL without downloading.
 
     Returns (items, title): items is a list of normalized dicts (one entry
@@ -327,6 +327,8 @@ def extract_flat(url, cookies_from_browser=None, cookies_file=None,
     )
     if not info:
         raise RuntimeError(f"Could not extract any information from: {url}")
+    if fix_stream is not None:
+        fix_stream(info)
     title = info.get("title") or url
     entries = info.get("entries")
     if entries is not None:
@@ -361,7 +363,7 @@ def search(query, count=SEARCH_COUNT, order=ORDER_RELEVANCE):
 
 
 def resolve_stream(url, audio_only=False, cookies_from_browser=None,
-                   cookies_file=None, http_headers=None):
+                   cookies_file=None, http_headers=None, fix_stream=None):
     """Resolve *url* to one stream that a native media player can open.
 
     Video previews deliberately request a progressive format containing both
@@ -421,6 +423,8 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
         info = next((entry for entry in entries if entry), None)
     if not info:
         raise RuntimeError("No playable media stream was found.")
+    if fix_stream is not None:
+        fix_stream(info)
     stream_url = info.get("url")
     if not stream_url:
         requested = info.get("requested_downloads") or ()
@@ -436,7 +440,7 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
 def download(url, out_dir, audio_only=True, audio_format="mp3",
              video_format="mp4", progress_cb=None, cancel_event=None,
              http_headers=None, cookies_from_browser=None,
-             cookies_file=None):
+             cookies_file=None, fix_stream=None):
     """Download one URL. progress_cb receives yt-dlp progress dicts.
 
     audio_format and video_format both accept "original", which means the
@@ -517,7 +521,25 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         # yt-dlp, which keeps the streams as they came.
     def run(opts_dict):
         with yt_dlp.YoutubeDL(opts_dict) as ydl:
-            ydl.download([url])
+            if fix_stream is None:
+                ydl.download([url])
+            else:
+                # Extract once, let the caller replace short-lived CDN URLs
+                # (signed keys that the page served already expired, or a
+                # playlist URL yt-dlp would otherwise save as text), then
+                # download the fixed result in the same pass. A fix that
+                # returns a URL replaces the target entirely; one that
+                # returns None has rewritten the extracted formats in place.
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise RuntimeError(
+                        f"Could not extract any information from: {url}"
+                    )
+                replacement = fix_stream(info)
+                if replacement:
+                    ydl.download([replacement])
+                else:
+                    ydl.process_ie_result(info, download=True)
 
     try:
         _with_cookie_fallback(

@@ -766,7 +766,8 @@ class AdultProviderTests(unittest.TestCase):
             items, title = adult_backend.inspect_url(extracted[0]["url"])
 
         extract.assert_called_once_with(
-            extracted[0]["url"], cookies_from_browser="", cookies_file="")
+            extracted[0]["url"], cookies_from_browser="", cookies_file="",
+            fix_stream=None)
         self.assertEqual(title, "Example")
         self.assertEqual(items[0]["provider"], "thisvid")
         self.assertEqual(items[0]["duration_s"], 90)
@@ -785,6 +786,7 @@ class AdultProviderTests(unittest.TestCase):
             progress_cb=None, cancel_event=None,
             cookies_from_browser=None,
             cookies_file=None,
+            fix_stream=None,
         )
 
     def test_aebn_url_inspection_returns_movie_metadata(self):
@@ -872,6 +874,129 @@ class AdultProviderTests(unittest.TestCase):
         self.assertEqual(calls[1].path, "output")
         progress.assert_called_once_with(50, 100)
         self.assertEqual(provider.download_style, "standard")
+
+    def test_stream_fix_for_maps_each_provider(self):
+        for key in ("gayporno", "icegay", "machotube", "gayfuckporn"):
+            self.assertIs(
+                adult_backend.stream_fix_for(key),
+                adult_backend._tube_sign_info,
+            )
+        self.assertIs(
+            adult_backend.stream_fix_for("homo"),
+            adult_backend._hls_wrapper_fix,
+        )
+        for key in ("thisvid", "mymusclevideo", "pornhub", "gay0day"):
+            self.assertIsNone(adult_backend.stream_fix_for(key))
+
+    def test_tube_sign_info_leaves_fresh_keys_alone(self):
+        info = {
+            "url": "https://vcdn03.gayporno.fm/key=x,end=9999999999/video.mp4",
+            "formats": [{
+                "url": "https://vcdn03.gayporno.fm/key=x,end=9999999999/v.mp4",
+                "height": 720,
+                "format_id": "0",
+            }],
+        }
+        with mock.patch.object(adult_backend.requests, "post") as post:
+            adult_backend._tube_sign_info(info)
+        post.assert_not_called()
+
+    def test_tube_sign_info_resigns_stale_keys(self):
+        page = "<div class=\"js-tube-config\" " \
+               "data-v-update-url=\"https://u3.gayporno.fm/video\"></div>"
+        fresh = "https://vcdn03.gayporno.fm/key=new,end=9999999999/video.mp4"
+        info = {
+            "url": "https://vcdn03.gayporno.fm/key=old,end=1/video.mp4",
+            "webpage_url": "https://www.gayporno.fm/video_1.html",
+            "formats": [{
+                "url": "https://vcdn03.gayporno.fm/key=old,end=1/video.mp4",
+                "height": 720,
+                "format_id": "0",
+            }],
+        }
+
+        def fake_post(url, **kwargs):
+            self.assertEqual(
+                url, "https://u3.gayporno.fm/ah/sign")
+            self.assertEqual(kwargs["json"], {"urls": {"mp4": {"720": info["formats"][0]["url"]}}})
+            return _Response("", payload={"urls": {"mp4": fresh}})
+
+        adult_backend._tube_sign_endpoints.pop("www.gayporno.fm", None)
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response(page)) as get, mock.patch.object(
+                    adult_backend.requests, "post", side_effect=fake_post):
+            adult_backend._tube_sign_info(info)
+
+        get.assert_called_once()
+        self.assertEqual(info["formats"][0]["url"], fresh)
+        self.assertEqual(info["url"], fresh)
+
+    def test_tube_sign_endpoint_is_cached_per_host(self):
+        page = "<div class=\"js-tube-config\" " \
+               "data-v-update-url=\"https://u3.icegay.tv/video\"></div>"
+        adult_backend._tube_sign_endpoints.pop("www.icegay.tv", None)
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response(page)) as get:
+            self.assertEqual(
+                adult_backend._tube_sign_endpoint(
+                    "https://www.icegay.tv/movies/1/x"),
+                "https://u3.icegay.tv/ah/sign",
+            )
+        get.assert_called_once()
+        # A second call is served from the cache.
+        with mock.patch.object(adult_backend.requests, "get") as get:
+            self.assertEqual(
+                adult_backend._tube_sign_endpoint(
+                    "https://www.icegay.tv/movies/2/y"),
+                "https://u3.icegay.tv/ah/sign",
+            )
+        get.assert_not_called()
+
+    def test_best_hls_variant_picks_highest_bandwidth(self):
+        master = (
+            "#EXTM3U\n"
+            "#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=793606,RESOLUTION=854x480\n"
+            "https://cdn.example.com/480.m3u8\n"
+            "#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=1624248,RESOLUTION=1280x720\n"
+            "https://cdn.example.com/720.m3u8\n"
+        )
+        self.assertEqual(
+            adult_backend._best_hls_variant(master),
+            "https://cdn.example.com/720.m3u8",
+        )
+
+    def test_hls_wrapper_fix_resolves_master_playlist(self):
+        master = (
+            "#EXTM3U\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=793606,RESOLUTION=854x480\n"
+            "https://cdn.example.com/480.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=1624248,RESOLUTION=1280x720\n"
+            "https://cdn.example.com/720.m3u8\n"
+        )
+        info = {
+            "url": "https://homo.xxx/get_file/11/token/40000/40170/40170.mp4/",
+            "webpage_url": "https://homo.xxx/videos/40170/",
+            "formats": [{
+                "url": "https://homo.xxx/get_file/11/token/40000/40170/40170.mp4/",
+                "format_id": "0",
+            }],
+        }
+        with mock.patch.object(
+                adult_backend.requests, "get",
+                return_value=_Response(master)) as get:
+            replacement = adult_backend._hls_wrapper_fix(info)
+        self.assertEqual(replacement, "https://cdn.example.com/720.m3u8")
+        self.assertEqual(info["url"], replacement)
+        self.assertEqual(info["formats"][0]["url"], replacement)
+        get.assert_called_once()
+
+    def test_hls_wrapper_fix_ignores_non_playlist_urls(self):
+        info = {"url": "https://homo.xxx/videos/40170/", "formats": []}
+        with mock.patch.object(adult_backend.requests, "get") as get:
+            self.assertIsNone(adult_backend._hls_wrapper_fix(info))
+        get.assert_not_called()
 
 
 if __name__ == "__main__":

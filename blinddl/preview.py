@@ -195,12 +195,19 @@ def resolve_search_result(item, audio_only, config):
     url = _first_http_url(item.get("url"))
     if not url:
         raise RuntimeError("This result has no playable URL.")
+    # Adult tube sites on the signed-CDN network can serve an already-expired
+    # key from a cached page; pass the re-signing hook through so the stream
+    # the player opens is actually served (HTTP 403 otherwise).
+    fix_stream = None
+    if item.get("kind") == "adult":
+        fix_stream = adult_backend.stream_fix_for(item.get("provider"))
     return (
         ytdlp_backend.resolve_stream(
             url,
             audio_only=audio_only,
             cookies_from_browser=config.get("cookies_from_browser"),
             cookies_file=config.get("cookies_file"),
+            fix_stream=fix_stream,
         ),
         title,
     )

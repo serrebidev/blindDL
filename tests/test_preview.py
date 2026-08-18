@@ -40,7 +40,8 @@ class AppleMusicPreviewTests(unittest.TestCase):
                 item, audio_only=True, config={})
         resolve.assert_called_once_with(
             "https://music.apple.com/us/album/123?i=456",
-            audio_only=True, cookies_from_browser=None, cookies_file=None)
+            audio_only=True, cookies_from_browser=None, cookies_file=None,
+            fix_stream=None)
         self.assertEqual(stream, "https://youtube.example.com/stream")
 
     def test_musicdl_row_uses_song_info_download_url(self):
