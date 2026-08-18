@@ -91,7 +91,15 @@ def _self_test(output_path: str) -> int:
         # be listed in the spec's hiddenimports or every frozen build silently
         # loses VLC and falls back to wx.media.MediaCtrl. Check the module
         # itself on every platform; only the native runtime is optional.
-        module = __import__("vlc")
+        # python-vlc resolves its library at import time, so on a machine
+        # without VLC installed (e.g. the macOS builders) the import raises
+        # while still proving the module was frozen in.
+        try:
+            module = __import__("vlc")
+        except ModuleNotFoundError:
+            raise RuntimeError("python-vlc was not bundled") from None
+        except (OSError, NotImplementedError, SystemExit):
+            return "python-vlc bundled (native runtime resolved at runtime)"
         return "python-vlc " + getattr(module, "__version__", "bundled")
 
     check("vlc_module", vlc_module)
