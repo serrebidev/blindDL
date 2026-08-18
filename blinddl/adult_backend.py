@@ -148,7 +148,7 @@ _GAY_CATALOG_SEARCH = {
         r"https://www\.gayporno\.fm/[^/]+_\d+\.html",
     ),
     "gayfuckporn": (
-        "https://www.gayfuckporn.com/?search={}",
+        "https://www.gayfuckporn.com/s.php?search={}",
         r"https://www\.gayfuckporn\.com/[^/]+/\d+\.html",
     ),
     "icegay": (

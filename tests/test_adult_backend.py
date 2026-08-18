@@ -606,7 +606,7 @@ class AdultProviderTests(unittest.TestCase):
                          "https://gay0day.com/videos/167371/good-cop-bad-cop/"),
             "gayporno": ("https://www.gayporno.fm/search/cop",
                           "https://www.gayporno.fm/damon-phoenix_1880321.html"),
-            "gayfuckporn": ("https://www.gayfuckporn.com/?search=cop",
+            "gayfuckporn": ("https://www.gayfuckporn.com/s.php?search=cop",
                              "https://www.gayfuckporn.com/aaron-trainer/3050866.html"),
             "icegay": ("https://www.icegay.tv/search/cop",
                         "https://www.icegay.tv/movies/1435531/ballsy-cops"),
