@@ -21,7 +21,7 @@ import requests
 # Deezer itself defines Blowfish as the cipher for this stream format.
 from Crypto.Cipher import Blowfish  # nosec B413
 
-from . import search_kind, search_order
+from . import music_tags, search_kind, search_order
 from .config import app_data_dir
 from .search_kind import (
     ARTIST_SCOPE_ALBUMS,
@@ -235,23 +235,15 @@ def _fetch_deezer_lyrics(meta, arl):
 
 
 def _fetch_lrclib_lyrics(meta):
-    """Synced LRC text from LRCLIB, or None."""
-    try:
-        response = requests.get(
-            "https://lrclib.net/api/get",
-            params={"track_name": meta.get("SNG_TITLE", ""),
-                    "artist_name": meta.get("ART_NAME", ""),
-                    "album_name": meta.get("ALB_TITLE", ""),
-                    "duration": int(meta.get("DURATION") or 0)},
-            headers={"User-Agent": f"blindDL ({_USER_AGENT})"},
-            timeout=HTTP_TIMEOUT_S,
-        )
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        return data.get("syncedLyrics") or data.get("plainLyrics") or None
-    except (requests.RequestException, ValueError):
-        return None
+    """Synced LRC text from LRCLIB, or None.
+
+    The request itself lives with the rest of the tagging so that a Qobuz
+    download and a Deezer one ask the same service the same way; this only
+    puts Deezer's own field names in front of it.
+    """
+    return music_tags.fetch_lyrics(
+        meta.get("SNG_TITLE", ""), meta.get("ART_NAME", ""),
+        meta.get("ALB_TITLE", ""), meta.get("DURATION") or 0) or None
 
 
 def _fetch_lyrics(meta, arl):

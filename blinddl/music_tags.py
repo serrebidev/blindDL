@@ -36,7 +36,7 @@ from urllib.parse import quote
 
 import requests
 
-from . import APP_NAME, __version__
+from . import APP_NAME, __version__, music_match
 
 # MusicBrainz requires a real User-Agent naming the application and a way to
 # contact whoever runs it; anonymous clients get blocked.
@@ -58,6 +58,22 @@ _mb_last_call = 0.0
 _AUDIODB_KEY = "123"
 _AUDIODB_ROOT = "https://www.theaudiodb.com/api/v1/json"
 
+# Apple's public search endpoint. No key, no account, no scraping, and its
+# album data is better kept than TheAudioDB's, which is edited by hand. It
+# is asked after MusicBrainz because MusicBrainz is the one that knows
+# identity -- the ids a library files by -- while this knows what a record
+# was called, when it came out, what shelf it belongs on and what the sleeve
+# looks like, which is exactly what an ISRC lookup does not carry.
+_ITUNES_URL = "https://itunes.apple.com/search"
+# Below this the candidate is a different song that merely searches alike,
+# and its album and year would be worse than none.
+_ITUNES_MIN_SCORE = 70.0
+
+# Synced lyrics, by the same open service the Deezer downloader already
+# uses. Qobuz and the other music sites send none at all, so without this a
+# FreeQobuz download is the one file in a library with no words.
+_LRCLIB_URL = "https://lrclib.net/api/get"
+
 HTTP_TIMEOUT_S = 12
 # Cover art larger than this is not embedded. Some services answer with a
 # multi-megabyte master; a music file should not triple in size for artwork
@@ -73,6 +89,15 @@ TAG_FIELDS = (
     "composer", "copyright", "musicbrainz_trackid", "musicbrainz_albumid",
     "musicbrainz_artistid", "musicbrainz_releasegroupid",
 )
+
+# What each of the two catalogue lookups is actually able to contribute. A
+# lookup whose every field is already known, on a download that already has
+# its sleeve, is a round trip that can only confirm what is there -- and it
+# is paid once per file, on a queue that may be an entire album.
+_ITUNES_FILLS = ("album", "albumartist", "genre", "date", "tracknumber",
+                 "tracktotal", "discnumber", "disctotal")
+_AUDIODB_FILLS = ("genre", "date", "albumartist", "label",
+                  "musicbrainz_albumid")
 
 _YEAR_RE = re.compile(r"^(\d{4})")
 # A date a tag can carry: a year, optionally narrowed to month and day.
@@ -104,6 +129,11 @@ def _number(value):
     if not text.isdigit() or int(text) <= 0:
         return ""
     return str(int(text))
+
+
+def _missing(tags, fields):
+    """Whether any of *fields* is still blank."""
+    return any(not tags.get(field) for field in fields)
 
 
 def _fill(tags, field, value):
@@ -342,6 +372,82 @@ def _best_release(releases):
     return sorted(releases, key=rank)[0]
 
 
+def lookup_itunes(tags):
+    """Fill what Apple's catalogue knows. Returns a cover URL, or "".
+
+    Apple answers a plain search, so unlike an ISRC there is nothing to
+    guarantee the top hit is the same recording. The candidates are scored
+    the same way search results are, and a weak best is treated as no
+    answer: a wrong album and a wrong year are worse than neither.
+    """
+    title, artist = tags.get("title", ""), tags.get("artist", "")
+    if not title:
+        return ""
+    term = f"{artist} {title}".strip()
+    try:
+        response = requests.get(
+            _ITUNES_URL,
+            params={"term": term, "entity": "song", "limit": 5},
+            headers={"User-Agent": _USER_AGENT},
+            timeout=HTTP_TIMEOUT_S,
+        )
+        response.raise_for_status()
+        results = response.json().get("results") or []
+    except Exception:  # noqa: BLE001 - a lookup never fails a download
+        return ""
+
+    best, best_score = None, 0.0
+    for entry in results:
+        score = music_match.score_music(
+            term, _text(entry.get("trackName")),
+            _text(entry.get("artistName")),
+            _text(entry.get("collectionName")))
+        if score > best_score:
+            best, best_score = entry, score
+    if best is None or best_score < _ITUNES_MIN_SCORE:
+        return ""
+
+    _fill(tags, "album", best.get("collectionName"))
+    _fill(tags, "albumartist", best.get("collectionArtistName")
+          or best.get("artistName"))
+    _fill(tags, "genre", best.get("primaryGenreName"))
+    _fill(tags, "date", _text(best.get("releaseDate"))[:10])
+    _fill(tags, "tracknumber", _number(best.get("trackNumber")))
+    _fill(tags, "tracktotal", _number(best.get("trackCount")))
+    _fill(tags, "discnumber", _number(best.get("discNumber")))
+    _fill(tags, "disctotal", _number(best.get("discCount")))
+    # Apple hands back a 100-pixel thumbnail and serves any size from the
+    # same path; the same swap is how the Apple Music backend gets sleeve
+    # art worth embedding.
+    artwork = _text(best.get("artworkUrl100"))
+    return artwork.replace("100x100bb", "600x600bb")
+
+
+def fetch_lyrics(title, artist, album="", duration_s=0):
+    """Synced lyrics for one track from LRCLIB, or "".
+
+    The duration is sent because LRCLIB matches on it: two recordings of the
+    same song under the same name are told apart by how long they run, and
+    without it a studio track can come back with a live version's timings.
+    """
+    if not title:
+        return ""
+    try:
+        response = requests.get(
+            _LRCLIB_URL,
+            params={"track_name": title, "artist_name": artist,
+                    "album_name": album, "duration": int(duration_s or 0)},
+            headers={"User-Agent": _USER_AGENT},
+            timeout=HTTP_TIMEOUT_S,
+        )
+        if response.status_code != 200:
+            return ""
+        body = response.json()
+    except Exception:  # noqa: BLE001 - a lookup never fails a download
+        return ""
+    return _text(body.get("syncedLyrics") or body.get("plainLyrics"))
+
+
 def _audiodb_get(path, params):
     """One TheAudioDB call. None on any failure."""
     try:
@@ -467,6 +573,10 @@ def _write_vorbis(audio, tags, cover, cover_mime):
     if year and not audio.tags.get("YEAR"):
         audio.tags["YEAR"] = [year]
         written += 1
+    lyrics = tags.get("lyrics", "")
+    if lyrics and not audio.tags.get("LYRICS"):
+        audio.tags["LYRICS"] = [lyrics]
+        written += 1
     if cover and not getattr(audio, "pictures", None):
         picture = Picture()
         picture.type = 3
@@ -498,7 +608,7 @@ _ID3_TXXX = {
 
 
 def _write_id3(path, tags, cover, cover_mime):
-    from mutagen.id3 import APIC, ID3, TXXX, Frames
+    from mutagen.id3 import APIC, ID3, TXXX, USLT, Frames
 
     try:
         id3 = ID3(path)
@@ -526,6 +636,10 @@ def _write_id3(path, tags, cover, cover_mime):
         if not value or description in existing:
             continue
         id3.add(TXXX(encoding=3, desc=description, text=[value]))
+        written += 1
+    lyrics = tags.get("lyrics", "")
+    if lyrics and not id3.getall("USLT"):
+        id3.add(USLT(encoding=3, lang="eng", desc="", text=lyrics))
         written += 1
     if cover and not id3.getall("APIC"):
         id3.add(APIC(encoding=3, mime=cover_mime, type=3, desc="Cover",
@@ -570,6 +684,10 @@ def _write_mp4(audio, tags, cover, cover_mime):
             continue
         audio.tags[atom] = [MP4FreeForm(value.encode("utf-8"))]
         written += 1
+    lyrics = tags.get("lyrics", "")
+    if lyrics and not audio.tags.get("\xa9lyr"):
+        audio.tags["\xa9lyr"] = [lyrics]
+        written += 1
     if cover and not audio.tags.get("covr"):
         image_format = (MP4Cover.FORMAT_PNG if cover_mime == "image/png"
                         else MP4Cover.FORMAT_JPEG)
@@ -591,18 +709,46 @@ def tag_download(path, song_info, online=True):
     """
     if not path or not os.path.isfile(path):
         return 0
+
+    def attempt(call, default=""):
+        """Run one lookup. A service that is down contributes nothing."""
+        try:
+            return call()
+        except Exception:  # noqa: BLE001 - gap filling, not a requirement
+            return default
+
     try:
         tags, cover_url = tags_from_song_info(song_info)
+        # A site that sent its own words is believed over any lookup.
+        lyrics = _text(getattr(song_info, "lyric", ""))
         if online:
-            try:
-                lookup_musicbrainz(tags)
-            except Exception:  # noqa: BLE001 - gap filling, not a requirement
-                pass
-            try:
-                fallback_cover = lookup_theaudiodb(tags)
-            except Exception:  # noqa: BLE001 - gap filling, not a requirement
-                fallback_cover = ""
-            cover_url = cover_url or fallback_cover
+            # MusicBrainz first: it is the one that knows identity, and the
+            # ids it carries are what a library files by. Apple next, for
+            # the record itself -- what it was called, when it came out,
+            # what shelf it belongs on, what the sleeve looks like -- none
+            # of which an identifier lookup returns. TheAudioDB last, for
+            # whatever those two still left blank.
+            attempt(lambda: lookup_musicbrainz(tags))
+            # Each is asked on its own account and its artwork taken only
+            # if nothing better is already in hand. Chaining them behind the
+            # cover instead would mean a site that sent a sleeve -- which
+            # Qobuz always does -- silently skipped both lookups and kept
+            # the blank genre and album artist they exist to fill.
+            itunes_cover = ""
+            if _missing(tags, _ITUNES_FILLS) or not cover_url:
+                itunes_cover = attempt(lambda: lookup_itunes(tags))
+            audiodb_cover = ""
+            if _missing(tags, _AUDIODB_FILLS) or not (cover_url
+                                                      or itunes_cover):
+                audiodb_cover = attempt(lambda: lookup_theaudiodb(tags))
+            cover_url = cover_url or itunes_cover or audiodb_cover
+            if not lyrics:
+                lyrics = attempt(lambda: fetch_lyrics(
+                    tags.get("title", ""), tags.get("artist", ""),
+                    tags.get("album", ""),
+                    getattr(song_info, "duration_s", 0) or 0))
+        if lyrics:
+            tags["lyrics"] = lyrics
         cover, cover_mime = fetch_cover(cover_url) if cover_url else (None, "")
         return write_tags(path, tags, cover, cover_mime or "image/jpeg")
     except Exception:  # noqa: BLE001 - a tag is never worth a lost download

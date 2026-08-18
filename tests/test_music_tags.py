@@ -383,6 +383,128 @@ class MusicBrainzTests(unittest.TestCase):
         self.assertIn("github.com/serrebidev/blindDL", music_tags._USER_AGENT)
 
 
+class ITunesTests(unittest.TestCase):
+    ANSWER = {"results": [{
+        "trackName": "A Title",
+        "artistName": "A Performer",
+        "collectionName": "An Album",
+        "collectionArtistName": "An Album Artist",
+        "primaryGenreName": "Electronic",
+        "releaseDate": "2013-05-17T07:00:00Z",
+        "trackNumber": 3, "trackCount": 13,
+        "discNumber": 1, "discCount": 2,
+        "artworkUrl100": "https://example.invalid/a/100x100bb.jpg",
+    }]}
+
+    def _response(self, body):
+        return mock.Mock(raise_for_status=lambda: None, json=lambda: body)
+
+    def test_apple_fills_the_record_an_identifier_lookup_does_not(self):
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=self._response(self.ANSWER)):
+            tags = {"title": "A Title", "artist": "A Performer"}
+            cover = music_tags.lookup_itunes(tags)
+        self.assertEqual(tags["album"], "An Album")
+        self.assertEqual(tags["albumartist"], "An Album Artist")
+        self.assertEqual(tags["genre"], "Electronic")
+        self.assertEqual(tags["date"], "2013-05-17")
+        self.assertEqual(tags["tracknumber"], "3")
+        self.assertEqual(tags["tracktotal"], "13")
+        self.assertEqual(tags["disctotal"], "2")
+        # The thumbnail Apple returns is upgraded to a size worth embedding.
+        self.assertEqual(cover, "https://example.invalid/a/600x600bb.jpg")
+
+    def test_a_different_song_that_merely_searches_alike_is_refused(self):
+        answer = {"results": [{
+            "trackName": "Something Else Entirely",
+            "artistName": "A Different Band",
+            "collectionName": "Another Record",
+            "primaryGenreName": "Metal",
+        }]}
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=self._response(answer)):
+            tags = {"title": "A Title", "artist": "A Performer"}
+            cover = music_tags.lookup_itunes(tags)
+        self.assertEqual(cover, "")
+        self.assertNotIn("genre", tags)
+        self.assertNotIn("album", tags)
+
+    def test_the_best_of_several_candidates_wins(self):
+        answer = {"results": [
+            {"trackName": "Wrong Song", "artistName": "Someone Else",
+             "collectionName": "Wrong Record"},
+            self.ANSWER["results"][0],
+        ]}
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=self._response(answer)):
+            tags = {"title": "A Title", "artist": "A Performer"}
+            music_tags.lookup_itunes(tags)
+        self.assertEqual(tags["album"], "An Album")
+
+    def test_a_service_that_is_down_adds_nothing(self):
+        with mock.patch.object(music_tags.requests, "get",
+                               side_effect=OSError("no route")):
+            tags = {"title": "A Title", "artist": "A Performer"}
+            self.assertEqual(music_tags.lookup_itunes(tags), "")
+        self.assertEqual(tags, {"title": "A Title", "artist": "A Performer"})
+
+
+class LyricsTests(unittest.TestCase):
+    # Stand-in text: the shape of an LRC line, with no song's words in it.
+    LRC = "[00:01.00] first line\n[00:05.00] second line"
+
+    def test_synced_words_are_preferred_over_plain_ones(self):
+        body = {"syncedLyrics": self.LRC, "plainLyrics": "first line"}
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=mock.Mock(status_code=200,
+                                                      json=lambda: body)):
+            self.assertEqual(
+                music_tags.fetch_lyrics("A Title", "A Performer"), self.LRC)
+
+    def test_the_running_time_is_sent_so_the_right_take_is_matched(self):
+        """Two recordings of one song are told apart by how long they run."""
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=mock.Mock(
+                                   status_code=200,
+                                   json=lambda: {})) as get:
+            music_tags.fetch_lyrics("A Title", "A Performer", "An Album", 245)
+        self.assertEqual(get.call_args[1]["params"]["duration"], 245)
+
+    def test_a_track_with_no_words_on_file_is_not_an_error(self):
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=mock.Mock(status_code=404)):
+            self.assertEqual(music_tags.fetch_lyrics("A Title", "A"), "")
+
+    def test_words_reach_a_flac_and_an_mp3(self):
+        directory = tempfile.mkdtemp(prefix="blinddl-lyrics-")
+        flac = _flac_path(directory)
+        music_tags.write_tags(flac, {"title": "A Title", "lyrics": self.LRC})
+        self.assertEqual(FLAC(flac)["lyrics"], [self.LRC])
+
+        mp3 = _mp3_path(directory)
+        music_tags.write_tags(mp3, {"title": "A Title", "lyrics": self.LRC})
+        self.assertEqual(ID3(mp3).getall("USLT")[0].text, self.LRC)
+
+    def test_deezer_asks_the_same_service_the_same_way(self):
+        from blinddl import deezer_backend
+
+        with mock.patch.object(music_tags, "fetch_lyrics",
+                               return_value=self.LRC) as fetch:
+            result = deezer_backend._fetch_lrclib_lyrics({
+                "SNG_TITLE": "A Title", "ART_NAME": "A Performer",
+                "ALB_TITLE": "An Album", "DURATION": 245})
+        self.assertEqual(result, self.LRC)
+        self.assertEqual(fetch.call_args[0],
+                         ("A Title", "A Performer", "An Album", 245))
+
+    def test_nothing_found_stays_none_for_deezer(self):
+        from blinddl import deezer_backend
+
+        with mock.patch.object(music_tags, "fetch_lyrics", return_value=""):
+            self.assertIsNone(
+                deezer_backend._fetch_lrclib_lyrics({"SNG_TITLE": "A"}))
+
+
 class TheAudioDBTests(unittest.TestCase):
     def test_an_album_fills_genre_year_and_artwork(self):
         answer = {"album": [{"strGenre": "House",
@@ -470,6 +592,106 @@ class TagDownloadTests(unittest.TestCase):
         saved = FLAC(path)
         self.assertEqual(saved["albumartist"], ["An Album Artist"])
         self.assertEqual(saved["tracknumber"], ["3"])
+
+    def test_a_sleeve_from_the_site_does_not_skip_the_other_lookups(self):
+        """The thin sources are the ones that need Apple: they send a title,
+        an artist and a picture, and nothing else. Hanging the lookups off
+        whether a cover was still wanted skipped them for exactly those."""
+        path = _flac_path(self.dir)
+        song = _SongInfo(song_name="A Title", singers="A Performer",
+                         cover_url="https://example.invalid/site.jpg")
+
+        def add_the_record(tags):
+            tags["album"] = "From Apple"
+            tags["genre"] = "Electronic"
+            return "https://example.invalid/apple.jpg"
+
+        with mock.patch.object(music_tags, "lookup_musicbrainz"), \
+                mock.patch.object(music_tags, "lookup_itunes",
+                                  side_effect=add_the_record) as itunes, \
+                mock.patch.object(music_tags, "fetch_lyrics",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "fetch_cover",
+                                  return_value=(None, "")) as cover:
+            music_tags.tag_download(path, song)
+
+        itunes.assert_called_once()
+        self.assertEqual(FLAC(path)["album"], ["From Apple"])
+        # ...and the site's own sleeve is still the one embedded.
+        self.assertEqual(cover.call_args[0][0],
+                         "https://example.invalid/site.jpg")
+
+    def test_a_row_that_already_knows_everything_asks_no_one(self):
+        """A Qobuz row arrives complete, so both catalogue lookups would be
+        round trips that can only confirm what is already on the file."""
+        path = _flac_path(self.dir)
+        song = _SongInfo(song_name="A Title", raw_data={"search": QOBUZ_ITEM})
+
+        def fill_the_rest(tags):
+            for field in music_tags._AUDIODB_FILLS:
+                tags[field] = tags.get(field) or "known"
+
+        with mock.patch.object(music_tags, "lookup_musicbrainz",
+                               side_effect=fill_the_rest), \
+                mock.patch.object(music_tags, "lookup_itunes") as itunes, \
+                mock.patch.object(music_tags, "lookup_theaudiodb") as adb, \
+                mock.patch.object(music_tags, "fetch_lyrics",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "fetch_cover",
+                                  return_value=(None, "")):
+            music_tags.tag_download(path, song)
+
+        itunes.assert_not_called()
+        adb.assert_not_called()
+
+    def test_a_thin_row_is_taken_to_both_catalogues(self):
+        """zvu4it and the like send a title and an artist and no more."""
+        path = _flac_path(self.dir)
+        song = _SongInfo(song_name="A Title", singers="A Performer")
+        with mock.patch.object(music_tags, "lookup_musicbrainz"), \
+                mock.patch.object(music_tags, "lookup_itunes",
+                                  return_value="") as itunes, \
+                mock.patch.object(music_tags, "lookup_theaudiodb",
+                                  return_value="") as adb, \
+                mock.patch.object(music_tags, "fetch_lyrics",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "fetch_cover",
+                                  return_value=(None, "")):
+            music_tags.tag_download(path, song)
+        itunes.assert_called_once()
+        adb.assert_called_once()
+
+    def test_words_are_looked_up_and_written(self):
+        path = _flac_path(self.dir)
+        song = _SongInfo(song_name="A Title", raw_data={"search": QOBUZ_ITEM})
+        with mock.patch.object(music_tags, "lookup_musicbrainz"), \
+                mock.patch.object(music_tags, "lookup_itunes",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "lookup_theaudiodb",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "fetch_lyrics",
+                                  return_value="[00:01.00] a line") as words, \
+                mock.patch.object(music_tags, "fetch_cover",
+                                  return_value=(None, "")):
+            music_tags.tag_download(path, song)
+        words.assert_called_once()
+        self.assertEqual(FLAC(path)["lyrics"], ["[00:01.00] a line"])
+
+    def test_words_the_site_sent_are_not_looked_up_again(self):
+        path = _flac_path(self.dir)
+        song = _SongInfo(song_name="A Title", raw_data={"search": QOBUZ_ITEM})
+        song.lyric = "[00:02.00] the site's own"
+        with mock.patch.object(music_tags, "lookup_musicbrainz"), \
+                mock.patch.object(music_tags, "lookup_itunes",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "lookup_theaudiodb",
+                                  return_value=""), \
+                mock.patch.object(music_tags, "fetch_lyrics") as words, \
+                mock.patch.object(music_tags, "fetch_cover",
+                                  return_value=(None, "")):
+            music_tags.tag_download(path, song)
+        words.assert_not_called()
+        self.assertEqual(FLAC(path)["lyrics"], ["[00:02.00] the site's own"])
 
     def test_the_lookup_can_be_switched_off(self):
         path = _flac_path(self.dir)
