@@ -171,6 +171,15 @@ if importlib.util.find_spec("libtorrent") is None:
     )
 hiddenimports.append("libtorrent")
 
+# python-vlc is loaded through importlib.import_module("vlc") in
+# blinddl/gui/media_player.py so the app can retry after a background WinGet
+# install. PyInstaller cannot see that dynamic import, and the module was
+# silently dropped from every frozen build once the static "import vlc" was
+# replaced -- the app then fell back to wx.media.MediaCtrl, whose autoplay
+# is unreliable for stream URLs. Bundle it explicitly.
+if importlib.util.find_spec("vlc") is not None:
+    hiddenimports.append("vlc")
+
 # Chromium app-bound cookie decryption (blinddl/app_bound.py) reaches into
 # win32crypt/win32security for DPAPI and win32com.shell for the elevated
 # helper launcher. Most of those imports are lazy, so collect them explicitly

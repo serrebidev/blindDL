@@ -443,9 +443,8 @@ class LibraryPanel(wx.Panel):
         for child in self.dirs.get(norm, []):
             self._append_folder(item, child)
 
-    @staticmethod
-    def _selected_norm_for(item):
-        return str(item.GetItemData() or "")
+    def _selected_norm_for(self, item):
+        return str(self.tree.GetItemData(item) or "")
 
     def on_tree_expanding(self, event):
         self._ensure_children_loaded(event.GetItem())

@@ -85,6 +85,17 @@ def _self_test(output_path: str) -> int:
 
     check("soulseek", soulseek_runtime)
 
+    def vlc_module():
+        # python-vlc is loaded through importlib.import_module("vlc") in
+        # blinddl/gui/media_player.py, which PyInstaller cannot see. It must
+        # be listed in the spec's hiddenimports or every frozen build silently
+        # loses VLC and falls back to wx.media.MediaCtrl. Check the module
+        # itself on every platform; only the native runtime is optional.
+        module = __import__("vlc")
+        return "python-vlc " + getattr(module, "__version__", "bundled")
+
+    check("vlc_module", vlc_module)
+
     frozen_root = Path(getattr(sys, "_MEIPASS", ""))
     bundled_vlc = (
         (frozen_root / "libvlc.dll").is_file()
