@@ -747,7 +747,7 @@ def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
             raise RuntimeError("Apple Music produced an empty file.")
         _write_tags(out_path, item)
         _write_lrc(out_path, item)
-        return
+        return out_path
     # MP3 output: decrypt and tag a temporary M4A, then re-encode it.
     tmp_dir = tempfile.mkdtemp(prefix="blinddl-am-out-")
     m4a_path = os.path.join(tmp_dir, "track.m4a")

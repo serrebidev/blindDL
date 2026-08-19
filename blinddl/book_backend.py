@@ -341,7 +341,7 @@ def _ia_query(query, rows, timeout, order=ORDER_RELEVANCE):
 
 def search_archive(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search archive.org's text collection for downloadable books."""
-    escaped = re.sub(r'["\\]', " ", query).strip()
+    escaped = re.sub(r'["\\()]', " ", query).strip()
     docs = _ia_query(f'title:("{escaped}") AND mediatype:(texts)',
                      SEARCH_ROWS, timeout, order)
     if len(docs) < 5:

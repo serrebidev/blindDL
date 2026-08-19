@@ -706,10 +706,22 @@ def _sorted_results(items, mode, engine=None, order=None):
 
         sort_key = site_sort_key
     elif mode == SORT_ARTIST:
+        # "Artist / channel" reads a different field per engine: books and
+        # audiobooks keep it in "author", Archive in "creator", Soulseek in
+        # the peer's "username", and music/YouTube/torrents in "artist" then
+        # "uploader".
+        if _is_soulseek_engine(engine):
+            names = ("username",)
+        elif _is_book_engine(engine) or engine == ENGINE_AUDIOBOOKS:
+            names = ("author",)
+        elif _is_archive_engine(engine):
+            names = ("creator",)
+        else:
+            names = ("artist", "uploader")
 
         def artist_sort_key(pair):
             return (
-                text(pair[1], "artist", "uploader"),
+                text(pair[1], *names),
                 text(pair[1], "title"),
                 pair[0],
             )
@@ -2290,9 +2302,6 @@ class SearchPanel(wx.Panel):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
             self.on_copy_url(event)
             return
-        if event.GetKeyCode() == ord("O") and event.ControlDown():  # Ctrl+O
-            self.on_open_browser(event)
-            return
         event.Skip()
 
     def on_copy_url(self, event):
@@ -2394,7 +2403,7 @@ class SearchPanel(wx.Panel):
         ):
             action.Enable(soulseek_item is not None)
         copy_url = menu.Append(wx.ID_ANY, "Copy &URL\tCtrl+C")
-        open_browser = menu.Append(wx.ID_ANY, "&Open in browser\tCtrl+O")
+        open_browser = menu.Append(wx.ID_ANY, "&Open in browser")
         menu.AppendSeparator()
         select_all = menu.Append(wx.ID_ANY, "Select &all")
         clear = menu.Append(wx.ID_ANY, "&Clear selection")

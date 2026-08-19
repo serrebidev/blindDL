@@ -128,15 +128,20 @@ class SubscriptionStore:
         self.save()
 
     def set_enabled(self, sub_id, enabled):
-        sub = self.get(sub_id)
+        with self._lock:
+            sub = next((s for s in self.subs if s["id"] == sub_id), None)
+            if sub is not None:
+                sub["enabled"] = enabled
         if sub is not None:
-            sub["enabled"] = enabled
             self.save()
 
     def set_order(self, sub_id, order):
-        sub = self.get(sub_id)
+        normalized = search_order.normalize(order)
+        with self._lock:
+            sub = next((s for s in self.subs if s["id"] == sub_id), None)
+            if sub is not None:
+                sub["order"] = normalized
         if sub is not None:
-            sub["order"] = search_order.normalize(order)
             self.save()
 
     def get(self, sub_id):

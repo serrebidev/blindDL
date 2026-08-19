@@ -141,7 +141,13 @@ def _login(arl):
         raise RuntimeError("Deezer did not hand out streaming credentials "
                            "for this account.")
     with _sessions_lock:
-        _sessions[arl] = session
+        # Two workers with the same ARL can both miss the cache and build a
+        # session. Keep the first one and close the loser's HTTP client, so a
+        # race neither overwrites a live session nor leaks its connection.
+        existing = _sessions.setdefault(arl, session)
+        if existing is not session:
+            session["http"].close()
+            return existing
     return session
 
 
@@ -904,11 +910,24 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None):
     dest = os.path.join(out_dir, artist, f"{artist} - {title}.{ext}")
 
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    with requests.get(source["url"], stream=True,
-                      headers={"User-Agent": _USER_AGENT},
-                      timeout=HTTP_TIMEOUT_S) as stream:
-        stream.raise_for_status()
-        _decrypt_stream(stream, track_id, dest, progress_cb, cancel_event)
+    # Decrypt into a staging file and move it into place only when complete,
+    # exactly as playback does: a dropped connection must not leave a
+    # truncated file at the final path for the library to mistake for a
+    # finished download.
+    partial = dest + ".part"
+    try:
+        with requests.get(source["url"], stream=True,
+                          headers={"User-Agent": _USER_AGENT},
+                          timeout=HTTP_TIMEOUT_S) as stream:
+            stream.raise_for_status()
+            _decrypt_stream(stream, track_id, partial, progress_cb, cancel_event)
+        os.replace(partial, dest)
+    except BaseException:
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        raise
 
     cover = _cover_bytes(meta.get("ALB_PICTURE"))
     lyrics = _fetch_lyrics(meta, arl) if config["sideb_lyrics"] else None

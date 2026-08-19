@@ -790,6 +790,9 @@ class TorrentEngine:
         with self._lock:
             self._torrents.clear()
             self._uploads_cache = []
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
 
 
 def _needs_resume(torrent):
@@ -943,7 +946,11 @@ def download(item, out_dir, config, progress_cb=None, cancel_event=None,
             break
         time.sleep(POLL_SECONDS)
 
-    torrent.finished_at = time.time()
+    # Only stamp the finish time the first time it completes. Re-downloading a
+    # torrent that is already seeding (a known hash returns the same _Torrent)
+    # must not restart its ratio and time seeding limits.
+    if not torrent.finished_at:
+        torrent.finished_at = time.time()
     current.request_resume_save()
     return save_path
 

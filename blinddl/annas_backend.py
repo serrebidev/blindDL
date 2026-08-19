@@ -179,6 +179,7 @@ def search(query, timeout=HTTP_TIMEOUT_S, order=None):
         params["sort"] = sort
 
     last_error = None
+    answered = False
     for domain in domains:
         try:
             response = _get(f"https://{domain}/search", params=params,
@@ -189,12 +190,17 @@ def search(query, timeout=HTTP_TIMEOUT_S, order=None):
         if response.status_code != 200:
             last_error = RuntimeError(f"{domain} answered {response.status_code}")
             continue
+        answered = True
         rows = _parse_rows(response.text, domain)
         if rows:
             _working_domain = domain
             return rows[:SEARCH_ROWS]
-        last_error = last_error or RuntimeError(f"{domain} returned no results")
-    if last_error is not None and not isinstance(last_error, RuntimeError):
+        last_error = RuntimeError(f"{domain} returned no results")
+    # A mirror that answered 200 (even with no rows) means the search worked
+    # and simply found nothing, so an earlier network error must not be
+    # reported instead. Only an outright failure of every mirror is
+    # AnnasUnavailable.
+    if not answered and last_error is not None:
         raise AnnasUnavailable(str(last_error))
     return []
 

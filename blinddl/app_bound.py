@@ -135,14 +135,26 @@ class _SystemImpersonation:
             )
         except BaseException:
             win32api.CloseHandle(process)
+            self._process = None
             raise
         try:
-            self._duplicate = win32security.DuplicateToken(
-                system_token, win32security.SecurityImpersonation
-            )
-        finally:
-            win32api.CloseHandle(system_token)
-        win32security.SetThreadToken(None, self._duplicate)
+            try:
+                self._duplicate = win32security.DuplicateToken(
+                    system_token, win32security.SecurityImpersonation
+                )
+            finally:
+                win32api.CloseHandle(system_token)
+            win32security.SetThreadToken(None, self._duplicate)
+        except BaseException:
+            # __exit__ never runs when __enter__ raises, so a failure after the
+            # lsass handle was opened must release both handles here.
+            if getattr(self, "_duplicate", None):
+                win32api.CloseHandle(self._duplicate)
+            if getattr(self, "_process", None):
+                win32api.CloseHandle(self._process)
+            self._duplicate = None
+            self._process = None
+            raise
         return self
 
     def __exit__(self, _exc_type, _exc, _tb):

@@ -125,6 +125,20 @@ def playback_status(state, title, current, length):
 class MediaPlayerPanel(wx.Panel):
     """VLC-backed playback with a native wx media fallback."""
 
+    @property
+    def play_request(self):
+        return self._play_request
+
+    @play_request.setter
+    def play_request(self, value):
+        # Panels attach their play_request after construction, by which point
+        # the controls have already been disabled with nothing loaded. Re-run
+        # the enablement so a newly attached hook turns Play back on.
+        self._play_request = value
+        button = getattr(self, "play_btn", None)
+        if button is not None:
+            self._enable_controls(self._loaded)
+
     def __init__(self, parent, frame, video_height=180):
         super().__init__(parent)
         self.frame = frame
@@ -132,7 +146,7 @@ class MediaPlayerPanel(wx.Panel):
         # yet, so the Play button starts the selected result instead of
         # answering that there is nothing to play. Returns True when it
         # took the request on.
-        self.play_request = None
+        self._play_request = None
         self._title = ""
         self._loaded = False
         self._updating_position = False

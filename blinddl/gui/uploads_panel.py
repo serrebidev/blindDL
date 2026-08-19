@@ -415,3 +415,5 @@ class UploadsPanel(wx.Panel):
             soulseek_backend.stop_upload(key)
         except Exception as exc:  # noqa: BLE001 - shown on status bar
             wx.CallAfter(self.frame.announce, f"Could not stop Soulseek upload: {exc}")
+        finally:
+            wx.CallAfter(self.refresh)

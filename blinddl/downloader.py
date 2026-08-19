@@ -64,6 +64,10 @@ ADD_ALREADY_ACTIVE = "already-active"
 SOULSEEK_RETRY_ATTEMPTS = 5
 SOULSEEK_RETRY_BASE_DELAY = 2.0
 SOULSEEK_RETRY_MAX_DELAY = 30.0
+# A settings change re-issues the transfer against a restarted client, which
+# should settle on the first try. If it never settles, giving up beats a
+# tight reconnect loop.
+SOULSEEK_SETTINGS_RETRY_ATTEMPTS = 3
 
 
 def addition_summary(items, titles=()):
@@ -549,10 +553,13 @@ class DownloadQueue:
         item.cancel_event.set()
         item.pause_requested = False
         item.pause_event.clear()
-        if item.status in (STATUS_QUEUED, STATUS_PAUSED):
-            item.status = STATUS_CANCELLED
-            self._save_state()
-            self._notify(item)
+        with self._cond:
+            if item.status in (STATUS_QUEUED, STATUS_PAUSED):
+                item.status = STATUS_CANCELLED
+            else:
+                return
+        self._save_state()
+        self._notify(item)
 
     def pause(self, item_id):
         """Pause a queued or cancellable running download for later resume."""
@@ -1240,6 +1247,7 @@ class DownloadQueue:
             self._notify(item, throttle=True)
 
         attempt = 0
+        settings_attempts = 0
         while True:
             try:
                 result = soulseek_backend.download(
@@ -1249,12 +1257,20 @@ class DownloadQueue:
             except soulseek_backend.SoulseekSettingsChanged:
                 if item.cancel_event.is_set():
                     raise soulseek_backend.SoulseekDownloadCancelled() from None
+                settings_attempts += 1
+                if settings_attempts > SOULSEEK_SETTINGS_RETRY_ATTEMPTS:
+                    raise soulseek_backend.SoulseekError(
+                        "Soulseek settings kept changing; the transfer could "
+                        "not be reconnected."
+                    ) from None
                 # Re-issuing the same peer/path lets aioslsk resume its cached
                 # partial transfer after the settings-driven client restart.
                 item.speed = "Soulseek settings changed; reconnecting automatically"
                 item.eta = ""
                 item.error = ""
                 self._notify(item)
+                if item.cancel_event.wait(1.0):
+                    raise soulseek_backend.SoulseekDownloadCancelled() from None
             except soulseek_backend.SoulseekTransientError as exc:
                 if item.cancel_event.is_set():
                     raise soulseek_backend.SoulseekDownloadCancelled() from None

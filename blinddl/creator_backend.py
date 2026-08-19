@@ -555,9 +555,10 @@ def _cookie_header(cookies):
 
 
 def _download_url(url, filename, out_dir, headers, progress_cb, cancel_event):
-    if ".mpd" in urlparse(url).path.casefold():
+    lowered = str(url).casefold()
+    if ".mpd" in lowered:
         raise RuntimeError("DASH-protected media is not supported.")
-    if ".m3u8" in urlparse(url).path.casefold():
+    if ".m3u8" in lowered:
         ytdlp_backend.download(
             url, out_dir, audio_only=False, progress_cb=progress_cb,
             cancel_event=cancel_event, http_headers=headers,
@@ -587,6 +588,9 @@ def _download_url(url, filename, out_dir, headers, progress_cb, cancel_event):
                     received += len(chunk)
                     if progress_cb is not None:
                         progress_cb(received, total)
+        if total and received != total:
+            raise RuntimeError(
+                "The download ended before the whole file arrived.")
         os.replace(partial, destination)
     except Exception:
         try:

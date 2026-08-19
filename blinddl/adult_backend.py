@@ -1112,17 +1112,20 @@ def _inspect_aebn(url):
     })
     try:
         movie = Movie(url, session)
+        performers = ", ".join(str(name) for name in movie.performers or () if name)
+        title = movie.title
+        movie_id = movie.movie_id
+        duration = movie.total_duration_seconds
     finally:
         session.close()
-    performers = ", ".join(str(name) for name in movie.performers or () if name)
     item = {
-        "id": f"adult:aebn:{movie.movie_id}",
+        "id": f"adult:aebn:{movie_id}",
         "kind": "adult",
         "provider": "aebn",
-        "title": movie.title,
+        "title": title,
         "artist": performers,
         "source": "AEBN",
-        "duration_s": movie.total_duration_seconds,
+        "duration_s": duration,
         "file_size": "",
         "url": url,
         "adult_category": category,

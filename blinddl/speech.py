@@ -350,6 +350,11 @@ def _process_running(names):
     wanted = {name.lower() for name in names}
     try:
         kernel32 = ctypes.windll.kernel32
+        # Without an explicit restype, ctypes truncates the returned 64-bit
+        # HANDLE to 32 bits, which fails enumeration on 64-bit Windows.
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.CreateToolhelp32Snapshot.argtypes = [
+            wintypes.DWORD, wintypes.DWORD]
         snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
         if snapshot in (0, -1, ctypes.c_void_p(-1).value):
             return False
@@ -400,9 +405,12 @@ def _speak_macos(text, interrupt=False):
         if not say:
             return False
         try:
-            if (interrupt and _say_process is not None
-                    and _say_process.poll() is None):
-                _say_process.terminate()
+            previous = _say_process
+            if previous is not None and previous.poll() is None:
+                if interrupt:
+                    previous.terminate()
+            # poll() above also reaps a finished `say`, so announcements never
+            # accumulate zombie processes.
             _say_process = subprocess.Popen(  # noqa: S603 - fixed system binary
                 [say, "--", text],
                 stdin=subprocess.DEVNULL,

@@ -478,8 +478,14 @@ def install_app_update(update, package_path, log=lambda _line: None):
     if suffixes.endswith(".deb"):
         if shutil.which("pkexec"):
             log("Starting the system package installer...")
-            subprocess.Popen(["pkexec", "apt-get", "install", "-y",
-                              str(package_path)])
+            # apt-get takes package names, not paths; a leading ./ is what
+            # makes it install a local .deb (resolving dependencies) rather
+            # than answer "Unable to locate package".
+            subprocess.Popen(
+                ["pkexec", "apt-get", "install", "-y",
+                 f"./{package_path.name}"],
+                cwd=package_path.parent,
+            )
             return True
         log("Opening the package in your system installer...")
         subprocess.Popen(["xdg-open", str(package_path)])

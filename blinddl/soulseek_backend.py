@@ -167,7 +167,13 @@ async def _shared_file_count(username: str) -> int | None:
     except Exception:  # noqa: BLE001 - a lookup failure must not block uploads
         logger.debug("could not read Soulseek stats for %s", username, exc_info=True)
         return None
-    count = int(getattr(stats, "shared_file_count", 0) or 0)
+    raw = getattr(stats, "shared_file_count", None)
+    if raw is None:
+        # The field was absent rather than zero. Treat that as "unknown", not
+        # "shares nothing": a peer should not be refused over an incomplete
+        # answer.
+        return None
+    count = int(raw or 0)
     _leecher_counts[key] = (now, count)
     return count
 
@@ -513,6 +519,14 @@ def _normal_path(value: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(value)))
 
 
+def _as_int(value, default):
+    """A config value read as an int, falling back on anything non-numeric."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _config_snapshot(config) -> dict[str, Any]:
     """Copy only backend settings so later Config mutations cannot race us."""
     download_dir = str(config.get("download_dir", "") or "").strip()
@@ -571,14 +585,14 @@ def _config_snapshot(config) -> dict[str, Any]:
         "download_dir": os.path.abspath(download_dir) if download_dir else "",
         "share_library": bool(config.get("soulseek_share_library", True)),
         "shared_folders": extra_folders,
-        "listen_port": int(config.get("soulseek_listen_port", 60000)),
-        "obfuscated_port": int(config.get("soulseek_obfuscated_port", 60001)),
+        "listen_port": _as_int(config.get("soulseek_listen_port"), 60000),
+        "obfuscated_port": _as_int(config.get("soulseek_obfuscated_port"), 60001),
         "upnp": bool(config.get("soulseek_upnp", True)),
         "obfuscate": bool(config.get("soulseek_obfuscate", False)),
-        "upload_slots": int(config.get("soulseek_upload_slots", 2)),
-        "upload_kib": int(config.get("soulseek_max_upload_kib", 0)),
-        "download_kib": int(config.get("soulseek_max_download_kib", 0)),
-        "max_results": int(config.get("soulseek_max_results", 500)),
+        "upload_slots": _as_int(config.get("soulseek_upload_slots"), 2),
+        "upload_kib": _as_int(config.get("soulseek_max_upload_kib"), 0),
+        "download_kib": _as_int(config.get("soulseek_max_download_kib"), 0),
+        "max_results": _as_int(config.get("soulseek_max_results"), 500),
         "block_leechers": bool(config.get("soulseek_block_leechers", True)),
         "rooms": rooms,
         "private_rooms": private_rooms,
@@ -1282,6 +1296,7 @@ class _Service:
         updated["friends"] = sorted(friends, key=str.casefold)
         self._active_signature = _signature(updated)
         self._set_friends(updated["friends"], client)
+        _set_leecher_guard(updated)
         return self.friends_snapshot()
 
     async def _change_priority(self, snapshot, username, add):
@@ -1298,6 +1313,7 @@ class _Service:
         updated = dict(snapshot)
         updated["priority_users"] = sorted(priority, key=str.casefold)
         self._active_signature = _signature(updated)
+        _set_leecher_guard(updated)
         return updated["priority_users"]
 
     def change_priority(self, username, config, add, timeout: float = 30.0):
@@ -1537,12 +1553,21 @@ class _Service:
                     if stop_event is not None and stop_event.is_set():
                         break
                     await asyncio.sleep(0.1)
-                items = [
-                    _result_item(result, file_data)
-                    for result in request.results
-                    for file_data in result.shared_items
-                    if _file_extension(file_data) in extensions
-                ]
+                items = []
+                seen = set()
+                for result in request.results:
+                    for file_data in result.shared_items:
+                        if _file_extension(file_data) not in extensions:
+                            continue
+                        item = _result_item(result, file_data)
+                        key = (
+                            item["username"].casefold(),
+                            item["remote_path"].casefold(),
+                        )
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        items.append(item)
                 items.sort(key=sort_key)
                 return items[: max(1, snapshot["max_results"])]
             finally:

@@ -216,7 +216,7 @@ def _from_audiobook(book):
 
 def search_archive(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     """Search the Internet Archive's spoken-word collections."""
-    escaped = re.sub(r'["\\]', " ", query).strip()
+    escaped = re.sub(r'["\\()]', " ", query).strip()
     collections = " OR ".join(f"collection:({name})"
                               for name in IA_AUDIOBOOK_COLLECTIONS)
     response = _http().get(
@@ -423,7 +423,7 @@ def resolve_chapters(item):
         extension = os.path.splitext(name)[1].lower()
         if extension not in AUDIO_EXTENSIONS:
             extension = ".mp3"
-        chapters.append((str(url), f"{index:03d}{extension}"))
+        chapters.append((str(url), name or f"{index:03d}{extension}"))
     if not chapters:
         raise RuntimeError("That audiobook has no audio files to download.")
     return chapters

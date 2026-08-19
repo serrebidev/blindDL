@@ -35,7 +35,7 @@ import re
 import threading
 import time
 import defusedxml.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
@@ -271,7 +271,14 @@ def _pubdate(value):
     if not text:
         return 0
     try:
-        return parsedate_to_datetime(text).timestamp()
+        # parsedate_to_datetime drops the timezone, but an RSS pubDate is
+        # always GMT; interpret it as UTC so the epoch (and the "age" and
+        # recent-sort that derive from it) is not shifted by the local offset.
+        return (
+            parsedate_to_datetime(text)
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
     except (TypeError, ValueError):
         return _timestamp(text)
 
@@ -1025,6 +1032,12 @@ def _from_torznab(source, entry):
     seeders = _int(attrs.get("seeders"))
     # Torznab reports total peers; leechers are what is left after seeders.
     peers = _int(attrs.get("peers"))
+    raw_leechers = attrs.get("leechers")
+    leechers = (
+        _int(raw_leechers)
+        if raw_leechers is not None and str(raw_leechers).strip()
+        else max(0, peers - seeders)
+    )
     return _item(
         source, attrs.get("infohash"), title,
         magnet=magnet,
@@ -1033,7 +1046,7 @@ def _from_torznab(source, entry):
         download_url="" if link.startswith("magnet:") else link,
         format=attrs.get("category_name") or "",
         seeders=seeders,
-        leechers=_int(attrs.get("leechers")) or max(0, peers - seeders),
+        leechers=leechers,
         size_bytes=_int(entry.findtext("size") or attrs.get("size")),
         posted=int(_pubdate(entry.findtext("pubDate"))),
         url=(entry.findtext("comments") or entry.findtext("guid") or "").strip(),
@@ -1195,7 +1208,13 @@ def _rank(items, query, strict=False, order=ORDER_RELEVANCE):
     seen = set()
     unique = []
     for item in items:
-        key = item.get("infohash") or item.get("title")
+        # Sources without an infohash (eBookelo, Audiobook Bay, Archive) are
+        # keyed by their identity rather than title alone, so two different
+        # releases that happen to share a title are not collapsed into one.
+        key = item.get("infohash") or (
+            item.get("source"), item.get("title"),
+            item.get("magnet") or item.get("download_url") or item.get("url"),
+        )
         if key in seen:
             continue
         seen.add(key)

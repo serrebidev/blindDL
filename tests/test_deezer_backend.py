@@ -24,6 +24,13 @@ def _track_payload(track_id, title, artist="Artist"):
     }
 
 
+def _write_decrypted(_stream, _track_id, dest_path, _progress_cb=None,
+                     _cancel_event=None):
+    """Stand in for _decrypt_stream: the file has to appear for staging."""
+    with open(dest_path, "wb") as handle:
+        handle.write(b"audio")
+
+
 class DeezerBackendTests(unittest.TestCase):
     def setUp(self):
         deezer_backend._sessions.clear()
@@ -311,7 +318,9 @@ class DeezerBackendTests(unittest.TestCase):
                 mock.patch.object(
                     deezer_backend.requests, "get",
                     return_value=stream_response), \
-                mock.patch.object(deezer_backend, "_decrypt_stream"), \
+                mock.patch.object(
+                deezer_backend, "_decrypt_stream", side_effect=_write_decrypted
+            ), \
                 mock.patch.object(deezer_backend, "_cover_bytes",
                                   return_value=None), \
                 mock.patch.object(deezer_backend, "_tag_mp3") as tag_mp3:
@@ -371,7 +380,9 @@ class DeezerBackendTests(unittest.TestCase):
                 mock.patch.object(
                     deezer_backend.requests, "get",
                     return_value=stream_response), \
-                mock.patch.object(deezer_backend, "_decrypt_stream"), \
+                mock.patch.object(
+                deezer_backend, "_decrypt_stream", side_effect=_write_decrypted
+            ), \
                 mock.patch.object(deezer_backend, "_cover_bytes",
                                   return_value=None), \
                 mock.patch.object(deezer_backend, "_tag_flac") as tag_flac:
@@ -430,7 +441,9 @@ class DeezerBackendTests(unittest.TestCase):
                 mock.patch.object(
                     deezer_backend.requests, "get",
                     return_value=stream_response), \
-                mock.patch.object(deezer_backend, "_decrypt_stream"), \
+                mock.patch.object(
+                deezer_backend, "_decrypt_stream", side_effect=_write_decrypted
+            ), \
                 mock.patch.object(deezer_backend, "_cover_bytes",
                                   return_value=None), \
                 mock.patch.object(deezer_backend, "_tag_mp3") as tag_mp3:
@@ -496,7 +509,9 @@ class DeezerBackendTests(unittest.TestCase):
                 mock.patch.object(
                     deezer_backend.requests, "get",
                     return_value=stream_response), \
-                mock.patch.object(deezer_backend, "_decrypt_stream"), \
+                mock.patch.object(
+                deezer_backend, "_decrypt_stream", side_effect=_write_decrypted
+            ), \
                 mock.patch.object(deezer_backend, "_cover_bytes",
                                   return_value=None), \
                 mock.patch.object(deezer_backend, "_tag_flac"):
