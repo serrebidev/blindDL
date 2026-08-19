@@ -155,6 +155,24 @@ can be used by a release build. Their source-controlled entry points are
 
 Release artifacts are built and self-tested on their target operating systems. Windows x64 is built on the maintainer's Windows machine, Linux x64 is built on `serrebiradio.com`, and GitHub Actions continues to build the Intel and Apple-silicon macOS DMGs when a version tag such as `v0.1.0` is published. The Windows and Linux frozen self-tests remove every developer Python path; Linux additionally runs with an empty executable search path. A release is rejected unless its packaged executable identifies its embedded Python and imports its bundled libtorrent.
 
+Because three machines build one release, nobody publishes it by hand.
+`scripts/publish_release.py` owns that last step: it checks the draft carries
+all ten artifacts, verifies each one against the checksum its builder
+published, and only then takes the release out of draft and marks it latest.
+The tag build runs it after uploading the macOS DMGs, waiting up to two hours
+for the other two hosts. The `Release guard` workflow sweeps every six hours
+for a complete release still sitting in draft and publishes it, and fails
+loudly once a draft has been incomplete for a day. A draft is invisible on the
+Releases page and skipped by the `/releases/latest` endpoint the in-app
+updater reads, so one left behind hides a finished release from everybody —
+which is what happened to v0.24.24. To hold a draft back deliberately, put
+`<!-- no-autopublish -->` in its body. To publish or check one by hand:
+
+```
+python scripts/publish_release.py v0.24.25 --check-only
+python scripts/publish_release.py v0.24.25
+```
+
 ## Keyboard shortcuts
 
 - Ctrl+1 / 2 / 3 / 4 / 5 / 6 — URL / Search / Downloads / Uploads / Library / Subscriptions tabs

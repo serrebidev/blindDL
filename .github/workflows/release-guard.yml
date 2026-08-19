@@ -1,0 +1,38 @@
+# Copyright (c) serrebidev and contributors
+# This file is part of blindDL.
+# SPDX-License-Identifier: MIT
+name: Release guard
+
+# The backstop behind the publish job in release.yml. A blindDL release is
+# assembled from three build hosts, so the tag job can time out waiting for
+# a slow one, be cancelled, or never run at all -- and then a finished
+# release sits in draft, invisible to the Releases page and to the
+# /releases/latest endpoint the in-app updater reads. v0.24.24 was stranded
+# that way for a day while everyone still saw v0.24.22.
+#
+# This sweeps every draft: complete ones are published, and one that has
+# been incomplete for a day fails the run so it shows up as a red X rather
+# than staying quietly hidden.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    name: Publish any complete release left in draft
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Sweep draft releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python scripts/publish_release.py --sweep

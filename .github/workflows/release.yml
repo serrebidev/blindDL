@@ -75,11 +75,15 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Add macOS assets to release
+    name: Publish the release
     if: startsWith(github.ref, 'refs/tags/')
     needs: macos
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v8
         with:
           path: release
@@ -91,3 +95,17 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null
           gh release upload "$GITHUB_REF_NAME" release/* --clobber
+      # macOS is usually the last of the three build hosts to finish, so
+      # this waits for Windows and Linux to land their artifacts and then
+      # takes the release out of draft. A draft is invisible on the
+      # Releases page and skipped by the /releases/latest endpoint the
+      # updater reads, so leaving one behind hides a finished release
+      # from everybody. Release guard catches anything this misses.
+      - name: Wait for every platform, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python scripts/publish_release.py "$GITHUB_REF_NAME" \
+            --wait-minutes 120 \
+            --verify-source-version
