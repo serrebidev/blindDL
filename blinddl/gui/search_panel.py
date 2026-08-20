@@ -210,6 +210,11 @@ SOULSEEK_SORT_LABELS = [
 # order, so the answer to "what will I actually get?" arrives right after the
 # title instead of at the end of the row.
 COLUMN_HEADINGS = ("Title", "Type", "Artist / channel", "Source", "Duration", "Size")
+
+# Shift+End selects every remaining row and the list reports each one, so the
+# selection is counted up and spoken once the burst has settled rather than
+# once per row.
+SELECTION_SETTLE_MS = 350
 BOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Library", "Year", "Size")
 AUDIOBOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Site", "Duration", "Chapters")
 ARCHIVE_COLUMN_HEADINGS = ("Title", "Type", "Creator", "Collection", "Year", "Size")
@@ -885,6 +890,14 @@ class SearchPanel(wx.Panel):
         # The lists a browse stepped away from, newest last, so following an
         # artist into a release can be walked back out of.
         self.browse_history = []
+        # Selecting rows is silent. The list says nothing, and a screen
+        # reader reads whatever row the cursor lands on whether or not it
+        # joined a selection -- so building one up gave no sign it was
+        # working, and results that can be taken several at a time read as
+        # results that can only be taken one at a time.
+        self._selection_timer = None
+        self._selection_spoken = 0
+        self._selection_multi = False
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -1001,13 +1014,18 @@ class SearchPanel(wx.Panel):
         self.results_list.cell_provider = self._result_cell
         self.results_list.SetName("Search results")
         self.results_list.SetHelpText(
-            "Select one or more results. Enter downloads every selection; "
+            "Select one or more results: Shift with the arrow keys for a run, "
+            "Control Space to add or drop the row you are on, Control A for "
+            "all of them. Enter downloads every selection; "
             "Control C copies URLs; "
             "Context Menu opens actions."
         )
         for i, heading in enumerate(COLUMN_HEADINGS):
             self.results_list.InsertColumn(i, heading)
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_download_selected)
+        self.results_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._selection_changed)
+        self.results_list.Bind(
+            wx.EVT_LIST_ITEM_DESELECTED, self._selection_changed)
         self.results_list.Bind(wx.EVT_CONTEXT_MENU, self.on_results_menu)
         self.results_list.Bind(wx.EVT_CHAR, self.on_results_char)
         # Alt+Left is a system key -- Windows sends WM_SYSKEYDOWN and no
@@ -1298,6 +1316,7 @@ class SearchPanel(wx.Panel):
             self.stop.set()
         self.timer.Stop()
         self.render_timer.Stop()
+        self._selection_is_spoken_for(0)
         with self._site_delivery_lock:
             self._site_deliveries.clear()
         self.player.shutdown()
@@ -2188,16 +2207,66 @@ class SearchPanel(wx.Panel):
             index = self.results_list.GetNextSelected(index)
         return indices
 
+    def _selection_changed(self, event):
+        """Note that the selection moved; what it now is gets spoken later."""
+        event.Skip()
+        if self.closing:
+            return
+        if self._selection_timer is not None:
+            self._selection_timer.Stop()
+        self._selection_timer = wx.CallLater(
+            SELECTION_SETTLE_MS, self._announce_selection)
+
+    def _announce_selection(self):
+        """Say how much is selected, when that is more than arrowing does.
+
+        One selected row is what walking the list looks like, and the screen
+        reader is already reading that row: answering every arrow key with
+        "1 result selected" would talk over the title the key was pressed to
+        hear. So one row says nothing -- until something larger has been
+        built, after which every step of taking it apart is reported down to
+        the last row let go of. Losing a selection is what a Shift-less
+        arrow key does by accident, and that is the one thing this cannot be
+        silent about.
+        """
+        self._selection_timer = None
+        if self.closing:
+            return
+        count = self.results_list.GetSelectedItemCount()
+        if count == self._selection_spoken:
+            return
+        self._selection_spoken = count
+        if count >= 2:
+            self._selection_multi = True
+        elif not self._selection_multi:
+            return
+        elif count == 0:
+            self._selection_multi = False
+            self.frame.announce("Nothing selected.")
+            return
+        noun = "result" if count == 1 else "results"
+        self.frame.announce(f"{count} {noun} selected.")
+
+    def _selection_is_spoken_for(self, count):
+        """Drop the pending announcement: this selection speaks for itself."""
+        if self._selection_timer is not None:
+            self._selection_timer.Stop()
+            self._selection_timer = None
+        self._selection_spoken = count
+        self._selection_multi = count >= 2
+
     def _select_all(self, event):
         for index in range(self.results_list.GetItemCount()):
             self.results_list.Select(index)
         count = self.results_list.GetSelectedItemCount()
         noun = "result" if count == 1 else "results"
+        self._selection_is_spoken_for(count)
         self.frame.announce(f"Selected {count} {noun}.")
 
     def _clear_selection(self, event):
         for index in self._selected_indices():
             self.results_list.Select(index, False)
+        self._selection_is_spoken_for(0)
         self.frame.announce("Selection cleared.")
 
     # -- Internet Archive items ---------------------------------------------
@@ -2551,6 +2620,11 @@ class SearchPanel(wx.Panel):
     def on_results_char(self, event):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
             self.on_copy_url(event)
+            return
+        # The list handles Ctrl+A itself and says nothing about it, which is
+        # a whole search selected with no way to know it happened.
+        if event.GetKeyCode() == 1 and event.ControlDown():  # Ctrl+A
+            self._select_all(event)
             return
         event.Skip()
 

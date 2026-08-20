@@ -1361,6 +1361,93 @@ class GuiInteractionTests(unittest.TestCase):
         )
         self.assertIsNone(preview.result_url({"title": "No URL"}))
 
+    def test_a_growing_selection_says_how_much_is_in_it(self):
+        # Selecting rows is silent on Windows, and a screen reader reads the
+        # row the cursor lands on whether or not it joined a selection. With
+        # nothing to say otherwise, results that can be taken several at a
+        # time read as results that can only be taken one at a time.
+        panel = SearchPanel(self.host, self.frame)
+        panel.results = [{"title": t} for t in ("One", "Two", "Three")]
+        panel.results_list.SetItemCount(len(panel.results))
+
+        # One row is what arrowing looks like: the reader is already saying
+        # it, so nothing talks over it.
+        said = len(self.frame.messages)
+        panel.results_list.Select(0)
+        panel._announce_selection()
+        self.assertEqual(len(self.frame.messages), said)
+
+        panel.results_list.Select(1)
+        panel._announce_selection()
+        self.assertEqual(self.frame.messages[-1], "2 results selected.")
+
+        panel.results_list.Select(2)
+        panel._announce_selection()
+        self.assertEqual(self.frame.messages[-1], "3 results selected.")
+
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_falling_back_to_one_row_is_worth_saying(self):
+        # Losing a selection is exactly what a Shift-less arrow key does by
+        # accident, and it is the one thing silence must not hide.
+        panel = SearchPanel(self.host, self.frame)
+        panel.results = [{"title": t} for t in ("One", "Two")]
+        panel.results_list.SetItemCount(len(panel.results))
+        panel.results_list.Select(0)
+        panel.results_list.Select(1)
+        panel._announce_selection()
+        self.assertEqual(self.frame.messages[-1], "2 results selected.")
+
+        panel.results_list.Select(0, False)
+        panel._announce_selection()
+        self.assertEqual(self.frame.messages[-1], "1 result selected.")
+
+        panel.results_list.Select(1, False)
+        panel._announce_selection()
+        self.assertEqual(self.frame.messages[-1], "Nothing selected.")
+
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_control_a_selects_every_result_and_says_so(self):
+        # The list control handles Ctrl+A itself and says nothing about it.
+        panel = SearchPanel(self.host, self.frame)
+        panel.results = [{"title": t} for t in ("One", "Two", "Three")]
+        panel.results_list.SetItemCount(len(panel.results))
+
+        skipped = []
+        event = SimpleNamespace(
+            GetKeyCode=lambda: 1,  # Ctrl+A
+            ControlDown=lambda: True,
+            Skip=lambda: skipped.append(True),
+        )
+        panel.on_results_char(event)
+
+        self.assertEqual(panel.results_list.GetSelectedItemCount(), 3)
+        self.assertEqual(self.frame.messages[-1], "Selected 3 results.")
+        # Kept, so the list's own silent select-all does not run as well.
+        self.assertEqual(skipped, [])
+
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_command_that_speaks_is_not_echoed_by_the_settled_count(self):
+        # Select all announces its own result, and the row events its own
+        # Select() calls raise must not say the same thing again.
+        panel = SearchPanel(self.host, self.frame)
+        panel.results = [{"title": t} for t in ("One", "Two")]
+        panel.results_list.SetItemCount(len(panel.results))
+
+        panel._select_all(None)
+        self.assertEqual(self.frame.messages[-1], "Selected 2 results.")
+        said = len(self.frame.messages)
+        panel._announce_selection()
+        self.assertEqual(len(self.frame.messages), said)
+
+        panel.shutdown()
+        panel.Destroy()
+
     def test_copy_url_puts_selected_result_links_on_the_clipboard(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ADULT
