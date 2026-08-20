@@ -278,6 +278,32 @@ class AdultProviderTests(unittest.TestCase):
                 self.assertFalse(adult_backend._matches_content_category(
                     item, adult_backend.CONTENT_GAY))
 
+    def test_gay_results_exclude_female_titles_on_trusted_catalogs(self):
+        unwanted = (
+            {"provider": "gayfuckporn",
+             "title": "Very hot woman gets rough sex in uniform"},
+            {"provider": "gayporno",
+             "title": "Inked american chick has a taste for good fuck"},
+            {"provider": "gay0day",
+             "title": "Hot interracial action: officer busts amateur babe"},
+            {"provider": "xnxx",
+             "title": "Officer dominates stepson while stepmom is away"},
+            {"provider": "tube8", "title": "Strict cop corrects a good boy",
+             "artist": "Miss Lily ASMR"},
+        )
+
+        for item in unwanted:
+            with self.subTest(item=item):
+                self.assertFalse(adult_backend._matches_content_category(
+                    item, adult_backend.CONTENT_GAY))
+
+    def test_gay_results_keep_female_words_that_are_only_site_tags(self):
+        self.assertTrue(adult_backend._matches_content_category({
+            "provider": "porntrex",
+            "title": "Gay hunk couple bareback anal fuck",
+            "content_tags": "GAY, Gay Hunk, Babe, Brunette, Big Cock",
+        }, adult_backend.CONTENT_GAY))
+
     def test_query_based_gay_results_require_positive_male_evidence(self):
         self.assertFalse(adult_backend._matches_content_category({
             "provider": "eporner",

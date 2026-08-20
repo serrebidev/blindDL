@@ -103,15 +103,26 @@ _TRANS_RESULT_PATTERN = re.compile(
     r"ladyboys?|t[-\s]?girls?|futanari|ftm|mtf|ts"
     r")\b"
 )
+# ``wom[ae]n`` rather than ``women?``: the latter never matched the singular,
+# which let the most direct female label of all through.  The relationship
+# prefixes catch the glued compounds these sites write as one word.
 _FEMALE_RESULT_PATTERN = re.compile(
     r"(?ix)\b(?:"
-    r"women?|female|girls?|wives|wife|girlfriends?|brides?|"
-    r"mothers?|moms?|momm(?:y|ies)|daughters?|sisters?|aunts?|"
+    r"wom[ae]n|female|girls?|girlfriends?|brides?|"
+    r"(?:step|god|grand|foster|half|ex)?[-\s]?"
+    r"(?:mothers?|moms?|momm(?:y|ies)|daughters?|sisters?|aunts?|"
+    r"wives|wife)|"
     r"milfs?|grann(?:y|ies)|lesbians?|femdom|cowgirls?|latinas?|"
     r"puss(?:y|ies)|vaginas?|clits?|cunts?|boobs?|tits?|breasts?|"
     r"busty|[a-z][-\s]?cups?|actresses?|schoolgirls?|cheerleaders?|"
     r"she|her|fisse"
     r")\b"
+)
+# Female labels that are decisive in a title or performer name but meaningless
+# in a site's tag cloud, where they ride along on plenty of gay videos.  These
+# are matched against the title and performer only.
+_FEMALE_TITLE_PATTERN = re.compile(
+    r"(?ix)\b(?:babes?|chicks?|gals?|lad(?:y|ies)|miss|mistress(?:es)?)\b"
 )
 _BISEXUAL_RESULT_PATTERN = re.compile(
     r"(?ix)\b(?:bisexual\w*|bi|biphoria)\b"
@@ -1350,13 +1361,16 @@ def _matches_content_category(item, category):
     if category != CONTENT_GAY:
         return True
     url_path = urlparse(str(item.get("url", ""))).path
-    searchable = " ".join((
+    named = " ".join((
         str(item.get("title", "")), str(item.get("artist", "")),
-        str(item.get("content_tags", "")), url_path,
+    ))
+    searchable = " ".join((
+        named, str(item.get("content_tags", "")), url_path,
     ))
     if (_TRANS_RESULT_PATTERN.search(searchable)
             or _BISEXUAL_RESULT_PATTERN.search(searchable)
-            or _FEMALE_RESULT_PATTERN.search(searchable)):
+            or _FEMALE_RESULT_PATTERN.search(searchable)
+            or _FEMALE_TITLE_PATTERN.search(named)):
         return False
     if item.get("provider") in _TRUSTED_GAY_CATALOGS:
         return True
