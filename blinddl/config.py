@@ -250,6 +250,16 @@ DEFAULTS = {
     # default: the status bar is where blindDL says a search finished or a
     # download failed, and neither should have to be gone looking for.
     "speak_status": True,
+    # Play a short sound when a download finishes, and a different one when
+    # one fails. A finish is already announced in words, but words land in
+    # the middle of whatever the screen reader is reading; a sound carries
+    # from another window without taking the reader's turn. A burst of
+    # finishes plays one sound, not one each.
+    "sounds_enabled": True,
+    # Sounds to play instead of the two blindDL ships. Empty means the
+    # shipped one; a path that no longer exists falls back to it as well.
+    "sound_download_complete": "",
+    "sound_download_failed": "",
     # How often subscriptions are checked for new items, in hours.
     "sub_check_hours": 6,
     # Automatically check runtime components. Frozen builds update them only

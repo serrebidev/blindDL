@@ -44,6 +44,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         STATUS_QUEUED,
     )
     from blinddl import config as config_module
+    from blinddl.saved_queue import SavedQueue
     from blinddl.config import DEFAULTS
     from blinddl.gui.downloads_panel import DownloadsPanel
     from blinddl.gui.item_picker_dialog import ItemPickerDialog
@@ -55,6 +56,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     )
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
     from blinddl.gui.messages_panel import MessagesPanel
+    from blinddl.gui.queue_panel import QueuePanel
     from blinddl.gui import media_player
     from blinddl.gui.search_panel import (
         ADULT_ENGINE_CATEGORIES,
@@ -290,8 +292,12 @@ class _Frame:
         })
         self.queue = _Queue()
         self.subs = _Subscriptions()
+        self.saved = SavedQueue(state_path="")
+        self.queue_panel = mock.Mock()
+        self.queue_panel.count_text.return_value = "1 item in the queue."
         self.messages = []
         self.play_calls = []
+        self.extra_players = []
 
     def announce(self, message):
         self.messages.append(message)
@@ -301,6 +307,13 @@ class _Frame:
 
     def show_downloads_tab(self):
         pass
+
+    def register_player(self, player):
+        self.extra_players.append(player)
+
+    def unregister_player(self, player):
+        if player in self.extra_players:
+            self.extra_players.remove(player)
 
     def play_media(self, player, location, title):
         self.play_calls.append((player, location, title))
@@ -326,16 +339,182 @@ class GuiInteractionTests(unittest.TestCase):
             {"title": "Three", "artist": "Artist", "duration_s": 120},
         ]
         dialog = ItemPickerDialog(self.host, items, "Album")
+        # Nothing is ticked to start with: an album reached from an artist
+        # would otherwise be twenty-five tracks already chosen, where every
+        # key except Escape downloads the lot.
+        self.assertEqual(dialog.selected_items(), [])
+        self.assertFalse(dialog.download_btn.IsEnabled())
+
+        dialog.on_select_all(None)
         self.assertEqual(dialog.selected_items(), items)
+        self.assertTrue(dialog.download_btn.IsEnabled())
 
         dialog.on_clear_selection(None)
         self.assertEqual(dialog.selected_items(), [])
-        self.assertFalse(dialog.download_btn.IsEnabled())
 
         dialog.item_list.CheckItem(1, True)
         self.app.Yield()
         self.assertEqual(dialog.selected_items(), [items[1]])
         dialog.Destroy()
+
+    def test_the_picker_plays_the_row_you_are_on_without_ticking_it(self):
+        # A tick means "download this". Having to tick a track to hear it
+        # would be the opposite of what listening before choosing is for.
+        items = [
+            {"title": "One", "url": "https://example.test/1"},
+            {"title": "Two", "url": "https://example.test/2"},
+        ]
+        panel = SearchPanel(self.host, self.frame)
+        dialog = ItemPickerDialog(panel, items, "Album")
+        try:
+            self.assertIsNotNone(dialog.player)
+            self.assertIn(dialog.player, self.frame.extra_players)
+            dialog.item_list.Focus(1)
+            self.app.Yield()
+
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.on_play_full(None)
+            item, full = thread.call_args.kwargs["args"][1:]
+            self.assertEqual(item["title"], "Two")
+            self.assertTrue(full)
+            self.assertEqual(dialog.selected_items(), [])
+
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.on_preview(None)
+            self.assertFalse(thread.call_args.kwargs["args"][2])
+        finally:
+            dialog.Destroy()
+            panel.shutdown()
+            panel.Destroy()
+        # The dialog's player leaves the one-at-a-time rule with the dialog.
+        self.assertEqual(self.frame.extra_players, [])
+
+    def test_the_picker_says_why_enter_did_nothing_with_nothing_ticked(self):
+        panel = SearchPanel(self.host, self.frame)
+        dialog = ItemPickerDialog(panel, [{"title": "One"}], "Album")
+        try:
+            before = len(self.frame.messages)
+            dialog.on_download(None)
+            self.assertGreater(len(self.frame.messages), before)
+            self.assertIn("Space", self.frame.messages[-1])
+        finally:
+            dialog.Destroy()
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_search_results_can_be_kept_for_later(self):
+        panel = SearchPanel(self.host, self.frame)
+        try:
+            panel.result_engine = ENGINE_DEEZER
+            panel.results = [
+                {"id": "deezer:1", "kind": "deezer", "title": "One",
+                 "url": "https://www.deezer.com/track/1"},
+                {"id": "deezer:2", "kind": "deezer", "title": "Two",
+                 "url": "https://www.deezer.com/track/2"},
+            ]
+            panel._render_results(ENGINE_DEEZER)
+            panel.results_list.Select(0)
+            panel.results_list.Select(1)
+
+            panel.on_save_selected(None)
+            entries = self.frame.saved.all()
+            self.assertEqual([e["result"]["title"] for e in entries],
+                             ["One", "Two"])
+            self.assertEqual([e["engine"] for e in entries],
+                             [ENGINE_DEEZER, ENGINE_DEEZER])
+
+            # Saving the same rows again says so instead of doubling them.
+            panel.on_save_selected(None)
+            self.assertEqual(len(self.frame.saved.all()), 2)
+            self.assertIn("already there", self.frame.messages[-1])
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_the_download_queue_tab_queues_and_then_forgets_its_rows(self):
+        # A row that has been handed to the transfer queue must leave this
+        # list: a row in both is a row that gets downloaded twice.
+        frame = self.frame
+        frame.saved.add(
+            {"id": "deezer:1", "kind": "deezer", "title": "A track",
+             "artist": "X", "source": "Deezer",
+             "url": "https://www.deezer.com/track/1"},
+            ENGINE_DEEZER,
+            folder="X",
+        )
+        panel = QueuePanel(self.host, frame)
+        try:
+            self.assertEqual(panel.list.GetItemCount(), 1)
+            self.assertEqual(panel._cell(0, 0), "A track")
+            panel.list.Select(0)
+
+            panel.on_download_selected(None)
+            self.assertEqual(
+                frame.queue.calls,
+                [("sideb", "https://www.deezer.com/track/1", "A track")],
+            )
+            self.assertEqual(frame.queue.folders, ["X"])
+            self.assertEqual(panel.list.GetItemCount(), 0)
+            self.assertEqual(frame.saved.all(), [])
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_an_album_kept_for_later_is_resolved_only_when_it_is_asked_for(self):
+        # Shelving a discography must not read a hundred track lists, so an
+        # album row stays an album row until it is actually downloaded.
+        frame = self.frame
+        album = {"id": "deezer:album:7", "kind": "deezer_album",
+                 "title": "An album", "artist": "X", "source": "Deezer",
+                 "url": "https://www.deezer.com/album/7"}
+        frame.saved.add(album, ENGINE_DEEZER)
+        panel = QueuePanel(self.host, frame)
+        try:
+            with mock.patch(
+                "blinddl.gui.queue_panel.threading.Thread"
+            ) as thread:
+                panel.on_download_all(None)
+            thread.assert_called_once()
+            # Nothing was queued and the row is still there, waiting for the
+            # track list that is being fetched off the GUI thread.
+            self.assertEqual(frame.queue.calls, [])
+            self.assertEqual(panel.list.GetItemCount(), 1)
+
+            key = frame.saved.all()[0]["key"]
+            tracks = [{"title": f"T{n}",
+                       "url": f"https://www.deezer.com/track/{n}"}
+                      for n in (1, 2)]
+            panel._collections_ready([(key, album, tracks)], [])
+            self.assertEqual(
+                [call[0] for call in frame.queue.calls], ["sideb", "sideb"])
+            self.assertEqual(
+                frame.queue.folders, ["X - An album", "X - An album"])
+            self.assertEqual(panel.list.GetItemCount(), 0)
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_removing_from_the_download_queue(self):
+        frame = self.frame
+        for number in range(3):
+            frame.saved.add(
+                {"id": str(number), "title": f"T{number}"}, ENGINE_DEEZER)
+        panel = QueuePanel(self.host, frame)
+        try:
+            panel.list.Select(0)
+            panel.on_remove_selected(None)
+            self.assertEqual(panel.list.GetItemCount(), 2)
+            self.assertEqual(
+                [e["result"]["title"] for e in frame.saved.all()],
+                ["T1", "T2"],
+            )
+        finally:
+            panel.shutdown()
+            panel.Destroy()
 
     def test_high_contrast_tray_icon_installs_and_can_be_removed(self):
         icon = app_icon(32)
@@ -1700,6 +1879,7 @@ class GuiInteractionTests(unittest.TestCase):
             notebook=mock.Mock(),
             library_panel=mock.Mock(),
             announce=mock.Mock(),
+            sounds=mock.Mock(),
             config={"auto_clear_finished": False},
         )
         frame.queue.counts.return_value = frame._last_counts
@@ -1722,6 +1902,7 @@ class GuiInteractionTests(unittest.TestCase):
             notebook=mock.Mock(),
             library_panel=mock.Mock(),
             announce=mock.Mock(),
+            sounds=mock.Mock(),
             config={"auto_clear_finished": True},
         )
         frame.queue.counts.return_value = frame._last_counts
@@ -1756,6 +1937,7 @@ class GuiInteractionTests(unittest.TestCase):
             notebook=mock.Mock(),
             library_panel=mock.Mock(),
             announce=mock.Mock(),
+            sounds=mock.Mock(),
             config={"auto_clear_finished": True},
         )
         frame.queue.counts.return_value = frame._last_counts
@@ -2061,14 +2243,14 @@ class GuiInteractionTests(unittest.TestCase):
         # "mp3" is a file extension and reads as one in capitals. "Single"
         # is the word Deezer chose for the release, and SINGLE is not how it
         # should be read out.
-        from blinddl.gui.search_panel import _result_type
+        from blinddl.gui.search_panel import result_type
 
-        self.assertEqual(_result_type({"format": "mp3"}), "MP3")
-        self.assertEqual(_result_type({"format": "FLAC"}), "FLAC")
-        self.assertEqual(_result_type({"format": "Single"}), "Single")
-        self.assertEqual(_result_type({"format": "EP"}), "EP")
+        self.assertEqual(result_type({"format": "mp3"}), "MP3")
+        self.assertEqual(result_type({"format": "FLAC"}), "FLAC")
+        self.assertEqual(result_type({"format": "Single"}), "Single")
+        self.assertEqual(result_type({"format": "EP"}), "EP")
         self.assertEqual(
-            _result_type({"format": "Album, 14 tracks"}), "Album, 14 tracks")
+            result_type({"format": "Album, 14 tracks"}), "Album, 14 tracks")
 
     # -- browsing an artist or album ----------------------------------------
 

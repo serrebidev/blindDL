@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from blinddl import deezer_backend
+from blinddl import deezer_backend, ytdlp_backend
 
 # musicdl creates its global file logger while blinddl.downloader imports it.
 # Tests run in a restricted workspace, so replace only that import-time handler
@@ -55,6 +55,58 @@ class DownloadQueueDeezerTests(unittest.TestCase):
                 queue._run_sideb(self.make_item())
 
         sideb.assert_called_once()
+
+    def test_a_track_youtube_will_not_serve_falls_back_to_deezer_at_128(self):
+        # Deezer publishes whole soundtrack albums at 128 and nothing above
+        # it. Those tracks used to fail outright: too low for the configured
+        # quality, so the download went to YouTube, where the connection was
+        # refused -- while the same track played perfectly off Deezer.
+        with tempfile.TemporaryDirectory() as out_dir:
+            queue = self.make_queue(out_dir)
+            attempts = []
+
+            def native(*args, **kwargs):
+                attempts.append(kwargs.get("low_quality", False))
+                if not kwargs.get("low_quality"):
+                    raise deezer_backend.DeezerQualityError("no FLAC")
+                return "C:/downloads/track.mp3"
+
+            with mock.patch(
+                    "blinddl.downloader.deezer_backend.download",
+                    side_effect=native),                     mock.patch(
+                        "blinddl.downloader.sideb_backend.download",
+                        side_effect=OSError("connection reset")):
+                path = queue._run_sideb(self.make_item())
+
+        self.assertEqual(path, "C:/downloads/track.mp3")
+        # The configured quality is still asked for first, and 128 is only
+        # ever reached after YouTube has also been tried and failed.
+        self.assertEqual(attempts, [False, True])
+
+    def test_a_track_nothing_can_serve_reports_what_side_b_said(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            queue = self.make_queue(out_dir)
+            with mock.patch(
+                    "blinddl.downloader.deezer_backend.download",
+                    side_effect=deezer_backend.DeezerQualityError("no FLAC")),                     mock.patch(
+                        "blinddl.downloader.sideb_backend.download",
+                        side_effect=OSError("connection reset")):
+                with self.assertRaisesRegex(OSError, "connection reset"):
+                    queue._run_sideb(self.make_item())
+
+    def test_a_cancelled_side_b_download_is_not_retried_at_128(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            queue = self.make_queue(out_dir)
+            with mock.patch(
+                    "blinddl.downloader.deezer_backend.download",
+                    side_effect=deezer_backend.DeezerQualityError("no FLAC")
+            ) as native,                     mock.patch(
+                        "blinddl.downloader.sideb_backend.download",
+                        side_effect=ytdlp_backend.DownloadCancelled()):
+                with self.assertRaises(ytdlp_backend.DownloadCancelled):
+                    queue._run_sideb(self.make_item())
+
+        self.assertEqual(native.call_count, 1)
 
     def test_invalid_arl_error_does_not_fail_silently(self):
         with tempfile.TemporaryDirectory() as out_dir:

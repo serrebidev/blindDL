@@ -31,6 +31,8 @@ AGENTS.md
 *.ogg
 *.flac
 *.wav
+# ...except the two download-outcome sounds blindDL ships.
+!blinddl/sounds/*.wav
 config.json
 subscriptions.json
 cookies.txt

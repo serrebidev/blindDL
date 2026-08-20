@@ -1121,12 +1121,35 @@ class DownloadQueue:
         # to Side B's YouTube Music audio when the account cannot provide the
         # requested quality; authentication and other native errors must stay
         # visible so a broken ARL does not fail silently.
-        if (self.config["deezer_arl"] or "").strip():
+        arl = (self.config["deezer_arl"] or "").strip()
+        if arl:
             try:
                 return self._run_deezer(item)
             except deezer_backend.DeezerQualityError:
                 pass
+        try:
+            return self._run_sideb_native(item)
+        except ytdlp_backend.DownloadCancelled:
+            raise
+        except Exception as sideb_error:  # noqa: BLE001 - one more thing to try
+            if not arl:
+                raise
+            # Deezer publishes whole albums -- soundtracks especially -- at
+            # 128 kbps and nothing higher, and those are exactly the tracks
+            # that end up here: too low for the configured quality, so the
+            # download went to YouTube, where the connection was refused or
+            # dropped. blindDL was then failing to download a track it would
+            # play perfectly, off the same catalogue, seconds earlier. So the
+            # last thing tried is Deezer's own 128 stream: a lower bitrate
+            # than was asked for, but the actual recording, and only ever
+            # after everything better has already been tried and failed.
+            try:
+                return self._run_deezer(item, low_quality=True)
+            except deezer_backend.DeezerQualityError:
+                raise sideb_error from None
 
+    def _run_sideb_native(self, item):
+        """Side B proper: Deezer metadata over YouTube Music audio."""
         # Imported here so a missing sideb install only fails Side B jobs.
         from sideb.models.events import TrackCompleted, WorkerStage
 
@@ -1333,7 +1356,7 @@ class DownloadQueue:
         item.seeding = True
         return result
 
-    def _run_deezer(self, item):
+    def _run_deezer(self, item, low_quality=False):
         started = time.monotonic()
 
         def progress(downloaded, total):
@@ -1348,4 +1371,5 @@ class DownloadQueue:
 
         return deezer_backend.download(
             item.payload, self._out_dir(item), self.config,
-            progress_cb=progress, cancel_event=item.cancel_event)
+            progress_cb=progress, cancel_event=item.cancel_event,
+            low_quality=low_quality)

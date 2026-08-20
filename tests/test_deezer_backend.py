@@ -8,7 +8,15 @@ import threading
 import unittest
 from unittest import mock
 
-from blinddl import deezer_backend, search_kind, search_order, sideb_backend
+import requests
+
+from blinddl import (
+    deezer_backend,
+    search_kind,
+    search_order,
+    sideb_backend,
+    ytdlp_backend,
+)
 
 
 def _track_payload(track_id, title, artist="Artist"):
@@ -25,10 +33,172 @@ def _track_payload(track_id, title, artist="Artist"):
 
 
 def _write_decrypted(_stream, _track_id, dest_path, _progress_cb=None,
-                     _cancel_event=None):
+                     _cancel_event=None, start_at=0, total=0):
     """Stand in for _decrypt_stream: the file has to appear for staging."""
     with open(dest_path, "wb") as handle:
         handle.write(b"audio")
+    return len(b"audio"), len(b"audio")
+
+
+class _DroppingStream:
+    """A CDN response that stops part-way through, the way Deezer's do."""
+
+    def __init__(self, body, offset=0, limit=None, status_code=200):
+        self.body = body
+        self.offset = offset
+        self.limit = limit
+        self.status_code = status_code
+        self.headers = {"Content-Length": str(len(body) - offset)}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exception):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        sent = 0
+        position = self.offset
+        while position < len(self.body):
+            if self.limit is not None and sent >= self.limit:
+                raise requests.exceptions.ChunkedEncodingError(
+                    "connection reset")
+            chunk = self.body[position:position + chunk_size]
+            position += len(chunk)
+            sent += len(chunk)
+            yield chunk
+
+
+class DeezerStreamTests(unittest.TestCase):
+    """A dropped transfer is picked up again, not started again or lost."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.dest = os.path.join(self.directory.name, "track.bin")
+        # Long enough to cross several of the 2048-byte blocks the stripe is
+        # aligned to, so a resume that lands mid-block would be visible.
+        self.body = bytes(
+            (index * 7) % 251 for index in range(deezer_backend._CHUNK * 9))
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def _clean(self):
+        with mock.patch.object(
+            deezer_backend.requests, "get",
+            return_value=_DroppingStream(self.body),
+        ):
+            deezer_backend._stream_to_file(
+                "https://cdn.invalid/x", "3135556", self.dest)
+        with open(self.dest, "rb") as handle:
+            return handle.read()
+
+    def test_a_stream_that_drops_twice_produces_the_same_bytes(self):
+        expected = self._clean()
+
+        responses = []
+
+        def fake_get(_url, **kwargs):
+            offset = 0
+            status = 200
+            header = (kwargs.get("headers") or {}).get("Range")
+            if header:
+                offset = int(header.split("=")[1].split("-")[0])
+                status = 206
+            limit = [5000, 9000, None][len(responses)]
+            response = _DroppingStream(
+                self.body, offset=offset, limit=limit, status_code=status)
+            responses.append(response)
+            return response
+
+        with mock.patch.object(deezer_backend.requests, "get", fake_get):
+            deezer_backend._stream_to_file(
+                "https://cdn.invalid/x", "3135556", self.dest)
+
+        with open(self.dest, "rb") as handle:
+            self.assertEqual(handle.read(), expected)
+        # Every resume asked for a whole number of blocks, which is what
+        # keeps "every third block is encrypted" aligned across the join.
+        self.assertEqual([r.offset % deezer_backend._CHUNK for r in responses],
+                         [0, 0, 0])
+        self.assertEqual(len(responses), 3)
+
+    def test_a_range_the_server_ignores_starts_the_file_again(self):
+        expected = self._clean()
+        attempts = []
+
+        def fake_get(_url, **kwargs):
+            attempts.append((kwargs.get("headers") or {}).get("Range"))
+            if len(attempts) == 1:
+                return _DroppingStream(self.body, limit=5000)
+            # 200, not 206: the whole file is coming again from zero.
+            return _DroppingStream(self.body, offset=0, status_code=200)
+
+        with mock.patch.object(deezer_backend.requests, "get", fake_get):
+            deezer_backend._stream_to_file(
+                "https://cdn.invalid/x", "3135556", self.dest)
+
+        self.assertIsNotNone(attempts[1])
+        with open(self.dest, "rb") as handle:
+            self.assertEqual(handle.read(), expected)
+
+    def test_a_stream_that_never_completes_is_reported_as_a_failure(self):
+        with mock.patch.object(
+            deezer_backend.requests, "get",
+            side_effect=lambda *a, **k: _DroppingStream(self.body, limit=100),
+        ), mock.patch.object(deezer_backend.time, "sleep"):
+            with self.assertRaises(RuntimeError) as caught:
+                deezer_backend._stream_to_file(
+                    "https://cdn.invalid/x", "3135556", self.dest)
+        self.assertIn("kept closing the connection", str(caught.exception))
+
+    def test_cancelling_stops_without_another_attempt(self):
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch.object(deezer_backend.requests, "get") as get:
+            with self.assertRaises(ytdlp_backend.DownloadCancelled):
+                deezer_backend._stream_to_file(
+                    "https://cdn.invalid/x", "3135556", self.dest,
+                    cancel_event=cancel)
+        get.assert_not_called()
+
+
+class DeezerTrackCountTests(unittest.TestCase):
+    """/artist/{id}/albums lists releases without saying how long they are."""
+
+    def test_an_artists_releases_are_given_their_track_counts(self):
+        rows = [
+            {"album_id": "1", "record_type": "album", "tracks": 0,
+             "format": "Album"},
+            {"album_id": "2", "record_type": "single", "tracks": 0,
+             "format": "Single"},
+            # Already counted by the endpoint it came from: left alone.
+            {"album_id": "3", "record_type": "album", "tracks": 9,
+             "format": "Album, 9 tracks"},
+        ]
+        counts = {"1": {"nb_tracks": 14}, "2": {"nb_tracks": 1}}
+        with mock.patch.object(
+            deezer_backend, "_api_get",
+            side_effect=lambda path: counts[path.rsplit("/", 1)[1]],
+        ) as api:
+            deezer_backend._fill_track_counts(rows)
+
+        self.assertEqual([row["format"] for row in rows],
+                         ["Album, 14 tracks", "Single, 1 track",
+                          "Album, 9 tracks"])
+        self.assertEqual(len(api.call_args_list), 2)
+
+    def test_a_release_the_catalogue_will_not_answer_for_keeps_its_row(self):
+        rows = [{"album_id": "1", "record_type": "album", "tracks": 0,
+                 "format": "Album"}]
+        with mock.patch.object(
+            deezer_backend, "_api_get", side_effect=RuntimeError("down")
+        ):
+            deezer_backend._fill_track_counts(rows)
+        self.assertEqual(rows[0]["format"], "Album")
 
 
 class DeezerBackendTests(unittest.TestCase):
@@ -775,8 +945,7 @@ class DeezerPlaybackFileTests(unittest.TestCase):
                 mock.patch.object(deezer_backend.requests, "get",
                                   return_value=mock.MagicMock()), \
                 mock.patch.object(deezer_backend, "_decrypt_stream") as write:
-            write.side_effect = lambda *args, **kwargs: open(
-                args[2], "wb").write(b"audio")
+            write.side_effect = _write_decrypted
             path = deezer_backend.playback_file(
                 "https://www.deezer.com/track/3135556",
                 {"deezer_arl": "test-arl", "deezer_format": "flac"})

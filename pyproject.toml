@@ -120,6 +120,7 @@ blinddl = "blinddl.__main__:main"
 include = ["blinddl*", "musicdl*", "sideb*"]
 
 [tool.setuptools.package-data]
+blinddl = ["sounds/*.wav"]
 musicdl = [
   "LICENSE",
   "VENDORED.md",

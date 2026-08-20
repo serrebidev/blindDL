@@ -23,15 +23,18 @@ from .. import (
 from ..config import Config
 from ..downloader import DownloadQueue, STATUS_DONE, STATUS_ERROR
 from ..runtime import open_folder
+from ..saved_queue import SavedQueue
 from ..subscriptions import SubscriptionStore
 from .chat_panel import ChatPanel
 from .downloads_panel import DownloadsPanel
 from .feeds_dialog import FeedsDialog
 from .library_panel import LibraryPanel
 from .messages_panel import MessagesPanel
+from .queue_panel import QueuePanel
 from .search_panel import SearchPanel
 from .settings_dialog import SettingsDialog
 from .soulseek_user_dialog import UserBrowserDialog, UserProfileDialog
+from .sounds import DownloadSounds
 from .sources_dialog import SourcesDialog
 from .subs_panel import SubsPanel
 from .tools_dialog import ExternalToolsDialog
@@ -55,10 +58,11 @@ AUTO_CLEAR_DELAY_MS = 250
 
 TAB_URL = 0
 TAB_SEARCH = 1
-TAB_DOWNLOADS = 2
-TAB_UPLOADS = 3
-TAB_LIBRARY = 4
-TAB_SUBS = 5
+TAB_QUEUE = 2
+TAB_DOWNLOADS = 3
+TAB_UPLOADS = 4
+TAB_LIBRARY = 5
+TAB_SUBS = 6
 
 
 class MainFrame(wx.Frame):
@@ -81,9 +85,20 @@ class MainFrame(wx.Frame):
             self.config, self._queue_notify, start_workers=False
         )
         self.subs = SubscriptionStore(self.config, self.queue, notify=self._subs_notify)
+        # What was found and kept rather than downloaded there and then. The
+        # Download queue tab reads it; the Search tab adds to it.
+        self.saved = SavedQueue()
         self._last_counts = None
         self.chat_panel = None
         self.messages_panel = None
+        # Players that belong to a dialog rather than a tab. They join the
+        # rule that only one thing plays at a time for as long as the dialog
+        # that owns them is open.
+        self._extra_players = []
+        # The chime that says a download finished, and the one that says it
+        # did not. Built before the panels, because a restored queue can
+        # start finishing things as soon as the workers do.
+        self.sounds = DownloadSounds(self.config)
         # Update checking: one repeating clock, one worker at a time, and a
         # verified package waiting for the queue to go quiet.
         self._update_timer = None
@@ -197,12 +212,14 @@ class MainFrame(wx.Frame):
         self.notebook = wx.Notebook(self)
         self.url_panel = UrlPanel(self.notebook, self)
         self.search_panel = SearchPanel(self.notebook, self)
+        self.queue_panel = QueuePanel(self.notebook, self)
         self.downloads_panel = DownloadsPanel(self.notebook, self)
         self.uploads_panel = UploadsPanel(self.notebook, self)
         self.library_panel = LibraryPanel(self.notebook, self)
         self.subs_panel = SubsPanel(self.notebook, self)
         self.notebook.AddPage(self.url_panel, "URL")
         self.notebook.AddPage(self.search_panel, "Search")
+        self.notebook.AddPage(self.queue_panel, "Download queue")
         self.notebook.AddPage(self.downloads_panel, "Downloads")
         self.notebook.AddPage(self.uploads_panel, "Uploads")
         self.notebook.AddPage(self.library_panel, "Library")
@@ -265,36 +282,37 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
 
     def _bind_shortcuts(self):
-        ids = [wx.NewIdRef() for _ in range(10)]
+        # Ctrl+1 through Ctrl+7 are the seven tabs that are always there, in
+        # the order they appear; Ctrl+8 and Ctrl+9 are the two Soulseek tabs
+        # that only exist when Soulseek does.
+        fixed_tabs = 7
+        ids = [wx.NewIdRef() for _ in range(fixed_tabs + 4)]
+        keys = [str(number) for number in range(1, fixed_tabs + 3)]
         entries = [
-            (wx.ACCEL_CTRL, ord("1"), ids[0]),
-            (wx.ACCEL_CTRL, ord("2"), ids[1]),
-            (wx.ACCEL_CTRL, ord("3"), ids[2]),
-            (wx.ACCEL_CTRL, ord("4"), ids[3]),
-            (wx.ACCEL_CTRL, ord("5"), ids[4]),
-            (wx.ACCEL_CTRL, ord("6"), ids[5]),
-            (wx.ACCEL_CTRL, ord("7"), ids[6]),
-            (wx.ACCEL_CTRL, ord("8"), ids[7]),
-            (wx.ACCEL_CTRL, ord("F"), ids[8]),
-            (wx.ACCEL_CTRL, ord("L"), ids[9]),
+            (wx.ACCEL_CTRL, ord(key), ids[index])
+            for index, key in enumerate(keys)
         ]
+        entries.append((wx.ACCEL_CTRL, ord("F"), ids[fixed_tabs + 2]))
+        entries.append((wx.ACCEL_CTRL, ord("L"), ids[fixed_tabs + 3]))
         self.SetAcceleratorTable(
             wx.AcceleratorTable([wx.AcceleratorEntry(*e) for e in entries])
         )
-        for tab, bind_id in enumerate(ids[:6]):
+        for tab, bind_id in enumerate(ids[:fixed_tabs]):
             self.Bind(wx.EVT_MENU, lambda e, t=tab: self.show_tab(t), id=bind_id)
         self.Bind(
             wx.EVT_MENU,
             lambda event: self._show_optional_tab(self.chat_panel, "Chat"),
-            id=ids[6],
+            id=ids[fixed_tabs],
         )
         self.Bind(
             wx.EVT_MENU,
             lambda event: self._show_optional_tab(self.messages_panel, "Messages"),
-            id=ids[7],
+            id=ids[fixed_tabs + 1],
         )
-        self.Bind(wx.EVT_MENU, lambda e: self._focus_search(), id=ids[8])
-        self.Bind(wx.EVT_MENU, lambda e: self._focus_url(), id=ids[9])
+        self.Bind(
+            wx.EVT_MENU, lambda e: self._focus_search(), id=ids[fixed_tabs + 2])
+        self.Bind(
+            wx.EVT_MENU, lambda e: self._focus_url(), id=ids[fixed_tabs + 3])
 
     # -- helpers used by panels ----------------------------------------------
 
@@ -468,13 +486,29 @@ class MainFrame(wx.Frame):
             panel.Destroy()
             setattr(self, attribute, None)
 
-    def play_media(self, player, location, title):
-        """Start one player and stop any other tab's active playback."""
-        for other in (
+    def register_player(self, player):
+        """Take a dialog's player into the one-at-a-time rule while it lives."""
+        if player not in self._extra_players:
+            self._extra_players.append(player)
+
+    def unregister_player(self, player):
+        """Drop a dialog's player again once the dialog has been destroyed."""
+        if player in self._extra_players:
+            self._extra_players.remove(player)
+
+    def _players(self):
+        """Every player that could be sounding right now."""
+        return [
             self.url_panel.player,
             self.search_panel.player,
             self.library_panel.player,
-        ):
+            self.queue_panel.player,
+            *self._extra_players,
+        ]
+
+    def play_media(self, player, location, title):
+        """Start one player and stop any other tab's active playback."""
+        for other in self._players():
             if other is not player:
                 other.stop(silent=True)
         player.load(location, title)
@@ -482,6 +516,8 @@ class MainFrame(wx.Frame):
     def on_tab_changed(self, event):
         if event.GetSelection() == TAB_LIBRARY:
             self.library_panel.refresh(announce=False)
+        elif event.GetSelection() == TAB_QUEUE:
+            self.queue_panel.refresh(announce=False)
         event.Skip()
 
     def _focus_search(self):
@@ -525,8 +561,10 @@ class MainFrame(wx.Frame):
             if self.notebook.GetSelection() == TAB_LIBRARY:
                 self.library_panel.refresh(announce=False)
             self.announce(f"Finished: {item.title}")
+            self.sounds.report(failed=False)
         elif item.status == STATUS_ERROR:
             self.announce(f"Download failed: {item.title}. {item.error}")
+            self.sounds.report(failed=True)
 
     def _subs_notify(self, message):
         if self._closing:
@@ -856,6 +894,8 @@ class MainFrame(wx.Frame):
             if timer is not None and timer.IsRunning():
                 timer.Stop()
         soulseek_backend.remove_listener(self._queue_soulseek_event)
+        self.sounds.shutdown()
+        self.queue_panel.shutdown()
         if self.chat_panel is not None:
             self.chat_panel.shutdown()
         if self.messages_panel is not None:

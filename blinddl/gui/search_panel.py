@@ -420,6 +420,72 @@ def _collection_folder(collection):
     return f"{artist} - {title}" if artist else title
 
 
+def queue_result(queue, item, engine, folder=""):
+    """Put one search result into the transfer queue; return its add action.
+
+    Which backend a row downloads through is decided by the engine that
+    found it, not by the row alone: the same music file can arrive from
+    musicdl, from Deezer, or off a peer, and each is fetched differently.
+    That makes this the one piece of knowledge shared by the results list
+    and the download queue tab, so it lives here rather than in either.
+
+    Collection rows (a whole album or playlist) are not queueable and never
+    reach this; they are resolved to their tracks first.
+    """
+    kind = item.get("kind")
+    if kind == "soulseek":
+        return queue.add_soulseek(item, item["title"])
+    if engine == ENGINE_MUSIC:
+        if kind in ("sideb", "deezer"):
+            return queue.add_sideb(item["url"], item["title"], folder=folder)
+        return queue.add_musicdl(item["song_info"], item["title"], folder=folder)
+    if engine == ENGINE_DEEZER:
+        return queue.add_sideb(item["url"], item["title"], folder=folder)
+    if engine == ENGINE_BOOKS:
+        return queue.add_book(item, item["title"])
+    if engine == ENGINE_AUDIOBOOKS:
+        return queue.add_audiobook(item, item["title"])
+    if engine == ENGINE_TORRENTS:
+        return queue.add_torrent(item, item["title"])
+    if engine in (ENGINE_SOUNDCLOUD, ENGINE_BANDCAMP):
+        return queue.add_ytdlp(item["url"], item["title"], audio_only=True)
+    if _is_archive_engine(engine):
+        return queue.add_archive(item, item["title"])
+    if _is_adult_engine(engine):
+        return queue.add_adult(item, item["title"])
+    if engine == ENGINE_APPLE_MUSIC:
+        return queue.add_applemusic(item["url"], item["title"], folder=folder)
+    return queue.add_ytdlp(item["url"], item["title"])
+
+
+def collection_tracks(collection, config):
+    """The tracks of one whole album or playlist row, from its catalogue."""
+    backend = (
+        applemusic_backend
+        if str(collection.get("kind") or "").startswith("applemusic_")
+        else deezer_backend
+    )
+    tracks, _title = backend.extract_flat(collection["url"], config)
+    return tracks
+
+
+def queue_collection_tracks(queue, collection, tracks):
+    """Queue the tracks of one album or playlist into a folder of its own."""
+    apple = str(collection.get("kind") or "").startswith("applemusic_")
+    folder = _collection_folder(collection)
+    added = []
+    titles = []
+    for track in tracks:
+        title = track.get("title") or collection["title"]
+        titles.append(title)
+        if apple:
+            added.append(
+                queue.add_applemusic(track["url"], title, folder=folder))
+        else:
+            added.append(queue.add_sideb(track["url"], title, folder=folder))
+    return added, titles
+
+
 def _is_album_item(item):
     """Whether this row is a whole album rather than one track."""
     return str(item.get("kind") or "").endswith("_album")
@@ -430,7 +496,7 @@ def _is_playlist_item(item):
     return str(item.get("kind") or "").endswith("_playlist")
 
 
-def _is_collection_item(item):
+def is_collection_item(item):
     """Whether this row is a whole album or playlist, not one track.
 
     Collection rows are resolved to their tracks before anything is queued,
@@ -590,7 +656,7 @@ _URL_EXTENSIONS = (
 _DEDUP_PUNCTUATION = re.compile(r"[^\w\s]")
 
 
-def _result_type(item):
+def result_type(item):
     """The file type of one result, said the way a reader would say it.
 
     Backends that know their file type publish it as "format"; the rest are
@@ -816,7 +882,7 @@ def _sorted_results(items, mode, engine=None, order=None):
     return [item for _index, item in sorted(indexed, key=sort_key)]
 
 
-class _ResultsList(wx.ListCtrl):
+class ResultsList(wx.ListCtrl):
     """The results list, drawn on demand instead of built row by row.
 
     An all-sites music search asks 57 sources for a page each, so the list
@@ -1010,13 +1076,14 @@ class SearchPanel(wx.Panel):
             control.Bind(wx.EVT_COMBOBOX_DROPDOWN, self.on_dropdown_opened)
             control.Bind(wx.EVT_COMBOBOX_CLOSEUP, self.on_dropdown_closed)
 
-        self.results_list = _ResultsList(self)
+        self.results_list = ResultsList(self)
         self.results_list.cell_provider = self._result_cell
         self.results_list.SetName("Search results")
         self.results_list.SetHelpText(
             "Select one or more results: Shift with the arrow keys for a run, "
             "Control Space to add or drop the row you are on, Control A for "
             "all of them. Enter downloads every selection; "
+            "Control Shift Q keeps it for later on the Download queue tab; "
             "Control C copies URLs; "
             "Context Menu opens actions."
         )
@@ -1043,6 +1110,12 @@ class SearchPanel(wx.Panel):
             "Plays the whole song rather than a short preview."
         )
         self.play_full_btn.Bind(wx.EVT_BUTTON, self.on_play_full_selected)
+        self.save_btn = wx.Button(self, label="Add to download &queue")
+        self.save_btn.SetHelpText(
+            "Keeps the selected results on the Download queue tab, to play "
+            "and download whenever you want to rather than now."
+        )
+        self.save_btn.Bind(wx.EVT_BUTTON, self.on_save_selected)
         self.player = MediaPlayerPanel(self, frame, video_height=150)
         # With nothing loaded, Play means "play what I have selected".
         # Reaching the player at all takes several tabs past the results
@@ -1070,7 +1143,8 @@ class SearchPanel(wx.Panel):
         sizer.Add(self.results_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         play_row = wx.BoxSizer(wx.HORIZONTAL)
         play_row.Add(self.preview_btn, 0, wx.RIGHT, 8)
-        play_row.Add(self.play_full_btn, 0)
+        play_row.Add(self.play_full_btn, 0, wx.RIGHT, 8)
+        play_row.Add(self.save_btn, 0)
         sizer.Add(play_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         sizer.Add(self.player, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         self.SetSizer(sizer)
@@ -2025,7 +2099,7 @@ class SearchPanel(wx.Panel):
         if column == 0:
             return str(item.get("title") or "")
         if column == 1:
-            return _result_type(item)
+            return result_type(item)
         if _is_soulseek_engine(engine):
             return _pick(column, item, "username", "folder", "availability", "file_size")
         if _is_book_engine(engine):
@@ -2356,15 +2430,7 @@ class SearchPanel(wx.Panel):
         errors = []
         for collection in collections:
             try:
-                backend = (
-                    applemusic_backend
-                    if str(collection.get("kind") or "").startswith(
-                        "applemusic_")
-                    else deezer_backend
-                )
-                tracks, _title = backend.extract_flat(
-                    collection["url"], self.frame.config
-                )
+                tracks = collection_tracks(collection, self.frame.config)
             except Exception as exc:  # noqa: BLE001 - reported to the user
                 errors.append(f"{collection['title']}: {exc}")
                 continue
@@ -2409,25 +2475,13 @@ class SearchPanel(wx.Panel):
         titles = []
         with self.frame.queue.batch_additions():
             for collection, tracks in resolved:
-                apple = str(collection.get("kind") or "").startswith(
-                    "applemusic_")
                 # An album is a release, so its tracks go in a folder of its
                 # own -- named for the artist as well when the row knows one,
                 # since two artists can put out the same album title.
-                folder = _collection_folder(collection)
-                for track in tracks:
-                    title = track.get("title") or collection["title"]
-                    titles.append(title)
-                    if apple:
-                        added.append(
-                            self.frame.queue.add_applemusic(
-                                track["url"], title, folder=folder)
-                        )
-                    else:
-                        added.append(
-                            self.frame.queue.add_sideb(
-                                track["url"], title, folder=folder)
-                        )
+                batch, names = queue_collection_tracks(
+                    self.frame.queue, collection, tracks)
+                added.extend(batch)
+                titles.extend(names)
         message = addition_summary(added, titles)
         if errors:
             failed = "item" if len(errors) == 1 else "items"
@@ -2621,6 +2675,12 @@ class SearchPanel(wx.Panel):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
             self.on_copy_url(event)
             return
+        # Ctrl+Shift+Q: keep these for later. Q for queue, shifted so it
+        # cannot be reached by accident on the way to anything else.
+        if (event.GetKeyCode() == 17 and event.ControlDown()
+                and event.ShiftDown()):  # Ctrl+Shift+Q
+            self.on_save_selected(event)
+            return
         # The list handles Ctrl+A itself and says nothing about it, which is
         # a whole search selected with no way to know it happened.
         if event.GetKeyCode() == 1 and event.ControlDown():  # Ctrl+A
@@ -2707,6 +2767,8 @@ class SearchPanel(wx.Panel):
         preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
         play_full_item = menu.Append(wx.ID_ANY, "Play &full song")
         download = menu.Append(wx.ID_ANY, "&Download selected")
+        save = menu.Append(
+            wx.ID_ANY, "Add to download &queue	Ctrl+Shift+Q")
         focused = self._focused_result_object()
         soulseek_item = (
             focused if focused and focused.get("kind") == "soulseek" else None
@@ -2749,6 +2811,7 @@ class SearchPanel(wx.Panel):
         preview_item.Enable(has_selection and _plays(self.result_engine))
         play_full_item.Enable(has_selection and _plays(self.result_engine))
         download.Enable(has_selection)
+        save.Enable(has_selection)
         copy_url.Enable(has_selection and soulseek_item is None)
         open_browser.Enable(
             has_selection
@@ -2768,6 +2831,7 @@ class SearchPanel(wx.Panel):
         menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
         menu.Bind(wx.EVT_MENU, self.on_play_full_selected, play_full_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
+        menu.Bind(wx.EVT_MENU, self.on_save_selected, save)
         if album_browse is not None:
             menu.Bind(
                 wx.EVT_MENU,
@@ -2917,7 +2981,7 @@ class SearchPanel(wx.Panel):
                 "Press Enter to download this file."
             )
             return
-        if _is_collection_item(item):
+        if is_collection_item(item):
             self.frame.announce(
                 "An album or playlist has no single track to play. Press "
                 "Enter to choose which of its tracks to download."
@@ -3003,7 +3067,7 @@ class SearchPanel(wx.Panel):
                 "Press Enter to download this file."
             )
             return
-        if _is_collection_item(item):
+        if is_collection_item(item):
             self.frame.announce(
                 "An album or playlist has no single track to play. Press "
                 "Enter to choose which of its tracks to download."
@@ -3074,6 +3138,38 @@ class SearchPanel(wx.Panel):
             artist = ", ".join(str(name) for name in artist if name)
         return str(artist).strip()
 
+    def on_save_selected(self, event):
+        """Keep the selected results for later instead of downloading them.
+
+        The same rows, with everything the search knew about them, put on
+        the Download queue tab. Nothing is fetched: an album row is kept as
+        an album and resolved to its tracks whenever it is actually asked
+        for, which is what lets a whole discography be shelved in one press
+        without reading a hundred track lists first.
+        """
+        indices = [i for i in self._selected_indices() if i < len(self.results)]
+        if not indices:
+            self.frame.announce("Select a result first.")
+            return
+        added = 0
+        for index in indices:
+            item = self.results[index]
+            if self.frame.saved.add(
+                item,
+                self.result_engine,
+                folder=self._artist_folder(item),
+            ):
+                added += 1
+        self.frame.queue_panel.refresh(announce=False)
+        already = len(indices) - added
+        noun = "item" if added == 1 else "items"
+        message = f"Added {added} {noun} to the download queue."
+        if already:
+            was = "was" if already == 1 else "were"
+            message += f" {already} {was} already there."
+        self.frame.announce(
+            f"{message} {self.frame.queue_panel.count_text()}")
+
     def on_download_selected(self, event):
         indices = [i for i in self._selected_indices() if i < len(self.results)]
         if not indices:
@@ -3095,75 +3191,26 @@ class SearchPanel(wx.Panel):
         # selection is queued straight away rather than waiting behind it.
         collections = [
             self.results[index] for index in indices
-            if _is_collection_item(self.results[index])
+            if is_collection_item(self.results[index])
         ]
         indices = [
             index for index in indices
-            if not _is_collection_item(self.results[index])
+            if not is_collection_item(self.results[index])
         ]
         if collections:
             self._queue_collection_items(collections)
         if not indices:
             return
         with self.frame.queue.batch_additions():
-            added = []
-            for index in indices:
-                item = self.results[index]
-                folder = self._artist_folder(item)
-                if item.get("kind") == "soulseek":
-                    added.append(
-                        self.frame.queue.add_soulseek(item, item["title"])
-                    )
-                elif engine == ENGINE_MUSIC:
-                    if item.get("kind") in ("sideb", "deezer"):
-                        added.append(
-                            self.frame.queue.add_sideb(
-                                item["url"], item["title"], folder=folder)
-                        )
-                    else:
-                        added.append(self.frame.queue.add_musicdl(
-                            item["song_info"], item["title"], folder=folder
-                        ))
-                elif engine == ENGINE_DEEZER:
-                    added.append(
-                        self.frame.queue.add_sideb(
-                            item["url"], item["title"], folder=folder)
-                    )
-                elif engine == ENGINE_BOOKS:
-                    added.append(self.frame.queue.add_book(item, item["title"]))
-                elif engine == ENGINE_AUDIOBOOKS:
-                    added.append(
-                        self.frame.queue.add_audiobook(item, item["title"])
-                    )
-                elif engine == ENGINE_TORRENTS:
-                    added.append(
-                        self.frame.queue.add_torrent(item, item["title"])
-                    )
-                elif engine == ENGINE_SOUNDCLOUD:
-                    added.append(self.frame.queue.add_ytdlp(
-                        item["url"], item["title"], audio_only=True
-                    ))
-                elif engine == ENGINE_BANDCAMP:
-                    added.append(self.frame.queue.add_ytdlp(
-                        item["url"], item["title"], audio_only=True
-                    ))
-                elif _is_archive_engine(engine):
-                    added.append(
-                        self.frame.queue.add_archive(item, item["title"])
-                    )
-                elif _is_adult_engine(engine):
-                    added.append(
-                        self.frame.queue.add_adult(item, item["title"])
-                    )
-                elif engine == ENGINE_APPLE_MUSIC:
-                    added.append(
-                        self.frame.queue.add_applemusic(
-                            item["url"], item["title"], folder=folder)
-                    )
-                else:
-                    added.append(
-                        self.frame.queue.add_ytdlp(item["url"], item["title"])
-                    )
+            added = [
+                queue_result(
+                    self.frame.queue,
+                    self.results[index],
+                    engine,
+                    folder=self._artist_folder(self.results[index]),
+                )
+                for index in indices
+            ]
         self.frame.announce(addition_summary(
             added, [self.results[index]["title"] for index in indices]
         ))

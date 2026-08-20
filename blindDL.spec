@@ -35,6 +35,10 @@ VERSION = re.search(
 datas = [
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),
+    # The two download-outcome sounds. blinddl/gui/sounds.py looks for them
+    # beside the frozen root as well as beside the package, which is why the
+    # destination is a bare "sounds" rather than "blinddl/sounds".
+    (str(ROOT / "blinddl" / "sounds"), "sounds"),
 ]
 binaries = []
 hiddenimports = []

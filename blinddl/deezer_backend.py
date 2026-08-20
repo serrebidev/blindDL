@@ -13,9 +13,11 @@ The download queue tries this first whenever an ARL is configured and
 falls back to Side B if the account cannot serve the requested quality.
 """
 
+import concurrent.futures
 import hashlib
 import os
 import threading
+import time
 
 import requests
 # Deezer itself defines Blowfish as the cipher for this stream format.
@@ -64,6 +66,18 @@ _PREFERRED_FORMATS = {
 }
 # FLAC is the default when the setting is missing or unrecognized.
 _DEFAULT_FORMATS = ["FLAC", "MP3_320"]
+# Asked for only by a caller that has already tried everything else. Deezer
+# publishes plenty of tracks -- soundtrack albums especially -- at 128 and
+# nothing higher, and for those the choice is not "128 or better" but "128 or
+# a YouTube match that may be the wrong recording, or may not download at
+# all". See download(low_quality=True).
+_LAST_RESORT_FORMAT = "MP3_128"
+# How many times a dropped stream is picked up again before the download is
+# called a failure, and how long the first wait between attempts is (it
+# doubles). Deezer's CDN resets connections part-way through often enough
+# that a whole album could not otherwise be downloaded in one go.
+_STREAM_ATTEMPTS = 5
+_STREAM_RETRY_WAIT_S = 1.0
 # What playback asks for, cheapest first. Nothing is kept, so the smallest
 # stream that starts soonest is the right one; the better qualities are
 # only there for an account whose plan withholds 128.
@@ -167,16 +181,28 @@ def _blowfish_key(track_id):
                  for i in range(16))
 
 
-def _decrypt_stream(response, track_id, dest_path, progress_cb, cancel_event):
+def _decrypt_stream(response, track_id, dest_path, progress_cb, cancel_event,
+                    start_at=0, total=0):
+    """Decrypt one Deezer response into *dest_path*; return the bytes written.
+
+    *start_at* is where this response's first byte belongs in the file, so a
+    transfer that was resumed after a dropped connection carries on writing
+    where the dropped one stopped instead of starting the file again. It is
+    always a whole number of blocks, which is what keeps the stripe -- every
+    third block encrypted -- aligned across the join.
+    """
     key = _blowfish_key(track_id)
-    total = int(response.headers.get("Content-Length") or 0)
-    downloaded = 0
-    index = 0
-    with open(dest_path, "wb") as out:
+    total = total or (start_at + int(response.headers.get("Content-Length") or 0))
+    downloaded = start_at
+    index = start_at // _CHUNK
+    with open(dest_path, "r+b" if start_at else "wb") as out:
+        if start_at:
+            # Whatever the dropped connection wrote past the last whole block
+            # is not resumable, so it goes: the range asked for begins here.
+            out.seek(start_at)
+            out.truncate(start_at)
         for chunk in response.iter_content(_CHUNK):
             if cancel_event is not None and cancel_event.is_set():
-                out.close()
-                os.remove(dest_path)
                 raise DownloadCancelled()
             if len(chunk) == _CHUNK and index % 3 == 0:
                 cipher = Blowfish.new(  # nosec B304
@@ -188,6 +214,74 @@ def _decrypt_stream(response, track_id, dest_path, progress_cb, cancel_event):
             index += 1
             if progress_cb is not None:
                 progress_cb(downloaded, total)
+    return downloaded, total
+
+
+def _stream_to_file(url, track_id, dest_path, progress_cb=None,
+                    cancel_event=None):
+    """Fetch one encrypted Deezer stream, resuming after a dropped connection.
+
+    Deezer's CDN closes connections part-way through a transfer often enough
+    that a whole album could not be downloaded in one go -- and because the
+    same track plays perfectly, the failure reads as blindDL refusing to
+    download what it will happily play. Its CDN serves byte ranges, so a drop
+    is not a lost download: the transfer is asked for again from the last
+    whole block that arrived, up to _STREAM_ATTEMPTS times, and only a stream
+    that keeps dropping is reported as a failure.
+    """
+    written = 0
+    total = 0
+    last_error = None
+    for attempt in range(_STREAM_ATTEMPTS):
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelled()
+        # Only whole blocks can be resumed from: the stripe encrypts every
+        # third one, so a resume that began mid-block would decrypt the wrong
+        # bytes from there to the end of the file.
+        resume_at = written - (written % _CHUNK)
+        headers = {"User-Agent": _USER_AGENT}
+        if resume_at:
+            headers["Range"] = f"bytes={resume_at}-"
+        try:
+            with requests.get(url, stream=True, headers=headers,
+                              timeout=HTTP_TIMEOUT_S) as stream:
+                stream.raise_for_status()
+                if resume_at and stream.status_code != 206:
+                    # The range was ignored and the whole file is coming
+                    # again, so this response starts at the beginning.
+                    resume_at = 0
+                    total = 0
+                written, total = _decrypt_stream(
+                    stream, track_id, dest_path, progress_cb, cancel_event,
+                    start_at=resume_at, total=total,
+                )
+            if not total or written >= total:
+                return written
+            # A stream that ended early without raising is the same problem
+            # as one that raised, and is picked up the same way.
+            last_error = RuntimeError(
+                f"the connection ended after {written} of {total} bytes")
+        except DownloadCancelled:
+            raise
+        except (requests.RequestException, OSError) as exc:
+            last_error = exc
+            # The drop happened inside the write loop, so how much arrived is
+            # not something the call returned -- it is what is on disk. Ask
+            # the file, which was flushed on the way out of the loop.
+            written = _bytes_written(dest_path)
+        if attempt < _STREAM_ATTEMPTS - 1:
+            time.sleep(_STREAM_RETRY_WAIT_S * (2 ** attempt))
+    raise RuntimeError(
+        "Deezer's server kept closing the connection for this track "
+        f"({_STREAM_ATTEMPTS} attempts): {last_error}"
+    )
+
+
+def _bytes_written(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
 
 
 def _cover_bytes(picture_md5):
@@ -382,6 +476,49 @@ def _album_to_item(data):
     }
 
 
+# Filling in the track counts /artist/{id}/albums leaves out costs one
+# request per release, so they go out together rather than one after another,
+# and a slow catalogue is given a deadline rather than the whole search.
+_TRACK_COUNT_WORKERS = 8
+_TRACK_COUNT_BUDGET_S = 12.0
+
+
+def _fill_track_counts(items, budget_s=_TRACK_COUNT_BUDGET_S):
+    """Give album rows that arrived without a track count one, in place.
+
+    An artist's releases come from the one Deezer endpoint that lists albums
+    without ``nb_tracks``, so every row of a discography read "Album" and the
+    only way to find out that one of them is a single -- which most of them
+    are -- was to open it. Each release is asked for its own record, all of
+    them at once; a release the deadline runs out on simply keeps the row it
+    already had.
+    """
+    pending = [item for item in items
+               if not item.get("tracks") and item.get("album_id")]
+    if not pending:
+        return items
+    deadline = time.monotonic() + budget_s
+
+    def count_of(item):
+        if time.monotonic() >= deadline:
+            return None
+        try:
+            return int(_api_get(f"/album/{item['album_id']}").get(
+                "nb_tracks") or 0)
+        except Exception:  # noqa: BLE001 - a missing count is not an error
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=_TRACK_COUNT_WORKERS) as pool:
+        counts = list(pool.map(count_of, pending))
+    for item, count in zip(pending, counts):
+        if count:
+            item["tracks"] = count
+            item["format"] = search_kind.album_type_label(
+                count, item.get("record_type"))
+    return items
+
+
 def _playlist_to_item(data):
     """One row for a whole playlist, which downloads as all of its tracks."""
     tracks = int(data.get("nb_tracks") or 0)
@@ -526,7 +663,7 @@ def _search_artist_albums(query, limit=_SEARCH_TARGET):
         except Exception:
             # One artist that cannot be read must not lose the others.
             continue
-    return items[:limit]
+    return _fill_track_counts(items[:limit])
 
 
 def _search_artist_playlists(query, limit=_SEARCH_TARGET):
@@ -772,7 +909,7 @@ def artist_albums(artist_id, limit=_SEARCH_TARGET):
                 seen.add(item["id"])
                 items.append(item)
         next_path = page.get("next")
-    return items[:limit], name
+    return _fill_track_counts(items[:limit]), name
 
 
 def _media_candidates(payload):
@@ -901,11 +1038,7 @@ def playback_file(url, config, cancel_event=None):
         return dest
     partial = dest + ".part"
     try:
-        with requests.get(source["url"], stream=True,
-                          headers={"User-Agent": _USER_AGENT},
-                          timeout=HTTP_TIMEOUT_S) as stream:
-            stream.raise_for_status()
-            _decrypt_stream(stream, track_id, partial, None, cancel_event)
+        _stream_to_file(source["url"], track_id, partial, None, cancel_event)
         os.replace(partial, dest)
     except BaseException:
         try:
@@ -917,8 +1050,14 @@ def playback_file(url, config, cancel_event=None):
     return dest
 
 
-def download(url, out_dir, config, progress_cb=None, cancel_event=None):
+def download(url, out_dir, config, progress_cb=None, cancel_event=None,
+             low_quality=False):
     """Download one Deezer track URL as FLAC or MP3 320.
+
+    *low_quality* adds Deezer's 128 kbps stream as a last resort, below the
+    configured quality rather than instead of it. It is for the caller that
+    has already tried both the configured quality and Side B: at that point
+    the alternative is not a better file, it is no file.
 
     progress_cb receives (downloaded_bytes, total_bytes). Raises
     DownloadCancelled, DeezerQualityError, or RuntimeError.
@@ -938,8 +1077,10 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None):
             f"Deezer gave no stream token for track {track_id} "
             "(region-locked or unavailable).")
 
-    wanted = _PREFERRED_FORMATS.get(
-        config.get("deezer_format", "flac"), _DEFAULT_FORMATS)
+    wanted = list(_PREFERRED_FORMATS.get(
+        config.get("deezer_format", "flac"), _DEFAULT_FORMATS))
+    if low_quality and _LAST_RESORT_FORMAT not in wanted:
+        wanted.append(_LAST_RESORT_FORMAT)
     candidates = []
     fallback_candidates = []
     details = None
@@ -983,11 +1124,8 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None):
     # finished download.
     partial = dest + ".part"
     try:
-        with requests.get(source["url"], stream=True,
-                          headers={"User-Agent": _USER_AGENT},
-                          timeout=HTTP_TIMEOUT_S) as stream:
-            stream.raise_for_status()
-            _decrypt_stream(stream, track_id, partial, progress_cb, cancel_event)
+        _stream_to_file(
+            source["url"], track_id, partial, progress_cb, cancel_event)
         os.replace(partial, dest)
     except BaseException:
         try:

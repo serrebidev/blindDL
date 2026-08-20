@@ -15,6 +15,7 @@ import threading
 import wx
 
 from .. import associations, soulseek_backend, torrent_engine
+from . import sounds
 
 # Label, stored value. "Original" means the file is kept exactly as the site
 # serves it: no ffmpeg pass, no quality lost, whatever container comes down.
@@ -934,8 +935,84 @@ class SettingsDialog(wx.Dialog):
         )
         sizer.Add(self.speak_status_check, 0, wx.ALL, 8)
 
+        sizer.Add(self._heading(page, "Sounds"), 0, wx.TOP | wx.LEFT, 12)
+        self.sounds_check = wx.CheckBox(
+            page, label="Play a s&ound when a download finishes or fails"
+        )
+        self.sounds_check.SetValue(bool(config.get("sounds_enabled", True)))
+        self.sounds_check.SetHelpText(
+            "One short sound for a download that worked and a different one "
+            "for a download that did not, so the outcome carries from another "
+            "window without waiting for the screen reader's turn. A batch "
+            "that finishes together plays one sound, not one per file, and a "
+            "batch with any failure in it plays the failure sound."
+        )
+        sizer.Add(self.sounds_check, 0, wx.ALL, 8)
+
+        wildcard = "Wave files (*.wav)|*.wav|All files (*.*)|*.*"
+        complete_label = wx.StaticText(page, label="Fi&nished sound:")
+        self.sound_complete_picker = _name_picker(
+            wx.FilePickerCtrl(
+                page,
+                path=config.get("sound_download_complete", ""),
+                message="Choose the sound for a finished download",
+                wildcard=wildcard,
+                style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+            ),
+            "Finished download sound",
+        )
+        self.sound_complete_picker.SetHelpText(
+            "Leave empty for the sound blindDL ships."
+        )
+        failed_label = wx.StaticText(page, label="Fai&led sound:")
+        self.sound_failed_picker = _name_picker(
+            wx.FilePickerCtrl(
+                page,
+                path=config.get("sound_download_failed", ""),
+                message="Choose the sound for a failed download",
+                wildcard=wildcard,
+                style=wx.FLP_OPEN | wx.FLP_USE_TEXTCTRL,
+            ),
+            "Failed download sound",
+        )
+        self.sound_failed_picker.SetHelpText(
+            "Leave empty for the sound blindDL ships."
+        )
+        self.sound_test_btn = wx.Button(page, label="&Try these sounds")
+        self.sound_test_btn.SetHelpText(
+            "Plays the finished sound, then the failed one."
+        )
+        self.sound_test_btn.Bind(wx.EVT_BUTTON, self._on_test_sounds)
+        sizer.Add(complete_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sizer.Add(self.sound_complete_picker, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(failed_label, 0, wx.LEFT | wx.RIGHT, 8)
+        sizer.Add(self.sound_failed_picker, 0, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(self.sound_test_btn, 0, wx.LEFT | wx.BOTTOM, 8)
+
         page.SetSizer(sizer)
         return page
+
+    def _on_test_sounds(self, event):
+        """Play both sounds as they are set right now, before saving.
+
+        Choosing a sound file is choosing something you cannot see, from a
+        list of names; hearing it is the only way to know it is the right
+        one, and being made to save and then fail a download to find out is
+        not a way to know anything.
+        """
+        preview_config = dict(self.config.data)
+        preview_config["sounds_enabled"] = self.sounds_check.GetValue()
+        preview_config["sound_download_complete"] = (
+            self.sound_complete_picker.GetPath().strip())
+        preview_config["sound_download_failed"] = (
+            self.sound_failed_picker.GetPath().strip())
+        if not preview_config["sounds_enabled"]:
+            wx.MessageBox(
+                "Sounds are switched off.", "blindDL",
+                wx.OK | wx.ICON_INFORMATION, self)
+            return
+        sounds.play(preview_config, sounds.COMPLETE)
+        wx.CallLater(900, sounds.play, preview_config, sounds.FAILED)
 
     def _accounts_page(self):
         page = wx.Panel(self.notebook)
@@ -1047,7 +1124,11 @@ class SettingsDialog(wx.Dialog):
         )
         self.deezer_format_choice.SetHelpText(
             "FLAC takes Deezer's lossless master, falling back to MP3 320 "
-            "where it is unavailable. MP3 320 asks for that bitrate directly."
+            "where it is unavailable. MP3 320 asks for that bitrate directly. "
+            "Deezer publishes some releases -- soundtracks especially -- at "
+            "128 and nothing higher; those are fetched from YouTube Music "
+            "instead, and only if that fails as well does blindDL take "
+            "Deezer's own 128 stream rather than leave you with nothing."
         )
         _row(sizer, deezer_format_label, self.deezer_format_choice)
         arl_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -1365,6 +1446,11 @@ class SettingsDialog(wx.Dialog):
         self.config["tray_on_minimize"] = self.tray_minimize_check.GetValue()
         self.config["start_maximized"] = self.start_maximized_check.GetValue()
         self.config["speak_status"] = self.speak_status_check.GetValue()
+        self.config["sounds_enabled"] = self.sounds_check.GetValue()
+        self.config["sound_download_complete"] = (
+            self.sound_complete_picker.GetPath().strip())
+        self.config["sound_download_failed"] = (
+            self.sound_failed_picker.GetPath().strip())
         self.config["auto_update"] = self.update_check.GetValue()
         # Kept in saved configs for backward compatibility; automatic update
         # is now one unambiguous setting.
