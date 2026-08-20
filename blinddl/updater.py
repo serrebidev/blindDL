@@ -27,6 +27,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import zipfile
@@ -449,6 +450,19 @@ _HELPER_COMMON = r"""
 $ErrorActionPreference = 'Stop'
 $Steps = New-Object System.Collections.ArrayList
 
+# A process holds its own working directory open, and a portable blindDL
+# starts in the folder it lives in -- the folder this script has to rename.
+# The helper inherits that directory when blindDL starts it, so the rename
+# used to fail against nothing but the script performing it: "the process
+# cannot access the file because it is being used by another process", every
+# time, on a machine where nothing else was wrong. blindDL starts the helper
+# elsewhere now; this is the same move made from inside, for a helper that
+# was started some other way.
+$Elsewhere = if ($env:SystemRoot) { $env:SystemRoot }
+             else { [System.IO.Path]::GetTempPath() }
+Set-Location -LiteralPath $Elsewhere
+[System.IO.Directory]::SetCurrentDirectory($Elsewhere)
+
 function Note([string]$Text) { [void]$Steps.Add($Text) }
 
 function Save([bool]$Ok, [string]$Detail) {
@@ -493,6 +507,14 @@ function Wait-ForRelease([string]$Path) {
         $handle = [System.IO.File]::Open($Path, 'Open', 'ReadWrite', 'None')
         $handle.Close()
         return $true
+      } catch [System.UnauthorizedAccessException] {
+        # An installed blindDL lives under Program Files, where this script
+        # runs without the rights to open anything for writing. The question
+        # cannot be answered there, and asking it forever meant an installed
+        # blindDL waited out the full five minutes and then reported itself
+        # still running. The process is gone; the elevated installer that
+        # follows is the one equipped to deal with a file still in use.
+        return $true
       } catch { }
     }
     Start-Sleep -Milliseconds 250
@@ -525,13 +547,30 @@ function Move-Folder([string]$From, [string]$To) {
   [System.IO.Directory]::Move($From, $To)
 }
 
+# A virus scanner reading the executable blindDL just closed, or an Explorer
+# window left sitting in the folder, holds it for a few seconds. Giving up on
+# the first refusal turns a moment's contention into an update that never
+# happens, so the folder is asked for repeatedly before the answer is taken
+# as final. Only used where both ends are on the same volume: a cross-volume
+# move fails the same way every time, and has a copy waiting for it instead.
+function Move-FolderSoon([string]$From, [string]$To) {
+  $deadline = (Get-Date).AddSeconds(60)
+  while ($true) {
+    try { Move-Folder $From $To; return }
+    catch {
+      if ((Get-Date) -ge $deadline) { throw }
+      Start-Sleep -Milliseconds 500
+    }
+  }
+}
+
 function Undo-Swap {
   try {
     if (Test-Path -LiteralPath $Target) {
       Remove-Item -LiteralPath $Target -Recurse -Force
     }
     if (Test-Path -LiteralPath $Backup) {
-      Move-Folder $Backup $Target
+      Move-FolderSoon $Backup $Target
       Note 'Put the previous blindDL back.'
     }
   } catch {
@@ -549,7 +588,7 @@ try {
   if (Test-Path -LiteralPath $Backup) {
     Remove-Item -LiteralPath $Backup -Recurse -Force
   }
-  Move-Folder $Target $Backup
+  Move-FolderSoon $Target $Backup
   Note 'Moved the old blindDL folder aside.'
 } catch {
   Save $false ('The old blindDL folder is in use and could not be replaced: ' +
@@ -664,16 +703,53 @@ def take_update_result():
     return result if isinstance(result, dict) else None
 
 
+def _discard_staged_update(version):
+    """Delete the staging folder of an update that has already taken.
+
+    It holds the release package and the tree unpacked from it -- a hundred
+    and thirty megabytes, twice over on the way in. _prune_old_updates keeps
+    the newest, which is the right answer while an update is still pending
+    and the wrong one afterwards: a machine that was up to date went on
+    holding the whole of the version it was already running, until some
+    later release came along to displace it.
+    """
+    if not version:
+        return
+    folder = Path(app_data_dir()) / "updates" / f"v{version}"
+    if folder.is_dir():
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def last_update_failure():
     """One spoken sentence when the previous update did not take, else None."""
     result = take_update_result()
-    if result is None or result.get("ok"):
+    if result is None:
         return None
     version = str(result.get("version") or "").strip()
+    if result.get("ok"):
+        # Only what this blindDL is now running: an "ok" for anything else
+        # is not this install's, and the package may still be wanted.
+        if _version_tuple(version) == _version_tuple(__version__):
+            _discard_staged_update(version)
+        return None
     detail = str(result.get("detail") or "").strip()
     head = (f"blindDL {version} did not install" if version
             else "The last blindDL update did not install")
     return f"{head}: {detail}" if detail else f"{head}."
+
+
+def _helper_cwd():
+    """A directory the update helper can run in without holding it open.
+
+    A child process inherits blindDL's working directory, and a portable
+    blindDL is started in the very folder an update has to replace. Windows
+    holds a directory open for as long as it is some process's current one,
+    so the helper arrived already blocking the rename it was there to make.
+    """
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or ""
+    if root and Path(root).is_dir():
+        return root
+    return tempfile.gettempdir()
 
 
 def _write_helper(path, script):
@@ -701,7 +777,7 @@ def _portable_windows_update(package_path, version):
         "-File", str(helper), "-BlindDLPid", str(os.getpid()),
         "-Source", str(source), "-Target", str(target),
         "-Result", str(_update_result_path()), "-Version", str(version),
-    ], **_subprocess_options())
+    ], cwd=_helper_cwd(), **_subprocess_options())
     return True
 
 
@@ -722,7 +798,7 @@ def install_app_update(update, package_path, log=lambda _line: None):
             "-Installer", str(package_path), "-Target", str(target),
             "-Result", str(_update_result_path()),
             "-Version", str(update.version),
-        ], **_subprocess_options())
+        ], cwd=_helper_cwd(), **_subprocess_options())
         return True
     if sys.platform == "darwin":
         log("Opening the update disk image. Replace BlindDL in Applications.")
@@ -731,13 +807,15 @@ def install_app_update(update, package_path, log=lambda _line: None):
     if suffixes.endswith(".deb"):
         if shutil.which("pkexec"):
             log("Starting the system package installer...")
-            # apt-get takes package names, not paths; a leading ./ is what
-            # makes it install a local .deb (resolving dependencies) rather
-            # than answer "Unable to locate package".
+            # apt-get takes package names, not paths, and reads anything with
+            # a slash in it as a local file to install (resolving dependencies
+            # for it) rather than answering "Unable to locate package". The
+            # slash has to come from an absolute path: pkexec runs its program
+            # in the target user's home directory, so "./name.deb" would be
+            # looked for in root's home, where it is not.
             subprocess.Popen(
                 ["pkexec", "apt-get", "install", "-y",
-                 f"./{package_path.name}"],
-                cwd=package_path.parent,
+                 str(package_path.resolve())],
             )
             return True
         log("Opening the package in your system installer...")
@@ -754,7 +832,13 @@ def install_app_update(update, package_path, log=lambda _line: None):
         if installer is None:
             raise UpdateError("The Linux update does not contain install.sh.")
         log("Starting the BlindDL user installer...")
-        subprocess.Popen(["sh", str(installer)], cwd=installer.parent)
+        # blindDL closes as soon as this returns True, so the installer is the
+        # only thing left to bring it back; the same script run by hand from a
+        # terminal does not, and says what to run instead.
+        environment = dict(os.environ, BLINDDL_RESTART="1")
+        subprocess.Popen(
+            ["sh", str(installer)], cwd=installer.parent, env=environment
+        )
         return True
     raise UpdateError(f"Cannot install update package: {package_path.name}")
 

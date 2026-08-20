@@ -65,11 +65,32 @@ install_deno() {
 
 install_native_tools
 install_deno
-mkdir -p "$TARGET_DIR" "$BIN_DIR" "$APPS_DIR"
-cp -R "$SOURCE_DIR"/. "$TARGET_DIR"/
-chmod +x "$TARGET_DIR/blindDL"
+mkdir -p "$BIN_DIR" "$APPS_DIR"
+
+# Copying straight over an installed blindDL writes into the file a running
+# one is executing from -- "Text file busy" -- and it leaves behind every
+# file the previous release shipped that this one does not. The new tree is
+# built beside the old one and takes its place in a single rename instead,
+# which is also what makes this safe to run as a self-update.
+STAGE_DIR="$TARGET_DIR.new"
+PREVIOUS_DIR="$TARGET_DIR.previous"
+rm -rf "$STAGE_DIR" "$PREVIOUS_DIR"
+mkdir -p "$STAGE_DIR"
+cp -R "$SOURCE_DIR"/. "$STAGE_DIR"/
+chmod +x "$STAGE_DIR/blindDL"
+cp "$SOURCE_DIR/install.sh" "$STAGE_DIR/install.sh"
+if [ -d "$TARGET_DIR" ]; then
+    mv "$TARGET_DIR" "$PREVIOUS_DIR"
+fi
+if ! mv "$STAGE_DIR" "$TARGET_DIR"; then
+    if [ -d "$PREVIOUS_DIR" ]; then
+        mv "$PREVIOUS_DIR" "$TARGET_DIR"
+    fi
+    echo "blindDL could not be put in place." >&2
+    exit 1
+fi
+rm -rf "$PREVIOUS_DIR"
 ln -sf "$TARGET_DIR/blindDL" "$BIN_DIR/blinddl"
-cp "$SOURCE_DIR/install.sh" "$TARGET_DIR/install.sh"
 cat > "$APPS_DIR/blinddl.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -82,3 +103,10 @@ StartupNotify=true
 EOF
 
 echo "blindDL installed. Run: $BIN_DIR/blinddl"
+
+# blindDL closes before handing the install over, so a self-update would
+# otherwise end with the application gone. Only its own updater sets this;
+# a person running the installer from a terminal gets the line above.
+if [ "${BLINDDL_RESTART:-}" = "1" ]; then
+    "$BIN_DIR/blinddl" >/dev/null 2>&1 &
+fi

@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 import stat
+import tarfile
 import zipfile
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -262,7 +264,7 @@ def test_the_portable_update_swaps_folders_rather_than_merging_them(tmp_path):
 
     script = (tmp_path / "finish-portable-update.ps1").read_text(
         encoding="utf-8-sig")
-    assert "Move-Folder $Target $Backup" in script
+    assert "Move-FolderSoon $Target $Backup" in script
     assert "Move-Folder $Source $Target" in script
     assert "Copy-Item -Destination $Target -Recurse" not in script
     # Directory.Move is a rename: it either happens or it does not. Move-Item
@@ -274,6 +276,99 @@ def test_the_portable_update_swaps_folders_rather_than_merging_them(tmp_path):
     assert arguments[arguments.index("-Version") + 1] == "9.9.9"
     assert arguments[arguments.index("-Result") + 1] == str(
         tmp_path / "updates" / updater.UPDATE_RESULT_NAME)
+
+
+def test_the_update_helper_does_not_stand_in_its_own_way(tmp_path):
+    # A child process inherits blindDL's working directory, and a portable
+    # blindDL runs from the folder an update has to rename. Windows holds a
+    # directory open for whichever process has it as its current one, so the
+    # helper used to arrive already blocking the only thing it was there to
+    # do -- on every machine, every time, with nothing else wrong.
+    package = _portable_update_zip(tmp_path / "blindDL-v9.9.9-windows-x64.zip")
+    installed = tmp_path / "app"
+    installed.mkdir()
+    (installed / "blindDL.exe").write_bytes(b"the old blindDL")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    started_in = Path(popen.call_args.kwargs["cwd"]).resolve()
+    assert started_in != installed.resolve()
+    assert installed.resolve() not in started_in.parents
+    assert started_in.is_dir()
+    # And again from inside, for a helper that was started some other way.
+    script = (tmp_path / "finish-portable-update.ps1").read_text(
+        encoding="utf-8-sig")
+    assert "[System.IO.Directory]::SetCurrentDirectory($Elsewhere)" in script
+
+
+def test_the_installed_helper_also_runs_clear_of_the_install(tmp_path):
+    package = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
+    package.write_bytes(b"installer")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+    installed = tmp_path / "Program Files" / "blindDL"
+    installed.mkdir(parents=True)
+
+    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    started_in = Path(popen.call_args.kwargs["cwd"]).resolve()
+    assert installed.resolve() not in (started_in, *started_in.parents)
+
+
+def test_a_read_only_install_folder_is_not_mistaken_for_a_running_blinddl(tmp_path):
+    # The helper waits for blindDL to let go of its own executable by opening
+    # it for writing. An installed blindDL lives under Program Files, where an
+    # unelevated helper may not open anything that way -- and the answer
+    # "access denied" is not the answer "still running", which is what it was
+    # taken for: five minutes of waiting and then a failure, every time.
+    package = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
+    package.write_bytes(b"installer")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.subprocess, "Popen"):
+        assert updater.install_app_update(update, package)
+
+    script = (tmp_path / "finish-installed-update.ps1").read_text(
+        encoding="utf-8-sig")
+    assert "catch [System.UnauthorizedAccessException]" in script
+
+
+def test_a_local_deb_is_installed_by_a_path_pkexec_cannot_lose(tmp_path):
+    # pkexec runs its program in the target user's home directory, so a
+    # package named "./blindDL.deb" is looked for in root's home, where it is
+    # not -- and apt-get answers "Unable to locate package" instead.
+    package = tmp_path / "blinddl_9.9.9_amd64.deb"
+    package.write_bytes(b"package")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "linux"),             mock.patch.object(updater.shutil, "which",
+                              return_value="/usr/bin/pkexec"),             mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    command = popen.call_args.args[0]
+    assert command[-1] == str(package.resolve())
+    assert os.path.isabs(command[-1])
+
+
+def test_the_linux_installer_is_told_to_bring_blinddl_back(tmp_path):
+    # blindDL closes as soon as the installer starts, so the installer is the
+    # only thing left that can start it again.
+    package = tmp_path / "blindDL-v9.9.9-linux-x64.tar.gz"
+    tree = tmp_path / "blindDL-9.9.9"
+    tree.mkdir()
+    (tree / "install.sh").write_text("#!/bin/sh" + chr(10))
+    with tarfile.open(package, "w:gz") as archive:
+        archive.add(tree, arcname=tree.name)
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "linux"),             mock.patch.object(updater.shutil, "which", return_value=None),             mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    assert popen.call_args.kwargs["env"]["BLINDDL_RESTART"] == "1"
 
 
 def test_an_update_that_failed_after_blinddl_closed_is_read_out_once(tmp_path):
@@ -303,6 +398,37 @@ def test_an_update_that_worked_says_nothing(tmp_path):
 
     with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)):
         assert updater.last_update_failure() is None
+
+
+def test_an_update_that_took_gives_its_package_back(tmp_path):
+    # The staging folder holds the release package and the tree unpacked from
+    # it. Both did their job the moment the update took, and nothing used to
+    # clear them until some later release came along to displace them.
+    staged = tmp_path / "updates" / "v9.9.9"
+    (staged / "portable").mkdir(parents=True)
+    (staged / "blindDL-v9.9.9-windows-x64.zip").write_bytes(b"the package")
+    result = tmp_path / "updates" / updater.UPDATE_RESULT_NAME
+    result.write_text(json.dumps({"ok": True, "version": "9.9.9"}),
+                      encoding="utf-8")
+
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater, "__version__", "9.9.9"):
+        assert updater.last_update_failure() is None
+    assert not staged.exists()
+
+
+def test_a_package_for_some_other_version_is_left_alone(tmp_path):
+    # An "ok" naming a version this blindDL is not running did not come from
+    # this install, and the package it names may still be wanted.
+    staged = tmp_path / "updates" / "v9.9.9"
+    staged.mkdir(parents=True)
+    (staged / "blindDL-v9.9.9-windows-x64.zip").write_bytes(b"the package")
+    result = tmp_path / "updates" / updater.UPDATE_RESULT_NAME
+    result.write_text(json.dumps({"ok": True, "version": "9.9.9"}),
+                      encoding="utf-8")
+
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater, "__version__", "1.0.0"):
+        assert updater.last_update_failure() is None
+    assert (staged / "blindDL-v9.9.9-windows-x64.zip").is_file()
 
 
 def test_a_staged_package_is_not_downloaded_a_second_time(tmp_path):
