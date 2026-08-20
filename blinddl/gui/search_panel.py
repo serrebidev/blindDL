@@ -130,6 +130,10 @@ SOULSEEK_ENGINE_KINDS = {
     ENGINE_SOULSEEK_BOOKS: "book",
     ENGINE_SOULSEEK_TORRENTS: "torrent",
 }
+# How many lists a browse keeps behind it. Following an artist to one of
+# their releases to its tracks is three steps; a stack this deep is really
+# only a guard against a session that never stops digging.
+BROWSE_HISTORY_DEPTH = 20
 # The Sort by control rearranges rows that have already arrived. The Order
 # control above it goes out with the query and decides which rows arrive at
 # all; the two are separate because a site cannot be re-asked for nothing,
@@ -431,6 +435,53 @@ def _is_collection_item(item):
     return _is_album_item(item) or _is_playlist_item(item)
 
 
+# Which backend can look one row's album and artist ids up again. Side B
+# reads Deezer's catalogue, so its rows browse through Deezer like any other
+# Deezer row; everything else -- a file on a music site, a peer's share, a
+# torrent -- has an artist's name and no catalogue to find them in.
+_BROWSE_BACKENDS = (
+    ("applemusic", applemusic_backend),
+    ("deezer", deezer_backend),
+    ("sideb", deezer_backend),
+)
+
+
+def _browse_backend(item):
+    """The backend that can open *item*'s album or artist, or None."""
+    kind = str((item or {}).get("kind") or "")
+    for prefix, backend in _BROWSE_BACKENDS:
+        if kind.startswith(prefix):
+            return backend
+    return None
+
+
+def _can_browse_album(item):
+    """Whether this row knows which album it is, or came off.
+
+    True for a track that names its album and for an album row itself: an
+    album row's track list is the thing to look at before queueing all of
+    it, which is the other half of what pressing Enter does.
+    """
+    return bool(
+        item
+        and _browse_backend(item) is not None
+        and str(item.get("album_id") or "").strip()
+    )
+
+
+def _can_browse_artist(item):
+    """Whether this row knows whose work it is.
+
+    A playlist is nobody's release -- its "artist" column is the curator --
+    so those rows never carry an artist id and are not offered this.
+    """
+    return bool(
+        item
+        and _browse_backend(item) is not None
+        and str(item.get("artist_id") or "").strip()
+    )
+
+
 def _kind_capable_sources(engine, sources, kind):
     """Split *sources* into the ones that can search by *kind* and the rest.
 
@@ -543,7 +594,11 @@ def _result_type(item):
     """
     known = str(item.get("format") or "").strip()
     if known:
-        return known if known.isupper() or " " in known else known.upper()
+        # "mp3" is a file extension and reads as one in capitals; "Album",
+        # "Single" and "EP" are words the catalogue chose and are already
+        # cased the way they should be read. Anything not written in plain
+        # lower case was cased deliberately, so it is left alone.
+        return known.upper() if known.islower() else known
     for field in ("direct_url", "download_url", "file_name", "url"):
         value = str(item.get(field) or "").split("?")[0].split("#")[0].lower()
         for extension in _URL_EXTENSIONS:
@@ -826,6 +881,10 @@ class SearchPanel(wx.Panel):
         self.full_playback_token = None
         self.archive_token = None
         self.collection_token = None
+        self.browse_token = None
+        # The lists a browse stepped away from, newest last, so following an
+        # artist into a release can be walked back out of.
+        self.browse_history = []
         # Refreshes the status bar while slow sites are still working.
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
@@ -951,6 +1010,10 @@ class SearchPanel(wx.Panel):
         self.results_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_download_selected)
         self.results_list.Bind(wx.EVT_CONTEXT_MENU, self.on_results_menu)
         self.results_list.Bind(wx.EVT_CHAR, self.on_results_char)
+        # Alt+Left is a system key -- Windows sends WM_SYSKEYDOWN and no
+        # WM_CHAR at all -- so the key that steps back out of a browse has
+        # to be caught before the character events, not among them.
+        self.results_list.Bind(wx.EVT_KEY_DOWN, self.on_results_key)
 
         self.preview_btn = wx.Button(self, label="&Preview selected")
         self.preview_btn.SetHelpText(
@@ -1382,6 +1445,10 @@ class SearchPanel(wx.Panel):
         if self.stop is not None:
             self.stop.set()
         self.stop = threading.Event()
+        # A search is a new list, so there is no longer an album or an
+        # artist to step back out of.
+        self.browse_history = []
+        self.browse_token = None
         self.results = []
         self._result_index = {}
         self.result_engine = engine
@@ -2298,6 +2365,189 @@ class SearchPanel(wx.Panel):
             message += f" {len(errors)} {failed} could not be read."
         self.frame.announce(message)
 
+    # -- browsing an artist or album -----------------------------------------
+    #
+    # A search answers with a list and stops there: the album and the artist
+    # of a row are two strings in two columns, and there is nowhere to go
+    # from them. These turn them back into places -- the album a track came
+    # off, and every release its artist has out -- each of which opens in
+    # turn, with the list that was showing kept so it can be stepped back
+    # out of.
+
+    def browse_album(self, item):
+        """Show the track list of the album *item* is on, or is."""
+        backend = _browse_backend(item)
+        album_id = str((item or {}).get("album_id") or "").strip()
+        if backend is None or not album_id:
+            self.frame.announce("That result does not name an album.")
+            return
+        name = str(item.get("album") or item.get("title") or "").strip()
+        self._start_browse(
+            backend.album_items,
+            album_id,
+            "album",
+            f"Reading album: {name}" if name else "Reading album...",
+        )
+
+    def browse_artist(self, item):
+        """Show every release the artist behind *item* has out."""
+        backend = _browse_backend(item)
+        artist_id = str((item or {}).get("artist_id") or "").strip()
+        if backend is None or not artist_id:
+            self.frame.announce("That result does not name an artist.")
+            return
+        name = str(item.get("artist") or "").strip()
+        self._start_browse(
+            backend.artist_albums,
+            artist_id,
+            "artist",
+            f"Reading releases by {name}..." if name else "Reading releases...",
+        )
+
+    def _start_browse(self, fetch, catalogue_id, what, announcement):
+        """Fetch one catalogue page off the GUI thread."""
+        # A browse replaces the list, so a search still trickling in
+        # underneath it has to stop being delivered first: taking the search
+        # token is what makes its late sites report to nobody.
+        token = self.token = self.browse_token = object()
+        if self.stop is not None:
+            self.stop.set()
+        self.done = True
+        self.timer.Stop()
+        self.render_timer.Stop()
+        self.search_btn.Disable()
+        self.stop_btn.Disable()
+        self.frame.announce(announcement)
+        threading.Thread(
+            target=self._run_browse,
+            args=(token, fetch, catalogue_id, what),
+            daemon=True,
+            name="blinddl-browse",
+        ).start()
+
+    def _run_browse(self, token, fetch, catalogue_id, what):
+        try:
+            items, title = fetch(catalogue_id)
+            error = ""
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            items, title, error = [], "", str(exc)
+        wx.CallAfter(self._browse_ready, token, items, title, what, error)
+
+    def _browse_ready(self, token, items, title, what, error):
+        if self.closing or token is not self.browse_token:
+            return
+        self.search_btn.Enable()
+        noun = "album" if what == "album" else "artist"
+        if error:
+            self.frame.announce(f"Could not read that {noun}.")
+            wx.MessageBox(
+                f"Could not read that {noun}:\n{error}",
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+        if not items:
+            # The catalogue answered, and had nothing under it. The list the
+            # user was reading stays where it is rather than emptying.
+            self.frame.announce(f"Nothing listed for that {noun}.")
+            return
+        self._push_browse_history()
+        self._show_browse_results(items)
+        count = len(items)
+        if what == "album":
+            word = "track" if count == 1 else "tracks"
+        else:
+            word = "release" if count == 1 else "releases"
+        heading = title or ("that album" if what == "album" else "that artist")
+        self.frame.announce(f"{heading}: {count} {word}. Alt+Left goes back.")
+
+    def _push_browse_history(self):
+        """Keep the list that is showing, and the row being read in it."""
+        self.browse_history.append({
+            "results": self.results,
+            "index": self._result_index,
+            "engine": self.result_engine,
+            "sort": self.sort_choice.GetSelection(),
+            "query": self.query,
+            "order": self.next_result_order,
+            "focus": self.results_list.GetFocusedItem(),
+        })
+        del self.browse_history[:-BROWSE_HISTORY_DEPTH]
+
+    def _show_browse_results(self, items):
+        """Adopt *items* as the list, in the order the catalogue gave them."""
+        self.results = [dict(item) for item in items]
+        for order, item in enumerate(self.results):
+            # These rows were built by a backend rather than by the result
+            # pipeline, and a row copied out of a previous list would
+            # otherwise carry that list's arrival order and dedup key.
+            item.pop("_dedup_key", None)
+            item["_search_order"] = order
+        self.next_result_order = len(self.results)
+        self._result_index = {
+            self._key_for(item): index
+            for index, item in enumerate(self.results)
+        }
+        self.shown_sources = set()
+        self.asked = []
+        self.done = True
+        # A release lists its tracks in running order, and a discography
+        # lists itself newest first. Both of those *are* the answer, so the
+        # sort goes back to Relevance -- which for a browse means "in the
+        # order the catalogue gave them" rather than a ranking.
+        if self.sort_choice.GetCount():
+            self.sort_choice.SetSelection(SORT_RELEVANCE)
+        self._render_results(self.result_engine)
+        self._focus_result_row(0)
+
+    def browse_back(self):
+        """Return to the list that was showing before the last browse."""
+        if not self.browse_history:
+            self.frame.announce("There is nothing to go back to.")
+            return
+        previous = self.browse_history.pop()
+        # Same reason as starting a browse: whatever the old list was left
+        # waiting on must not be allowed to land on top of it now.
+        self.token = self.browse_token = object()
+        self.results = previous["results"]
+        self._result_index = previous["index"]
+        self.result_engine = previous["engine"]
+        self.query = previous["query"]
+        self.next_result_order = previous["order"]
+        self.shown_sources = set()
+        self.asked = []
+        self.done = True
+        if previous["sort"] < self.sort_choice.GetCount():
+            self.sort_choice.SetSelection(previous["sort"])
+        self._render_results(self.result_engine)
+        self.frame.announce(f"Back to {self._result_count()}.")
+        self._focus_result_row(previous["focus"])
+
+    def _focus_result_row(self, index):
+        """Put the reader on one row of the list that just changed."""
+        if not self.results:
+            return
+        index = index if 0 <= index < len(self.results) else 0
+        self.results_list.SetFocus()
+        self.results_list.Focus(index)
+        self.results_list.Select(index)
+
+    def on_results_key(self, event):
+        """Back out of an album or an artist without opening a menu.
+
+        Alt+Left and Backspace are what a browser and a file manager use for
+        "up a level", so the way into a release has a way out that needs no
+        looking for. Neither means anything else in a results list.
+        """
+        key = event.GetKeyCode()
+        if self.browse_history and (
+            (key == wx.WXK_LEFT and event.AltDown()) or key == wx.WXK_BACK
+        ):
+            self.browse_back()
+            return
+        event.Skip()
+
     def on_results_char(self, event):
         if event.GetKeyCode() == 3 and event.ControlDown():  # Ctrl+C
             self.on_copy_url(event)
@@ -2387,21 +2637,35 @@ class SearchPanel(wx.Panel):
         soulseek_item = (
             focused if focused and focused.get("kind") == "soulseek" else None
         )
-        download_folder = menu.Append(wx.ID_ANY, "Download containing &folder")
-        browse_user = menu.Append(wx.ID_ANY, "&Browse user's files")
-        send_message = menu.Append(wx.ID_ANY, "Send user a &message")
-        add_friend = menu.Append(wx.ID_ANY, "Add user to &friends")
-        free_slot = menu.Append(wx.ID_ANY, "Give user a free &slot")
-        view_profile = menu.Append(wx.ID_ANY, "View user &profile")
-        for action in (
-            download_folder,
-            browse_user,
-            send_message,
-            add_friend,
-            free_slot,
-            view_profile,
-        ):
-            action.Enable(soulseek_item is not None)
+        # Everything below is added only when the focused row is the thing it
+        # acts on. Six greyed-out Soulseek commands on every row of every
+        # search is six items to arrow past to reach Copy URL -- and they sat
+        # there even with Soulseek switched off, where they could never come
+        # back. A command that cannot apply is left out rather than disabled.
+        album_browse = artist_browse = browse_back = None
+        if (_can_browse_album(focused) or _can_browse_artist(focused)
+                or self.browse_history):
+            menu.AppendSeparator()
+            if _can_browse_album(focused):
+                album_browse = menu.Append(wx.ID_ANY, "Show album &tracks")
+            if _can_browse_artist(focused):
+                artist_browse = menu.Append(
+                    wx.ID_ANY, "Show artist's &releases")
+            if self.browse_history:
+                browse_back = menu.Append(
+                    wx.ID_ANY, "&Go back to previous results\tAlt+Left")
+        download_folder = browse_user = send_message = None
+        add_friend = free_slot = view_profile = None
+        if soulseek_item is not None:
+            menu.AppendSeparator()
+            download_folder = menu.Append(
+                wx.ID_ANY, "Download containing &folder")
+            browse_user = menu.Append(wx.ID_ANY, "&Browse user's files")
+            send_message = menu.Append(wx.ID_ANY, "Send user a &message")
+            add_friend = menu.Append(wx.ID_ANY, "Add user to &friends")
+            free_slot = menu.Append(wx.ID_ANY, "Give user a free &slot")
+            view_profile = menu.Append(wx.ID_ANY, "View user &profile")
+        menu.AppendSeparator()
         copy_url = menu.Append(wx.ID_ANY, "Copy &URL\tCtrl+C")
         open_browser = menu.Append(wx.ID_ANY, "&Open in browser")
         menu.AppendSeparator()
@@ -2430,46 +2694,54 @@ class SearchPanel(wx.Panel):
         menu.Bind(wx.EVT_MENU, self.on_preview_selected, preview_item)
         menu.Bind(wx.EVT_MENU, self.on_play_full_selected, play_full_item)
         menu.Bind(wx.EVT_MENU, self.on_download_selected, download)
-        menu.Bind(
-            wx.EVT_MENU,
-            lambda selected: self._download_soulseek_folder(soulseek_item),
-            download_folder,
-        )
-        menu.Bind(
-            wx.EVT_MENU,
-            lambda selected: self.frame.open_soulseek_user(
-                soulseek_item.get("username", "") if soulseek_item else ""
-            ),
-            browse_user,
-        )
-        menu.Bind(
-            wx.EVT_MENU,
-            lambda selected: self.frame.message_soulseek_user(
-                soulseek_item.get("username", "") if soulseek_item else ""
-            ),
-            send_message,
-        )
-        menu.Bind(
-            wx.EVT_MENU,
-            lambda selected: self.frame.add_soulseek_friend(
-                soulseek_item.get("username", "") if soulseek_item else ""
-            ),
-            add_friend,
-        )
-        menu.Bind(
-            wx.EVT_MENU,
-            lambda selected: self.frame.give_soulseek_free_slot(
-                soulseek_item.get("username", "") if soulseek_item else ""
-            ),
-            free_slot,
-        )
-        menu.Bind(
-            wx.EVT_MENU,
-            lambda selected: self.frame.view_soulseek_profile(
-                soulseek_item.get("username", "") if soulseek_item else ""
-            ),
-            view_profile,
-        )
+        if album_browse is not None:
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.browse_album(focused),
+                album_browse,
+            )
+        if artist_browse is not None:
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.browse_artist(focused),
+                artist_browse,
+            )
+        if browse_back is not None:
+            menu.Bind(
+                wx.EVT_MENU, lambda selected: self.browse_back(), browse_back
+            )
+        if soulseek_item is not None:
+            username = soulseek_item.get("username", "")
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self._download_soulseek_folder(soulseek_item),
+                download_folder,
+            )
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.open_soulseek_user(username),
+                browse_user,
+            )
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.message_soulseek_user(username),
+                send_message,
+            )
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.add_soulseek_friend(username),
+                add_friend,
+            )
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.give_soulseek_free_slot(username),
+                free_slot,
+            )
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.view_soulseek_profile(username),
+                view_profile,
+            )
         menu.Bind(wx.EVT_MENU, self.on_copy_url, copy_url)
         menu.Bind(wx.EVT_MENU, self.on_open_browser, open_browser)
         menu.Bind(wx.EVT_MENU, self._select_all, select_all)

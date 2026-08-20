@@ -53,6 +53,25 @@ class SearchKindTests(unittest.TestCase):
         self.assertEqual(search_kind.album_type_label(None), "Album")
         self.assertEqual(search_kind.album_type_label("many"), "Album")
 
+    def test_a_release_is_called_what_the_catalogue_calls_it(self):
+        # An artist's page is mostly not albums. Reading "Single" or "EP" is
+        # the difference between a discography a user can navigate and three
+        # hundred rows that all say the same word.
+        self.assertEqual(
+            search_kind.album_type_label(1, "single"), "Single, 1 track")
+        self.assertEqual(search_kind.album_type_label(6, "ep"), "EP, 6 tracks")
+        self.assertEqual(
+            search_kind.album_type_label(40, "compilation"),
+            "Compilation, 40 tracks",
+        )
+        # A site that publishes no record type, or one nobody has heard of,
+        # still has to read as something: an album.
+        self.assertEqual(search_kind.album_type_label(9), "Album, 9 tracks")
+        self.assertEqual(
+            search_kind.album_type_label(9, "bootleg"), "Album, 9 tracks")
+        self.assertEqual(search_kind.release_noun(None), "Album")
+        self.assertEqual(search_kind.release_noun("SINGLE"), "Single")
+
 
 if __name__ == "__main__":
     unittest.main()

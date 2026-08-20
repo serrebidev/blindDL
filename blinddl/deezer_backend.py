@@ -27,7 +27,6 @@ from .search_kind import (
     ARTIST_SCOPE_ALBUMS,
     ARTIST_SCOPE_ALL,
     ARTIST_SCOPE_PLAYLISTS,
-    ARTIST_SCOPE_SONGS,
     KIND_ALBUM,
     KIND_ARTIST,
     KIND_BEST,
@@ -337,6 +336,12 @@ def _track_to_item(data):
         "title": data.get("title") or data.get("name") or "Unknown title",
         "artist": artist,
         "album": album,
+        # The catalogue ids behind the two names above. They are what lets a
+        # row be opened as its album's track list or its artist's releases,
+        # so a search result is a place in the catalogue and not a dead end.
+        # A track from an endpoint that names neither carries "".
+        "artist_id": str((data.get("artist") or {}).get("id") or ""),
+        "album_id": str((data.get("album") or {}).get("id") or ""),
         "source": _SEARCH_SOURCE,
         "duration_s": data.get("duration", 0),
         # Deezer's own popularity figure for the track. Its search endpoint
@@ -361,12 +366,17 @@ def _album_to_item(data):
         "title": data.get("title") or "Unknown album",
         "artist": artist,
         "album": data.get("title") or "",
+        "artist_id": str((data.get("artist") or {}).get("id") or ""),
+        "album_id": str(data.get("id") or ""),
         "source": _SEARCH_SOURCE,
         # An album's rows carry no single duration, so the Type column is
-        # where its size is said: "Album, 12 tracks".
+        # where its size is said: "Album, 12 tracks" -- or "Single" or "EP"
+        # when Deezer says the release is one of those.
         "duration_s": 0,
         "tracks": tracks,
-        "format": search_kind.album_type_label(tracks),
+        "record_type": str(data.get("record_type") or ""),
+        "format": search_kind.album_type_label(
+            tracks, data.get("record_type")),
         "rank": 0,
         "url": data.get("link", f"https://www.deezer.com/album/{data['id']}"),
     }
@@ -470,7 +480,8 @@ def _search_artist_tracks(query, limit=_SEARCH_TARGET):
             entry = dict(track)
             # /artist/{id}/top names the artist on the request, not on each
             # track, so the rows would otherwise arrive without one.
-            entry.setdefault("artist", {"name": artist_name})
+            entry.setdefault(
+                "artist", {"id": artist["id"], "name": artist_name})
             item = _track_to_item(entry)
             if item["id"] not in seen:
                 seen.add(item["id"])
@@ -505,7 +516,8 @@ def _search_artist_albums(query, limit=_SEARCH_TARGET):
                     entry = dict(album)
                     # /artist/{id}/albums names the artist on the request,
                     # not on each release, so inject it like the tracks do.
-                    entry.setdefault("artist", {"name": artist_name})
+                    entry.setdefault(
+                        "artist", {"id": artist["id"], "name": artist_name})
                     item = _album_to_item(entry)
                     if item["id"] not in seen:
                         seen.add(item["id"])
@@ -647,7 +659,8 @@ def extract_flat(url, config=None):
         items = []
         for t in tracks_data.get("data", []):
             t_copy = dict(t)
-            t_copy["album"] = {"title": album.get("title", "")}
+            t_copy["album"] = {
+                "id": album.get("id", obj_id), "title": album.get("title", "")}
             t_copy["artist"] = album.get("artist", {})
             items.append(_track_to_item(t_copy))
         return items, album.get("title") or url
@@ -692,20 +705,74 @@ def extract_flat(url, config=None):
                 continue
             for t in tracks_data.get("data", []):
                 t_copy = dict(t)
-                t_copy["artist"] = {"name": artist_name}
+                t_copy["artist"] = {"id": obj_id, "name": artist_name}
                 if "album" not in t_copy:
-                    t_copy["album"] = {}
+                    t_copy["album"] = {"id": alb_id}
                 items.append(_track_to_item(t_copy))
         if not items:
             # Fall back to top tracks when discography is empty (rare).
             top = _api_get(f"/artist/{obj_id}/top", {"limit": 50})
             for t in top.get("data", []):
                 t_copy = dict(t)
-                t_copy["artist"] = {"name": artist_name}
+                t_copy["artist"] = {"id": obj_id, "name": artist_name}
                 items.append(_track_to_item(t_copy))
         return items, artist_name or url
 
     raise RuntimeError(f"Unsupported Deezer URL kind: {kind}")
+
+
+# -- browsing the catalogue -------------------------------------------------
+#
+# A search result names an album and an artist, and until now those were two
+# strings in two columns. These two calls turn them back into places: the
+# album a track came off, and everything its artist has released. They are
+# what the Search tab's "Show album tracks" and "Show artist's releases" do.
+
+
+def album_items(album_id):
+    """(track rows, album title) for one Deezer album id.
+
+    The rows come back in the order the release lists them, which is the
+    running order of the album and not a relevance ranking.
+    """
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        raise RuntimeError("No Deezer album id on that result.")
+    return extract_flat(f"https://www.deezer.com/album/{album_id}")
+
+
+def artist_albums(artist_id, limit=_SEARCH_TARGET):
+    """(album rows, artist name) for one Deezer artist id.
+
+    Everything Deezer lists for them -- albums, EPs, singles and
+    compilations alike, each row saying which it is -- so a discography can
+    be walked one release at a time instead of as several hundred tracks.
+    """
+    artist_id = str(artist_id or "").strip()
+    if not artist_id:
+        raise RuntimeError("No Deezer artist id on that result.")
+    artist = _api_get(f"/artist/{artist_id}")
+    name = artist.get("name") or ""
+    items = []
+    seen = set()
+    next_path = f"/artist/{artist_id}/albums?limit={_SEARCH_LIMIT}"
+    while next_path and len(items) < limit:
+        page = _api_get(next_path)
+        batch = page.get("data", [])
+        if not batch:
+            break
+        for album in batch:
+            entry = dict(album)
+            # /artist/{id}/albums names the artist on the request rather
+            # than on each release, so the rows would otherwise arrive
+            # without one -- and without the id that opens this page again.
+            entry.setdefault("artist", {"id": artist_id, "name": name})
+            item = _album_to_item(entry)
+            if item["id"] not in seen:
+                seen.add(item["id"])
+                items.append(item)
+        next_path = page.get("next")
+    return items[:limit], name
 
 
 def _media_candidates(payload):

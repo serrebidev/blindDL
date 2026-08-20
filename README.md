@@ -27,6 +27,7 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
   downloads and verifies the release, waits for queued transfers to finish,
   installs it silently, and restarts BlindDL without a Download update step.
 - Searches music by track title, album, or artist, and downloads a whole album as every track on it.
+- Opens the album or the artist behind any Deezer or Apple Music result, so a search is somewhere to browse from rather than a list that ends.
 - Uses native controls, labeled fields, status-bar announcements, context menus, and complete keyboard operation.
 - Speaks its status-bar announcements through NVDA, JAWS, and friends, and shows them on a Braille display, so a finished search or a failed download arrives on its own. Turn it off in Settings, Window.
 
@@ -103,6 +104,8 @@ The Search source combo box switches between music, books, audiobooks, and the I
 Source, Search type, and Order describe the *next* search rather than starting one, so you can walk each list to the option you want without a search running underneath you or the focus jumping into the results. Press Enter — from the query box or from any of those lists — or choose Search when you are ready. Enter while a list is open belongs to that list: it picks the option being read and nothing else, so opening a combo box with Alt+Down, arrowing to what you want and pressing Enter never starts a search.
 
 Whole albums download into a folder named for the artist and the album, and an Artist search files what you download from it under that artist's name, so a release arrives together instead of a track at a time among everything else.
+
+A result's own context menu turns its album and artist back into places to go rather than two columns to read. **Show album tracks** replaces the list with the release that track came off, in running order, so you can check what is on it before queueing any of it; on an album row it opens the same list without downloading anything. **Show artist's releases** lists everything that artist has out — albums, EPs, singles and compilations alike, each row saying which it is and how many tracks are on it — and any of those opens as its own track list in turn. **Go back to previous results**, Alt+Left, or Backspace steps back out one level at a time, all the way to the search you started from. Deezer and Apple Music results have a catalogue behind them and offer this; a file found on a music site has an artist's name and nothing to look it up in, so it is not offered.
 
 Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder, and open in whatever reader you already use. Audiobooks download as a folder of numbered chapters and resume where they stopped if you cancel. One Internet Archive item is often a whole series, so choosing a single result opens the same checked list used for playlists.
 

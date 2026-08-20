@@ -264,6 +264,130 @@ class DeezerBackendTests(unittest.TestCase):
         self.assertEqual(items[1]["format"], "Album, 1 track")
         self.assertEqual(items[1]["url"], "https://www.deezer.com/album/8")
 
+    def test_a_search_result_carries_the_ids_that_open_it(self):
+        # The album and the artist of a row were two strings in two columns
+        # with nowhere to go from them. These ids are what turn them back
+        # into places the Search tab can open.
+        payload = {"data": [{
+            "id": 3135556,
+            "title": "Harder, Better, Faster, Stronger",
+            "link": "https://www.deezer.com/track/3135556",
+            "duration": 224,
+            "rank": 900000,
+            "artist": {"id": 27, "name": "Daft Punk"},
+            "album": {"id": 302127, "title": "Discovery"},
+        }]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload):
+            items = deezer_backend.search("harder better")
+
+        self.assertEqual(items[0]["artist_id"], "27")
+        self.assertEqual(items[0]["album_id"], "302127")
+
+    def test_a_track_from_an_endpoint_that_names_neither_carries_no_ids(self):
+        # /artist/{id}/top hands back tracks with no album object at all, and
+        # a missing id has to read as "cannot be browsed" rather than crash
+        # the row that is being built.
+        item = deezer_backend._track_to_item(
+            {"id": 1, "title": "Solo", "duration": 100})
+        self.assertEqual(item["artist_id"], "")
+        self.assertEqual(item["album_id"], "")
+
+    def test_album_rows_say_whether_they_are_a_single_or_an_ep(self):
+        payload = {"data": [
+            {"id": 9, "title": "One More Time", "nb_tracks": 1,
+             "record_type": "single", "artist": {"id": 27, "name": "Daft Punk"}},
+        ]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload):
+            items = deezer_backend.search(
+                "one more time", kind=search_kind.KIND_ALBUM)
+
+        self.assertEqual(items[0]["format"], "Single, 1 track")
+        self.assertEqual(items[0]["record_type"], "single")
+        self.assertEqual(items[0]["album_id"], "9")
+        self.assertEqual(items[0]["artist_id"], "27")
+
+    def test_browsing_an_album_lists_its_tracks_in_running_order(self):
+        album = {
+            "id": 302127,
+            "title": "Discovery",
+            "artist": {"id": 27, "name": "Daft Punk"},
+        }
+        tracks = {"data": [
+            {"id": 1, "title": "One More Time", "duration": 320},
+            {"id": 2, "title": "Aerodynamic", "duration": 212},
+        ]}
+
+        def api_get(path, params=None):
+            return tracks if path.endswith("/tracks") else album
+
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api_get):
+            items, title = deezer_backend.album_items(302127)
+
+        self.assertEqual(title, "Discovery")
+        self.assertEqual([item["title"] for item in items],
+                         ["One More Time", "Aerodynamic"])
+        # Every track knows the album it came off and who made it, so the
+        # browse can be stepped through in either direction.
+        self.assertEqual({item["album_id"] for item in items}, {"302127"})
+        self.assertEqual({item["artist_id"] for item in items}, {"27"})
+
+    def test_browsing_an_album_without_an_id_says_so_rather_than_asking(self):
+        with mock.patch.object(deezer_backend, "_api_get") as api:
+            with self.assertRaises(RuntimeError):
+                deezer_backend.album_items("")
+        api.assert_not_called()
+
+    def test_browsing_an_artist_follows_their_whole_discography(self):
+        artist = {"id": 27, "name": "Daft Punk"}
+        pages = {
+            "/artist/27/albums?limit=100": {
+                "data": [{"id": 1, "title": "Homework", "nb_tracks": 16,
+                          "record_type": "album"}],
+                "next": "https://api.deezer.com/artist/27/albums?index=100",
+            },
+            "https://api.deezer.com/artist/27/albums?index=100": {
+                "data": [{"id": 2, "title": "Da Funk", "nb_tracks": 1,
+                          "record_type": "single"}],
+            },
+        }
+
+        def api_get(path, params=None):
+            if path == "/artist/27":
+                return artist
+            return pages[path]
+
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api_get):
+            items, name = deezer_backend.artist_albums(27)
+
+        self.assertEqual(name, "Daft Punk")
+        self.assertEqual([item["title"] for item in items],
+                         ["Homework", "Da Funk"])
+        # /artist/{id}/albums names the artist on the request rather than on
+        # each release, so the rows would otherwise arrive without one -- and
+        # without the id that opens this same page again.
+        self.assertEqual([item["artist"] for item in items],
+                         ["Daft Punk", "Daft Punk"])
+        self.assertEqual({item["artist_id"] for item in items}, {"27"})
+        self.assertEqual([item["format"] for item in items],
+                         ["Album, 16 tracks", "Single, 1 track"])
+
+    def test_browsing_an_artist_stops_at_the_row_budget(self):
+        artist = {"id": 27, "name": "Daft Punk"}
+        page = {"data": [
+            {"id": index, "title": f"Release {index}", "nb_tracks": 1}
+            for index in range(1, 6)
+        ]}
+
+        def api_get(path, params=None):
+            return artist if path == "/artist/27" else page
+
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api_get):
+            items, _name = deezer_backend.artist_albums(27, limit=3)
+
+        self.assertEqual(len(items), 3)
+
     def test_album_search_cannot_answer_most_popular(self):
         # /search/album publishes neither a rank nor a date, so claiming the
         # order was honoured would be a lie the status line then repeats.

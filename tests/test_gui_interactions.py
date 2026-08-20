@@ -1847,6 +1847,354 @@ class GuiInteractionTests(unittest.TestCase):
             panel.shutdown()
             panel.Destroy()
 
+    # -- the results context menu -------------------------------------------
+
+    def _results_menu_labels(self, panel):
+        """Every command the results context menu offers, in menu order."""
+        labels = []
+
+        def capture(menu):
+            labels.extend(
+                item.GetItemLabelText()
+                for item in menu.GetMenuItems()
+                if not item.IsSeparator()
+            )
+
+        with mock.patch.object(panel.results_list, "PopupMenu",
+                               side_effect=capture):
+            panel.on_results_menu(
+                SimpleNamespace(GetPosition=lambda: wx.DefaultPosition))
+        return labels
+
+    def _show(self, panel, engine, items, focus=0):
+        panel.result_engine = engine
+        panel.results = list(items)
+        panel.results_list.SetItemCount(len(panel.results))
+        if panel.results:
+            panel.results_list.Focus(focus)
+            panel.results_list.Select(focus)
+
+    def test_soulseek_commands_are_absent_from_a_row_that_is_not_soulseek(self):
+        # They used to be appended to every menu and merely greyed out, so a
+        # user with Soulseek switched off arrowed past six dead commands to
+        # reach Copy URL -- six that could never come back.
+        panel = SearchPanel(self.host, self.frame)
+        self.frame.config["soulseek_enabled"] = False
+        self._show(panel, ENGINE_MUSIC, [
+            {"title": "One", "artist": "A", "kind": "music"},
+        ])
+
+        labels = self._results_menu_labels(panel)
+
+        for gone in ("Download containing folder", "Browse user's files",
+                     "Send user a message", "Add user to friends",
+                     "Give user a free slot", "View user profile"):
+            self.assertNotIn(gone, labels)
+        self.assertIn("Copy URL", labels)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_soulseek_commands_are_there_on_a_soulseek_row(self):
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_SOULSEEK_AUDIO, [{
+            "title": "One",
+            "kind": "soulseek",
+            "username": "peer",
+            "remote_path": "music\\one.mp3",
+        }])
+
+        labels = self._results_menu_labels(panel)
+
+        self.assertIn("Browse user's files", labels)
+        self.assertIn("View user profile", labels)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_catalogue_row_is_offered_its_album_and_its_artist(self):
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_DEEZER, [{
+            "title": "One More Time",
+            "artist": "Daft Punk",
+            "album": "Discovery",
+            "kind": "deezer",
+            "album_id": "302127",
+            "artist_id": "27",
+        }])
+
+        labels = self._results_menu_labels(panel)
+
+        self.assertIn("Show album tracks", labels)
+        self.assertIn("Show artist's releases", labels)
+        # Nothing to go back to yet, so nothing offers it.
+        self.assertNotIn("Go back to previous results", labels)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_row_with_no_catalogue_behind_it_is_offered_neither(self):
+        # A file on a music site has an artist's name and no catalogue to
+        # look it up in, so the two commands are left out rather than shown
+        # dead.
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_MUSIC, [
+            {"title": "One", "artist": "A", "kind": "music"},
+        ])
+
+        labels = self._results_menu_labels(panel)
+
+        self.assertNotIn("Show album tracks", labels)
+        self.assertNotIn("Show artist's releases", labels)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_an_album_row_offers_its_track_list_and_a_playlist_does_not(self):
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_DEEZER, [{
+            "title": "Discovery",
+            "artist": "Daft Punk",
+            "kind": "deezer_album",
+            "album_id": "302127",
+            "artist_id": "27",
+        }])
+        self.assertIn("Show album tracks", self._results_menu_labels(panel))
+
+        # A playlist is nobody's release: its artist column is the curator,
+        # and it is not an album, so it carries neither id.
+        self._show(panel, ENGINE_DEEZER, [{
+            "title": "Chilled",
+            "artist": "Some Curator",
+            "kind": "deezer_playlist",
+        }])
+        labels = self._results_menu_labels(panel)
+        self.assertNotIn("Show album tracks", labels)
+        self.assertNotIn("Show artist's releases", labels)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_releases_own_word_for_itself_is_not_shouted(self):
+        # "mp3" is a file extension and reads as one in capitals. "Single"
+        # is the word Deezer chose for the release, and SINGLE is not how it
+        # should be read out.
+        from blinddl.gui.search_panel import _result_type
+
+        self.assertEqual(_result_type({"format": "mp3"}), "MP3")
+        self.assertEqual(_result_type({"format": "FLAC"}), "FLAC")
+        self.assertEqual(_result_type({"format": "Single"}), "Single")
+        self.assertEqual(_result_type({"format": "EP"}), "EP")
+        self.assertEqual(
+            _result_type({"format": "Album, 14 tracks"}), "Album, 14 tracks")
+
+    # -- browsing an artist or album ----------------------------------------
+
+    def test_browsing_an_album_replaces_the_list_with_its_tracks(self):
+        panel = SearchPanel(self.host, self.frame)
+        row = {
+            "title": "One More Time",
+            "artist": "Daft Punk",
+            "album": "Discovery",
+            "kind": "deezer",
+            "album_id": "302127",
+            "artist_id": "27",
+        }
+        self._show(panel, ENGINE_DEEZER, [row])
+        tracks = [
+            {"title": "One More Time", "artist": "Daft Punk", "kind": "deezer"},
+            {"title": "Aerodynamic", "artist": "Daft Punk", "kind": "deezer"},
+        ]
+
+        with (
+            mock.patch.object(
+                deezer_backend, "album_items",
+                return_value=(tracks, "Discovery")) as album_items,
+            mock.patch(
+                "blinddl.gui.search_panel.wx.CallAfter",
+                side_effect=lambda callback, *args: callback(*args),
+            ),
+            mock.patch(
+                "blinddl.gui.search_panel.threading.Thread",
+                side_effect=lambda target, args, **kwargs: SimpleNamespace(
+                    start=lambda: target(*args)),
+            ),
+        ):
+            panel.browse_album(row)
+
+        album_items.assert_called_once_with("302127")
+        self.assertEqual([item["title"] for item in panel.results],
+                         ["One More Time", "Aerodynamic"])
+        # The running order of the release is the answer, so it is not then
+        # re-ranked by whatever the last search was sorted by.
+        self.assertEqual([item["_search_order"] for item in panel.results],
+                         [0, 1])
+        self.assertIn("Discovery: 2 tracks", self.frame.messages[-1])
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_browsing_an_artist_lists_their_releases_and_can_be_stepped_back(self):
+        panel = SearchPanel(self.host, self.frame)
+        row = {
+            "title": "One More Time",
+            "artist": "Daft Punk",
+            "kind": "deezer",
+            "album_id": "302127",
+            "artist_id": "27",
+        }
+        self._show(panel, ENGINE_DEEZER, [row])
+        releases = [
+            {"title": "Discovery", "artist": "Daft Punk",
+             "kind": "deezer_album", "album_id": "1", "artist_id": "27"},
+            {"title": "Homework", "artist": "Daft Punk",
+             "kind": "deezer_album", "album_id": "2", "artist_id": "27"},
+        ]
+
+        with (
+            mock.patch.object(
+                deezer_backend, "artist_albums",
+                return_value=(releases, "Daft Punk")),
+            mock.patch(
+                "blinddl.gui.search_panel.wx.CallAfter",
+                side_effect=lambda callback, *args: callback(*args),
+            ),
+            mock.patch(
+                "blinddl.gui.search_panel.threading.Thread",
+                side_effect=lambda target, args, **kwargs: SimpleNamespace(
+                    start=lambda: target(*args)),
+            ),
+        ):
+            panel.browse_artist(row)
+
+        self.assertEqual([item["title"] for item in panel.results],
+                         ["Discovery", "Homework"])
+        self.assertIn("Daft Punk: 2 releases", self.frame.messages[-1])
+
+        # The way in has a way out: the search that was showing comes back,
+        # with the row that was being read still under the cursor.
+        panel.browse_back()
+        self.assertEqual([item["title"] for item in panel.results],
+                         ["One More Time"])
+        self.assertEqual(panel.browse_history, [])
+        panel.browse_back()
+        self.assertEqual(self.frame.messages[-1],
+                         "There is nothing to go back to.")
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_catalogue_that_answers_with_nothing_leaves_the_list_alone(self):
+        panel = SearchPanel(self.host, self.frame)
+        row = {"title": "One", "artist": "A", "kind": "deezer",
+               "album_id": "9", "artist_id": "27"}
+        self._show(panel, ENGINE_DEEZER, [row])
+
+        with (
+            mock.patch.object(
+                deezer_backend, "album_items", return_value=([], "")),
+            mock.patch(
+                "blinddl.gui.search_panel.wx.CallAfter",
+                side_effect=lambda callback, *args: callback(*args),
+            ),
+            mock.patch(
+                "blinddl.gui.search_panel.threading.Thread",
+                side_effect=lambda target, args, **kwargs: SimpleNamespace(
+                    start=lambda: target(*args)),
+            ),
+        ):
+            panel.browse_album(row)
+
+        self.assertEqual([item["title"] for item in panel.results], ["One"])
+        self.assertEqual(panel.browse_history, [])
+        self.assertEqual(self.frame.messages[-1],
+                         "Nothing listed for that album.")
+        self.assertTrue(panel.search_btn.IsEnabled())
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_browse_that_fails_says_so_and_keeps_the_results(self):
+        panel = SearchPanel(self.host, self.frame)
+        row = {"title": "One", "artist": "A", "kind": "applemusic",
+               "album_id": "9", "artist_id": "27"}
+        self._show(panel, ENGINE_APPLE_MUSIC, [row])
+
+        with (
+            mock.patch.object(
+                applemusic_backend, "artist_albums",
+                side_effect=RuntimeError("offline")),
+            mock.patch(
+                "blinddl.gui.search_panel.wx.CallAfter",
+                side_effect=lambda callback, *args: callback(*args),
+            ),
+            mock.patch(
+                "blinddl.gui.search_panel.threading.Thread",
+                side_effect=lambda target, args, **kwargs: SimpleNamespace(
+                    start=lambda: target(*args)),
+            ),
+            mock.patch("blinddl.gui.search_panel.wx.MessageBox") as box,
+        ):
+            panel.browse_artist(row)
+
+        box.assert_called_once()
+        self.assertEqual([item["title"] for item in panel.results], ["One"])
+        self.assertEqual(self.frame.messages[-1],
+                         "Could not read that artist.")
+        self.assertTrue(panel.search_btn.IsEnabled())
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_alt_left_and_backspace_step_back_out_of_a_browse(self):
+        panel = SearchPanel(self.host, self.frame)
+        skipped = []
+
+        def key(code, alt=False):
+            return SimpleNamespace(
+                GetKeyCode=lambda: code,
+                AltDown=lambda: alt,
+                Skip=lambda: skipped.append(code),
+            )
+
+        # Nothing to go back to: the list keeps the key, since Backspace is
+        # the reader's own and must not be eaten for nothing.
+        panel.on_results_key(key(wx.WXK_BACK))
+        self.assertEqual(skipped, [wx.WXK_BACK])
+
+        with mock.patch.object(panel, "browse_back") as back:
+            panel.browse_history = [{"results": []}]
+            panel.on_results_key(key(wx.WXK_LEFT, alt=True))
+            panel.on_results_key(key(wx.WXK_BACK))
+            self.assertEqual(back.call_count, 2)
+
+            # A bare Left arrow still belongs to the list.
+            panel.on_results_key(key(wx.WXK_LEFT))
+            self.assertEqual(back.call_count, 2)
+
+        self.assertEqual(skipped, [wx.WXK_BACK, wx.WXK_LEFT])
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_new_search_leaves_no_browse_to_go_back_to(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.browse_history = [{"results": []}]
+        panel.query_text.SetValue("daft punk")
+        panel.engine_choice.SetSelection(
+            panel.visible_engines.index(ENGINE_DEEZER)
+        )
+
+        with mock.patch("blinddl.gui.search_panel.threading.Thread"):
+            panel.on_search(None)
+
+        self.assertEqual(panel.browse_history, [])
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_side_b_rows_browse_through_deezers_catalogue(self):
+        # Side B reads Deezer's catalogue, so its rows carry Deezer ids and
+        # open the same pages a Deezer row does.
+        from blinddl.gui.search_panel import _browse_backend
+
+        self.assertIs(_browse_backend({"kind": "sideb"}), deezer_backend)
+        self.assertIs(_browse_backend({"kind": "deezer_album"}),
+                      deezer_backend)
+        self.assertIs(_browse_backend({"kind": "applemusic_album"}),
+                      applemusic_backend)
+        self.assertIsNone(_browse_backend({"kind": "soulseek"}))
+        self.assertIsNone(_browse_backend(None))
+
     def test_search_queues_adult_api_result(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_ADULT

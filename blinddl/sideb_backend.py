@@ -170,6 +170,14 @@ def _track_to_item(track):
         "title": track.title or "Unknown title",
         "artist": track.artist.name if track.artist else "",
         "album": track.album.title if track.album else "",
+        # Side B reads Deezer's catalogue, so these are Deezer ids and the
+        # Search tab browses them through deezer_backend. They are read
+        # defensively: they come off a third-party model that is free to
+        # hand back a track whose album or artist it never filled in.
+        "album_id": str(getattr(track.album, "id", "") or "")
+        if track.album else "",
+        "artist_id": str(getattr(track.artist, "id", "") or "")
+        if track.artist else "",
         "source": SIDEB_SOURCE,
         "duration_s": track.duration,
         "url": f"https://www.deezer.com/track/{track.id}",

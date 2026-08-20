@@ -27,6 +27,14 @@ def _track(track_id, name, url=None, artist="Artist", album="Album",
     }
 
 
+def _response(payload):
+    """One requests.get answer: raises nothing, returns *payload*."""
+    response = mock.Mock()
+    response.raise_for_status = mock.Mock()
+    response.json.return_value = payload
+    return response
+
+
 class AppleMusicSearchTests(unittest.TestCase):
     def test_search_returns_normalized_tracks(self):
         payload = {"results": [_track(1, "One"), _track(2, "Two")]}
@@ -472,6 +480,98 @@ class AppleMusicDownloadTests(unittest.TestCase):
                     applemusic_backend.download(
                         "https://music.apple.com/us/album/x/9", tmp,
                         {"apple_music_cookies": "/x"})
+
+
+class AppleMusicBrowseTests(unittest.TestCase):
+    """Opening the album or the artist a search result names."""
+
+    def test_a_search_result_carries_the_ids_that_open_it(self):
+        results = {"results": [{
+            "trackName": "One More Time",
+            "artistName": "Daft Punk",
+            "collectionName": "Discovery",
+            "trackViewUrl": "https://music.apple.com/us/album/x/1?i=2",
+            "collectionId": 1,
+            "artistId": 5,
+            "trackTimeMillis": 320000,
+        }]}
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=_response(results)):
+            items = applemusic_backend.search("one more time")
+
+        self.assertEqual(items[0]["album_id"], "1")
+        self.assertEqual(items[0]["artist_id"], "5")
+
+    def test_a_track_the_catalog_api_built_cannot_be_browsed_from(self):
+        # The catalog API's track records carry neither id, so those rows
+        # arrive with "" and are simply not offered the two commands.
+        item = applemusic_backend._track_item({"trackName": "Solo"}, "url")
+        self.assertEqual(item["album_id"], "")
+        self.assertEqual(item["artist_id"], "")
+
+    def test_browsing_an_album_lists_its_tracks_in_running_order(self):
+        results = {"results": [
+            {"collectionName": "Discovery", "collectionId": 1,
+             "artistId": 5, "wrapperType": "collection"},
+            {"trackName": "One More Time", "artistName": "Daft Punk",
+             "collectionId": 1, "artistId": 5,
+             "trackViewUrl": "https://music.apple.com/us/album/x/1?i=2"},
+            {"trackName": "Aerodynamic", "artistName": "Daft Punk",
+             "collectionId": 1, "artistId": 5,
+             "trackViewUrl": "https://music.apple.com/us/album/x/1?i=3"},
+        ]}
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=_response(results)) as get:
+            items, title = applemusic_backend.album_items(1)
+
+        self.assertEqual(get.call_args.kwargs["params"]["id"], "1")
+        self.assertEqual(title, "Discovery")
+        self.assertEqual([item["title"] for item in items],
+                         ["One More Time", "Aerodynamic"])
+        self.assertEqual({item["album"] for item in items}, {"Discovery"})
+
+    def test_an_album_id_itunes_does_not_know_lists_nothing(self):
+        # A playlist's pl.* id reaches lookup and comes back with the query
+        # echoed and no results. That is "nothing to list", not a failure.
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=_response({"results": []})):
+            items, title = applemusic_backend.album_items("pl.abc")
+
+        self.assertEqual(items, [])
+        self.assertEqual(title, "")
+
+    def test_browsing_an_artist_lists_every_release_they_have_out(self):
+        results = {"results": [
+            {"wrapperType": "artist", "artistId": 5, "artistName": "Daft Punk"},
+            {"collectionId": 1, "collectionName": "Discovery", "trackCount": 14,
+             "artistId": 5, "artistName": "Daft Punk",
+             "collectionViewUrl": "https://music.apple.com/us/album/1"},
+            {"collectionId": 2, "collectionName": "Homework", "trackCount": 16,
+             "artistId": 5, "artistName": "Daft Punk",
+             "collectionViewUrl": "https://music.apple.com/us/album/2"},
+        ]}
+        with mock.patch.object(applemusic_backend.requests, "get",
+                               return_value=_response(results)) as get:
+            items, name = applemusic_backend.artist_albums(5)
+
+        self.assertEqual(get.call_args.kwargs["params"]["entity"], "album")
+        self.assertEqual(name, "Daft Punk")
+        # The artist record itself is first and has no release to open, so
+        # it names the page rather than becoming a row on it.
+        self.assertEqual([item["title"] for item in items],
+                         ["Discovery", "Homework"])
+        self.assertEqual([item["kind"] for item in items],
+                         ["applemusic_album", "applemusic_album"])
+        self.assertEqual({item["artist_id"] for item in items}, {"5"})
+        self.assertEqual(items[0]["format"], "Album, 14 tracks")
+
+    def test_browsing_without_an_id_says_so_rather_than_asking(self):
+        with mock.patch.object(applemusic_backend.requests, "get") as get:
+            with self.assertRaises(RuntimeError):
+                applemusic_backend.artist_albums("")
+            with self.assertRaises(RuntimeError):
+                applemusic_backend.album_items(None)
+        get.assert_not_called()
 
 
 if __name__ == "__main__":

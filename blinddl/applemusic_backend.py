@@ -35,7 +35,6 @@ from .search_kind import (
     ARTIST_SCOPE_ALBUMS,
     ARTIST_SCOPE_ALL,
     ARTIST_SCOPE_PLAYLISTS,
-    ARTIST_SCOPE_SONGS,
     KIND_ALBUM,
     KIND_ARTIST,
     KIND_BEST,
@@ -295,6 +294,10 @@ def _album_item(collection, url):
         "title": title,
         "artist": collection.get("artistName") or "",
         "album": title,
+        # The catalogue ids behind those two names, which is what lets the
+        # row be opened as its track list or as its artist's releases.
+        "album_id": str(collection.get("collectionId") or ""),
+        "artist_id": str(collection.get("artistId") or ""),
         "source": _SEARCH_SOURCE,
         "duration_s": 0,
         "tracks": tracks,
@@ -311,6 +314,12 @@ def _track_item(track, url):
         "title": track.get("trackName") or "Unknown title",
         "artist": track.get("artistName") or "",
         "album": track.get("collectionName") or "",
+        # A search result names an album and an artist; these are the ids
+        # that turn those names back into places the Search tab can open.
+        # The catalog API's own track records carry neither, so a row from
+        # there arrives with "" and simply cannot be browsed from.
+        "album_id": str(track.get("collectionId") or ""),
+        "artist_id": str(track.get("artistId") or ""),
         "source": _SEARCH_SOURCE,
         "duration_s": int(track.get("trackTimeMillis") or 0) // 1000,
         "url": url,
@@ -359,19 +368,73 @@ def _collection_items(info, url):
     back to an empty list when the link cannot be resolved, and the caller
     then returns a single placeholder item.
     """
-    results = _lookup(info["media_id"], entity="song")
+    items, _title = album_items(info["media_id"])
+    return items
+
+
+# -- browsing the catalogue -------------------------------------------------
+#
+# A search result names an album and an artist, and those were two strings in
+# two columns. These two calls turn them back into places: the album a track
+# came off, and everything its artist has released. They are what the Search
+# tab's "Show album tracks" and "Show artist's releases" do.
+
+
+def album_items(album_id):
+    """(track rows, album title) for one Apple Music album id.
+
+    iTunes' lookup answers an album with the release itself and then one
+    entry per track, in the running order of the release. An id it does not
+    know -- a playlist's ``pl.*``, most obviously -- comes back with nothing
+    to list rather than raising, so the caller can fall back.
+    """
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        raise RuntimeError("No Apple Music album id on that result.")
+    results = _lookup(album_id, entity="song")
     if len(results) < 2:
-        return []
+        return [], ""
     collection = results[0]
+    title = collection.get("collectionName") or ""
     items = []
     for track in results[1:]:
         track_url = track.get("trackViewUrl") or ""
         if not track_url:
             continue
         item = _track_item(track, track_url)
-        item["album"] = item["album"] or collection.get("collectionName") or ""
+        item["album"] = item["album"] or title
         items.append(item)
-    return items
+    return items, title
+
+
+def artist_albums(artist_id):
+    """(album rows, artist name) for one Apple Music artist id.
+
+    The same lookup, asked for albums: the artist comes back first and every
+    release iTunes lists for them after it -- albums, EPs and singles alike
+    -- so a discography can be walked one release at a time.
+    """
+    artist_id = str(artist_id or "").strip()
+    if not artist_id:
+        raise RuntimeError("No Apple Music artist id on that result.")
+    results = _lookup(artist_id, entity="album")
+    name = ""
+    items = []
+    seen = set()
+    for entry in results:
+        name = name or entry.get("artistName") or ""
+        url = entry.get("collectionViewUrl") or ""
+        # The first result is the artist record itself, which has a name and
+        # no release to open; anything else without a link cannot be opened
+        # either.
+        if not url or not entry.get("collectionId"):
+            continue
+        item = _album_item(entry, url)
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        items.append(item)
+    return items, name
 
 
 def _placeholder_item(url, media_type):

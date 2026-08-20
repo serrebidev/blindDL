@@ -127,17 +127,43 @@ def matches(value, query):
     return all(word in found for word in wanted)
 
 
-def album_type_label(track_count):
-    """The Type column for one album row: "Album", plus its track count."""
+# What a release is, when the catalogue says. Deezer publishes a
+# ``record_type`` on every album, and an artist's page is mostly not albums:
+# reading "Single" or "EP" is the difference between a discography a user can
+# navigate and three hundred rows that all say "Album".
+RELEASE_TYPE_NOUNS = {
+    "album": "Album",
+    "single": "Single",
+    "ep": "EP",
+    "compilation": "Compilation",
+    "live": "Live album",
+}
+
+
+def release_noun(record_type):
+    """What one release is called, falling back to "Album"."""
+    return RELEASE_TYPE_NOUNS.get(
+        str(record_type or "").strip().lower(), "Album"
+    )
+
+
+def album_type_label(track_count, record_type=None):
+    """The Type column for one album row: what it is, plus its track count.
+
+    *record_type* is the catalogue's own word for the release -- single, EP,
+    compilation -- and is left out by the sites that do not publish one,
+    which is what makes the default "Album".
+    """
+    noun = release_noun(record_type)
     try:
         count = int(track_count or 0)
     except (TypeError, ValueError):
         count = 0
     if count == 1:
-        return "Album, 1 track"
+        return f"{noun}, 1 track"
     if count > 1:
-        return f"Album, {count} tracks"
-    return "Album"
+        return f"{noun}, {count} tracks"
+    return noun
 
 
 def playlist_type_label(track_count):
