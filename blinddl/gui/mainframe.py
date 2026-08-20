@@ -1009,8 +1009,18 @@ class MainFrame(wx.Frame):
         A check that cannot reach GitHub says nothing: this runs on its own
         every twelve hours, and a passing network fault is not news. A
         download that fails after an update *was* found is worth saying,
-        because by then something was expected to happen.
+        because by then something was expected to happen. So is an install
+        that was staged last time and never took.
         """
+        # The helper that finishes an update runs after blindDL has closed,
+        # so a failure there has no window to appear in. It writes down what
+        # happened instead, and this is where that gets read out.
+        try:
+            failure = updater.last_update_failure()
+        except Exception:  # noqa: BLE001 - never block the check itself
+            failure = None
+        if failure:
+            wx.CallAfter(self.announce, failure)
         try:
             update = updater.check_for_app_update(log)
         except Exception:  # noqa: BLE001 - a network blip must not nag

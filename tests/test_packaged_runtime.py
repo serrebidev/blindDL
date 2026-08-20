@@ -4,6 +4,8 @@
 
 """Packaged builds bootstrap shared native tools without Python or pip."""
 
+import hashlib
+import json
 import os
 import stat
 import zipfile
@@ -223,11 +225,151 @@ def test_installed_windows_update_uses_a_silent_restart_helper(tmp_path):
         assert updater.install_app_update(update, package)
 
     helper = tmp_path / "finish-installed-update.ps1"
-    script = helper.read_text(encoding="utf-8")
+    script = helper.read_text(encoding="utf-8-sig")
     assert "/VERYSILENT" in script
     assert "/SUPPRESSMSGBOXES" in script
     assert "Start-Process -FilePath $Target" in script
     assert "powershell.exe" in popen.call_args.args[0][0]
+    # An installer that exits non-zero, or leaves the old version in place,
+    # has to reach the user: it happens after blindDL itself has closed.
+    assert "Save $false" in script
+    assert "Read-InstalledVersion" in script
+    arguments = popen.call_args.args[0]
+    assert "-Result" in arguments and "-Version" in arguments
+    assert arguments[arguments.index("-Version") + 1] == "9.9.9"
+
+
+def _portable_update_zip(path, version="9.9.9"):
+    with zipfile.ZipFile(path, "w") as package:
+        package.writestr("blindDL/blindDL.exe", b"the new blindDL")
+        package.writestr("blindDL/_internal/python314.dll", b"the new runtime")
+    return path
+
+
+def test_the_portable_update_swaps_folders_rather_than_merging_them(tmp_path):
+    # Copying the new files over the old ones leaves every file the release
+    # dropped behind it. After a Python upgrade that means two runtimes in one
+    # folder, and a blindDL that was replaced but still starts as it was.
+    package = _portable_update_zip(tmp_path / "blindDL-v9.9.9-windows-x64.zip")
+    installed = tmp_path / "app"
+    installed.mkdir()
+    (installed / "blindDL.exe").write_bytes(b"the old blindDL")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    script = (tmp_path / "finish-portable-update.ps1").read_text(
+        encoding="utf-8-sig")
+    assert "Move-Folder $Target $Backup" in script
+    assert "Move-Folder $Source $Target" in script
+    assert "Copy-Item -Destination $Target -Recurse" not in script
+    # Directory.Move is a rename: it either happens or it does not. Move-Item
+    # walks the tree, so one locked file used to leave the folder half emptied.
+    assert "[System.IO.Directory]::Move" in script
+    assert "Undo-Swap" in script
+
+    arguments = popen.call_args.args[0]
+    assert arguments[arguments.index("-Version") + 1] == "9.9.9"
+    assert arguments[arguments.index("-Result") + 1] == str(
+        tmp_path / "updates" / updater.UPDATE_RESULT_NAME)
+
+
+def test_an_update_that_failed_after_blinddl_closed_is_read_out_once(tmp_path):
+    result = tmp_path / "updates" / updater.UPDATE_RESULT_NAME
+    result.parent.mkdir(parents=True)
+    # PowerShell writes UTF-8 with a byte order mark.
+    result.write_text(
+        json.dumps({"ok": False, "version": "9.9.9",
+                    "detail": "The old blindDL folder is in use."}),
+        encoding="utf-8-sig",
+    )
+
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)):
+        spoken = updater.last_update_failure()
+        assert spoken == ("blindDL 9.9.9 did not install: "
+                          "The old blindDL folder is in use.")
+        # Said once, on the next start. Not every twelve hours after that.
+        assert updater.last_update_failure() is None
+    assert not result.exists()
+
+
+def test_an_update_that_worked_says_nothing(tmp_path):
+    result = tmp_path / "updates" / updater.UPDATE_RESULT_NAME
+    result.parent.mkdir(parents=True)
+    result.write_text(json.dumps({"ok": True, "version": "9.9.9"}),
+                      encoding="utf-8")
+
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)):
+        assert updater.last_update_failure() is None
+
+
+def test_a_staged_package_is_not_downloaded_a_second_time(tmp_path):
+    # A staged update that never installed leaves its package on disk. Fetching
+    # the same hundred-odd megabytes again on every check is the whole cost of
+    # an update that keeps not taking.
+    payload = b"the release package"
+    expected = hashlib.sha256(payload).hexdigest()
+    update = updater.AppUpdate(
+        version="9.9.9", page_url="", package_name="blindDL-v9.9.9-windows-x64.zip",
+        package_url="https://example.invalid/package",
+        checksum_name="SHA256SUMS-windows-x64.txt",
+        checksum_url="https://example.invalid/checksums",
+    )
+    staged = tmp_path / "updates" / "v9.9.9"
+    staged.mkdir(parents=True)
+    (staged / update.package_name).write_bytes(payload)
+    fetched = []
+
+    def fake_download(url, destination, digest=None, on_progress=None):
+        fetched.append(url)
+        destination.write_text(f"{expected}  {update.package_name}\n",
+                               encoding="utf-8")
+        return ""
+
+    logged = []
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_download", side_effect=fake_download):
+        package = updater.download_app_update(update, logged.append)
+
+    assert package.read_bytes() == payload
+    assert fetched == [update.checksum_url], "the package must not be fetched again"
+    assert any("already downloaded" in line for line in logged)
+    assert expected == hashlib.sha256(package.read_bytes()).hexdigest()
+
+
+def test_downloading_an_update_clears_out_the_versions_before_it(tmp_path):
+    # Every staged version keeps its package and the tree unpacked from it.
+    # A machine that updates often was giving up gigabytes to versions it had
+    # long since moved past.
+    updates = tmp_path / "updates"
+    for old_version in ("v9.9.7", "v9.9.8"):
+        stale = updates / old_version / "portable" / "blindDL"
+        stale.mkdir(parents=True)
+        (stale / "blindDL.exe").write_bytes(b"an old release")
+    payload = b"the release package"
+    update = updater.AppUpdate(
+        version="9.9.9", page_url="", package_name="blindDL-v9.9.9-windows-x64.zip",
+        package_url="https://example.invalid/package",
+        checksum_name="SHA256SUMS-windows-x64.txt",
+        checksum_url="https://example.invalid/checksums",
+    )
+
+    def fake_download(url, destination, digest=None, on_progress=None):
+        if url == update.checksum_url:
+            destination.write_text(
+                f"{hashlib.sha256(payload).hexdigest()}  {update.package_name}\n",
+                encoding="utf-8")
+            return ""
+        destination.write_bytes(payload)
+        return hashlib.sha256(payload).hexdigest()
+
+    with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_download", side_effect=fake_download):
+        updater.download_app_update(update)
+
+    assert sorted(p.name for p in updates.glob("v*")) == ["v9.9.9"]
 
 
 def test_frozen_missing_libtorrent_never_asks_for_python_or_pip():

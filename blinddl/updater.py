@@ -131,6 +131,11 @@ _install_attempted: set[str] = set()
 
 CREATE_NO_WINDOW = 0x08000000
 RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
+# Written by the Windows helper scripts once they have finished, win or lose,
+# and read on the next start. An update that dies between two processes has
+# nowhere else to say so, which is how a silent failure used to look like
+# nothing at all having happened.
+UPDATE_RESULT_NAME = "last-update-result.json"
 UPDATE_USER_AGENT = f"blindDL/{__version__}"
 DOWNLOAD_BLOCK = 256 * 1024
 # Download progress is spoken, not drawn, so it is reported in coarse steps:
@@ -342,6 +347,31 @@ def _download(url, destination, digest=None, on_progress=None):
     return hasher.hexdigest() if hasher is not None else ""
 
 
+def _file_digest(path):
+    """SHA-256 of a file already on disk, or "" when it cannot be read."""
+    hasher = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(DOWNLOAD_BLOCK), b""):
+                hasher.update(block)
+    except OSError:
+        return ""
+    return hasher.hexdigest()
+
+
+def _prune_old_updates(keep):
+    """Delete the staging folders of every version except *keep*.
+
+    Each one holds the release package and the tree unpacked from it, so a
+    machine that updates often was quietly giving up gigabytes to versions
+    it had already moved past.
+    """
+    for folder in keep.parent.glob("v*"):
+        if folder == keep or not folder.is_dir():
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def download_app_update(update, log=lambda _line: None, progress=None):
     """Download *update* and verify it against the release checksum file.
 
@@ -363,6 +393,13 @@ def download_app_update(update, log=lambda _line: None, progress=None):
             break
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise UpdateError("The release checksum does not list this package.")
+    # A staged update that never installed leaves its package behind. It is
+    # the same hundred-odd megabytes the server would send again, and the
+    # checksum above is enough to prove it is the right one.
+    if package_path.is_file() and _file_digest(package_path) == expected:
+        log(f"{update.package_name} was already downloaded and still matches.")
+        _prune_old_updates(update_dir)
+        return package_path
     log(f"Downloading {update.package_name}...")
     partial = package_path.with_name(package_path.name + ".part")
     actual = _download(
@@ -378,6 +415,7 @@ def download_app_update(update, log=lambda _line: None, progress=None):
         )
     partial.replace(package_path)
     log("The update package passed its SHA-256 integrity check.")
+    _prune_old_updates(update_dir)
     return package_path
 
 
@@ -401,6 +439,249 @@ def _safe_extract_zip(archive, destination):
                 shutil.copyfileobj(source, output)
 
 
+# Both Windows helpers outlive blindDL itself: they wait for it to close,
+# change the files it was running from, and start it again. Everything they
+# share lives here -- above all Save, which records the outcome whether the
+# update took or not. A helper that wrote a log only on failure left a failed
+# update indistinguishable from one that never ran, which is exactly what a
+# self-update that "does nothing, with no error" is.
+_HELPER_COMMON = r"""
+$ErrorActionPreference = 'Stop'
+$Steps = New-Object System.Collections.ArrayList
+
+function Note([string]$Text) { [void]$Steps.Add($Text) }
+
+function Save([bool]$Ok, [string]$Detail) {
+  try {
+    $folder = Split-Path -Parent $Result
+    if (-not (Test-Path -LiteralPath $folder)) {
+      New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    }
+    [ordered]@{ ok = $Ok; version = $Version; detail = $Detail; steps = @($Steps) } |
+      ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Result -Encoding UTF8
+  } catch { }
+}
+
+function Get-Reason($Record) {
+  $problem = $Record.Exception
+  while ($problem.InnerException) { $problem = $problem.InnerException }
+  return $problem.Message
+}
+
+function Get-VersionKey([string]$Text) {
+  $found = @([regex]::Matches($Text, '\d+') | ForEach-Object { [int]$_.Value })
+  $key = @(0, 0, 0)
+  for ($i = 0; $i -lt 3 -and $i -lt $found.Count; $i++) { $key[$i] = $found[$i] }
+  return ($key -join '.')
+}
+
+function Read-InstalledVersion([string]$Path) {
+  try { return [string](Get-Item -LiteralPath $Path).VersionInfo.FileVersion }
+  catch { return '' }
+}
+
+# Waiting on the process id alone is not enough. Windows keeps blindDL.exe
+# mapped for a moment after it exits, and an antivirus scan of a freshly
+# closed executable holds it for longer than that, so the first write could
+# fail against a program that had already gone. The file is what has to be
+# free, so the file is what gets asked.
+function Wait-ForRelease([string]$Path) {
+  $deadline = (Get-Date).AddMinutes(5)
+  while ((Get-Date) -lt $deadline) {
+    if (-not (Get-Process -Id $BlindDLPid -ErrorAction SilentlyContinue)) {
+      try {
+        $handle = [System.IO.File]::Open($Path, 'Open', 'ReadWrite', 'None')
+        $handle.Close()
+        return $true
+      } catch { }
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  return $false
+}
+"""
+
+
+# The portable update swaps whole folders instead of copying the new files
+# over the old ones. Copy-Item merges, and a merge keeps every file the new
+# release dropped: after a Python upgrade the folder holds both runtimes and
+# the extension modules of both, which is how a portable blindDL can be
+# replaced and still start as the version it was.
+_PORTABLE_HELPER = (
+    "param([int]$BlindDLPid, [string]$Source, [string]$Target,\n"
+    "      [string]$Result, [string]$Version)\n"
+    + _HELPER_COMMON
+    + r"""
+$Exe = Join-Path $Target 'blindDL.exe'
+$Backup = $Target + '.previous'
+
+function Restart-BlindDL {
+  if (Test-Path -LiteralPath $Exe) {
+    Start-Process -FilePath $Exe -WorkingDirectory $Target
+  }
+}
+
+function Move-Folder([string]$From, [string]$To) {
+  [System.IO.Directory]::Move($From, $To)
+}
+
+function Undo-Swap {
+  try {
+    if (Test-Path -LiteralPath $Target) {
+      Remove-Item -LiteralPath $Target -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $Backup) {
+      Move-Folder $Backup $Target
+      Note 'Put the previous blindDL back.'
+    }
+  } catch {
+    Note ('The previous blindDL could not be put back: ' + (Get-Reason $_))
+  }
+}
+
+if (-not (Wait-ForRelease $Exe)) {
+  Save $false 'blindDL was still holding its own files five minutes after it closed.'
+  Restart-BlindDL
+  exit 1
+}
+
+try {
+  if (Test-Path -LiteralPath $Backup) {
+    Remove-Item -LiteralPath $Backup -Recurse -Force
+  }
+  Move-Folder $Target $Backup
+  Note 'Moved the old blindDL folder aside.'
+} catch {
+  Save $false ('The old blindDL folder is in use and could not be replaced: ' +
+    (Get-Reason $_))
+  Restart-BlindDL
+  exit 1
+}
+
+try {
+  try {
+    # A rename when the staged folder shares a volume with the install,
+    # a copy when it does not.
+    Move-Folder $Source $Target
+  } catch {
+    New-Item -ItemType Directory -Path $Target -Force | Out-Null
+    Copy-Item -Path (Join-Path $Source '*') -Destination $Target -Recurse -Force
+  }
+  if (-not (Test-Path -LiteralPath $Exe)) {
+    throw 'The new blindDL folder arrived without blindDL.exe.'
+  }
+  Note 'Put the new blindDL folder in place.'
+  # Anything the folder held that the release does not ship is the user's own
+  # -- a tool dropped in beside blindDL, a file saved there -- and comes back.
+  Get-ChildItem -LiteralPath $Backup -Force | ForEach-Object {
+    $kept = Join-Path $Target $_.Name
+    if (-not (Test-Path -LiteralPath $kept)) {
+      Copy-Item -LiteralPath $_.FullName -Destination $kept -Recurse -Force
+      Note ('Kept ' + $_.Name + ' from the old folder.')
+    }
+  }
+  $installed = Read-InstalledVersion $Exe
+  if ($installed -and (Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
+    throw ('The folder now holds blindDL ' + $installed + ', not ' + $Version + '.')
+  }
+} catch {
+  $why = Get-Reason $_
+  Undo-Swap
+  Save $false $why
+  Restart-BlindDL
+  exit 1
+}
+
+try {
+  Remove-Item -LiteralPath $Backup -Recurse -Force
+} catch {
+  Note 'The previous version is still on disk beside the new one.'
+}
+Save $true ''
+Restart-BlindDL
+""")
+
+
+# The installed build hands the work to Inno Setup, so what is left to get
+# right is waiting for the old blindDL to let go, noticing a non-zero exit
+# code, and confirming that the version on disk actually moved.
+_INSTALLED_HELPER = (
+    "param([int]$BlindDLPid, [string]$Installer, [string]$Target,\n"
+    "      [string]$Result, [string]$Version)\n"
+    + _HELPER_COMMON
+    + r"""
+if (-not (Wait-ForRelease $Target)) {
+  Save $false 'blindDL was still running five minutes after it closed.'
+  if (Test-Path -LiteralPath $Target) { Start-Process -FilePath $Target }
+  exit 1
+}
+
+try {
+  $Run = Start-Process -FilePath $Installer -ArgumentList '/VERYSILENT',
+    '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+  if ($Run.ExitCode -ne 0) {
+    throw ('The blindDL installer stopped with exit code ' + $Run.ExitCode + '.')
+  }
+  if (-not (Test-Path -LiteralPath $Target)) {
+    throw 'The installer finished but blindDL.exe is gone.'
+  }
+  $installed = Read-InstalledVersion $Target
+  if ($installed -and (Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
+    throw ('blindDL ' + $installed + ' is still installed, not ' + $Version + '.')
+  }
+  Save $true ''
+} catch {
+  Save $false (Get-Reason $_)
+}
+Start-Process -FilePath $Target
+""")
+
+
+def _update_result_path():
+    return Path(app_data_dir()) / "updates" / UPDATE_RESULT_NAME
+
+
+def take_update_result():
+    """Return what the last update helper recorded, and forget it.
+
+    The record is read once. An update that failed is worth one sentence on
+    the next start, not the same sentence every twelve hours afterwards.
+    """
+    path = _update_result_path()
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def last_update_failure():
+    """One spoken sentence when the previous update did not take, else None."""
+    result = take_update_result()
+    if result is None or result.get("ok"):
+        return None
+    version = str(result.get("version") or "").strip()
+    detail = str(result.get("detail") or "").strip()
+    head = (f"blindDL {version} did not install" if version
+            else "The last blindDL update did not install")
+    return f"{head}: {detail}" if detail else f"{head}."
+
+
+def _write_helper(path, script):
+    # Windows PowerShell reads a .ps1 in the active code page unless the file
+    # says otherwise, so the BOM is what keeps the script's own text intact.
+    path.write_text(script, encoding="utf-8-sig")
+
+
 def _portable_windows_update(package_path, version):
     update_root = package_path.parent / "portable"
     if update_root.exists():
@@ -414,25 +695,12 @@ def _portable_windows_update(package_path, version):
     if not (target / "blindDL.exe").is_file():
         raise UpdateError("The current portable BlindDL folder is not valid.")
     helper = package_path.parent / "finish-portable-update.ps1"
-    log_path = package_path.parent / "portable-update.log"
-    helper.write_text(
-        "param([int]$BlindDLPid,[string]$Source,[string]$Target,[string]$Log)\n"
-        "$ErrorActionPreference = 'Stop'\n"
-        "Wait-Process -Id $BlindDLPid -ErrorAction SilentlyContinue\n"
-        "try {\n"
-        "  Get-ChildItem -LiteralPath $Source -Force | Copy-Item "
-        "-Destination $Target -Recurse -Force\n"
-        "} catch {\n"
-        "  $_ | Out-String | Set-Content -LiteralPath $Log -Encoding UTF8\n"
-        "}\n"
-        "$Exe = Join-Path $Target 'blindDL.exe'\n"
-        "if (Test-Path -LiteralPath $Exe) { Start-Process -FilePath $Exe }\n",
-        encoding="utf-8",
-    )
+    _write_helper(helper, _PORTABLE_HELPER)
     subprocess.Popen([
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(helper), "-BlindDLPid", str(os.getpid()),
-        "-Source", str(source), "-Target", str(target), "-Log", str(log_path),
+        "-Source", str(source), "-Target", str(target),
+        "-Result", str(_update_result_path()), "-Version", str(version),
     ], **_subprocess_options())
     return True
 
@@ -446,29 +714,14 @@ def install_app_update(update, package_path, log=lambda _line: None):
             return _portable_windows_update(package_path, update.version)
         log("Staging the silent BlindDL installer; BlindDL will restart itself.")
         helper = package_path.parent / "finish-installed-update.ps1"
-        log_path = package_path.parent / "installed-update.log"
         target = Path(sys.executable).resolve()
-        helper.write_text(
-            "param([int]$BlindDLPid,[string]$Installer,[string]$Target,"
-            "[string]$Log)\n"
-            "$ErrorActionPreference = 'Stop'\n"
-            "Wait-Process -Id $BlindDLPid -ErrorAction SilentlyContinue\n"
-            "try {\n"
-            "  $P = Start-Process -FilePath $Installer -ArgumentList "
-            "'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru\n"
-            "  if ($P.ExitCode -ne 0) { throw \"Installer exit $($P.ExitCode)\" }\n"
-            "  if (Test-Path -LiteralPath $Target) { "
-            "Start-Process -FilePath $Target }\n"
-            "} catch {\n"
-            "  $_ | Out-String | Set-Content -LiteralPath $Log -Encoding UTF8\n"
-            "}\n",
-            encoding="utf-8",
-        )
+        _write_helper(helper, _INSTALLED_HELPER)
         subprocess.Popen([
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(helper), "-BlindDLPid", str(os.getpid()),
             "-Installer", str(package_path), "-Target", str(target),
-            "-Log", str(log_path),
+            "-Result", str(_update_result_path()),
+            "-Version", str(update.version),
         ], **_subprocess_options())
         return True
     if sys.platform == "darwin":

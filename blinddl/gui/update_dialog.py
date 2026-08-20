@@ -61,6 +61,12 @@ class UpdateDialog(wx.Dialog):
 
     def _run(self):
         try:
+            failure = updater.last_update_failure()
+        except Exception:  # noqa: BLE001 - never block the check itself
+            failure = None
+        if failure:
+            self._log(failure)
+        try:
             if getattr(sys, "frozen", False):
                 self.update = updater.check_for_app_update(self._log)
                 changed = False
