@@ -21,6 +21,7 @@ from .. import (
     bandcamp_backend,
     book_backend,
     deezer_backend,
+    mixcloud_backend,
     music_match,
     musicdl_backend,
     preview,
@@ -58,6 +59,7 @@ ENGINE_SOULSEEK_VIDEO = 16
 ENGINE_SOULSEEK_BOOKS = 17
 ENGINE_SOULSEEK_TORRENTS = 18
 ENGINE_DEEZER = 19
+ENGINE_MIXCLOUD = 20
 # Kept as an import-compatible name for callers that treated adult search as
 # the first adult choice before content categories were separated.
 ENGINE_ADULT = ENGINE_STRAIGHT
@@ -82,6 +84,7 @@ ENGINE_LABELS = [
     "Soulseek books and documents",
     "Soulseek torrent files",
     "Deezer",
+    "Mixcloud",
 ]
 # The engines shown before the adult categories (and the Soulseek file-type
 # sections), in display order. Deezer sits straight after "Music sites" as
@@ -92,6 +95,7 @@ GENERAL_ENGINES = (
     ENGINE_DEEZER,
     ENGINE_YOUTUBE,
     ENGINE_SOUNDCLOUD,
+    ENGINE_MIXCLOUD,
     ENGINE_BANDCAMP,
     ENGINE_APPLE_MUSIC,
     ENGINE_BOOKS,
@@ -215,6 +219,10 @@ COLUMN_HEADINGS = ("Title", "Type", "Artist / channel", "Source", "Duration", "S
 # selection is counted up and spoken once the burst has settled rather than
 # once per row.
 SELECTION_SETTLE_MS = 350
+# How many rows a SoundCloud search asks for. SoundCloud is the whole answer
+# when it is the engine chosen, so it is asked as deeply as every other
+# provider blindDL keeps to a 200-result floor -- see tests/test_result_limits.
+SOUNDCLOUD_SEARCH_COUNT = 200
 BOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Library", "Year", "Size")
 AUDIOBOOK_COLUMN_HEADINGS = ("Title", "Type", "Author", "Site", "Duration", "Chapters")
 ARCHIVE_COLUMN_HEADINGS = ("Title", "Type", "Creator", "Collection", "Year", "Size")
@@ -447,7 +455,7 @@ def queue_result(queue, item, engine, folder=""):
         return queue.add_audiobook(item, item["title"])
     if engine == ENGINE_TORRENTS:
         return queue.add_torrent(item, item["title"])
-    if engine in (ENGINE_SOUNDCLOUD, ENGINE_BANDCAMP):
+    if engine in (ENGINE_SOUNDCLOUD, ENGINE_BANDCAMP, ENGINE_MIXCLOUD):
         return queue.add_ytdlp(item["url"], item["title"], audio_only=True)
     if _is_archive_engine(engine):
         return queue.add_archive(item, item["title"])
@@ -1502,11 +1510,14 @@ class SearchPanel(wx.Panel):
             order_sources = list(sources) + [
                 sideb_backend.SIDEB_SOURCE,
                 deezer_backend._SEARCH_SOURCE,
+                mixcloud_backend.SEARCH_SOURCE,
             ]
         elif engine == ENGINE_YOUTUBE:
             order_sources = ["YouTube"]
         elif engine == ENGINE_SOUNDCLOUD:
             order_sources = ["SoundCloud"]
+        elif engine == ENGINE_MIXCLOUD:
+            order_sources = [mixcloud_backend.SEARCH_SOURCE]
         elif engine == ENGINE_BANDCAMP:
             order_sources = ["Bandcamp"]
         elif engine == ENGINE_APPLE_MUSIC:
@@ -1705,6 +1716,12 @@ class SearchPanel(wx.Panel):
                     daemon=True,
                     name="search-deezer",
                 ).start()
+                threading.Thread(
+                    target=self._mixcloud_search,
+                    args=(query, token, engine, stop, order),
+                    daemon=True,
+                    name="search-mixcloud",
+                ).start()
                 items, _answered, asked = musicdl_backend.search(
                     query,
                     self.frame.config["search_timeout_s"],
@@ -1715,6 +1732,7 @@ class SearchPanel(wx.Panel):
                 )
                 asked.append(sideb_backend.SIDEB_SOURCE)
                 asked.append(deezer_backend._SEARCH_SOURCE)
+                asked.append(mixcloud_backend.SEARCH_SOURCE)
                 # on_site already delivered these; nothing left to hand over.
                 items = []
             elif engine == ENGINE_BOOKS:
@@ -1780,8 +1798,11 @@ class SearchPanel(wx.Panel):
                 items = []
             elif engine == ENGINE_SOUNDCLOUD:
                 items, _title = ytdlp_backend.extract_flat(
-                    f"scsearch200:{query}", order=order
+                    f"scsearch{SOUNDCLOUD_SEARCH_COUNT}:{query}", order=order
                 )
+            elif engine == ENGINE_MIXCLOUD:
+                items = mixcloud_backend.search(
+                    query, self.frame.config, order=order)
             elif engine == ENGINE_BANDCAMP:
                 items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
@@ -1830,6 +1851,26 @@ class SearchPanel(wx.Panel):
             return
         self._queue_site_results(
             token, engine, sideb_backend.SIDEB_SOURCE, items
+        )
+
+    def _mixcloud_search(self, query, token, engine, stop,
+                         order=ORDER_RELEVANCE):
+        """Mixcloud's share of a Music sites search, on its own thread.
+
+        Mixcloud is the only source in that search carrying DJ sets and
+        radio shows, so it answers with things none of the others can --
+        which is also why it runs alongside them rather than waiting for
+        musicdl's four dozen sites to finish first.
+        """
+        try:
+            items = mixcloud_backend.search(
+                query, self.frame.config, order=order)
+        except Exception:  # noqa: BLE001 - one failing site must not kill the rest
+            items = []
+        if stop.is_set():
+            return
+        self._queue_site_results(
+            token, engine, mixcloud_backend.SEARCH_SOURCE, items
         )
 
     def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE,
@@ -2821,6 +2862,7 @@ class SearchPanel(wx.Panel):
                 ENGINE_DEEZER,
                 ENGINE_YOUTUBE,
                 ENGINE_SOUNDCLOUD,
+                ENGINE_MIXCLOUD,
                 ENGINE_TORRENTS,
             )
         )
@@ -2993,6 +3035,7 @@ class SearchPanel(wx.Panel):
             ENGINE_APPLE_MUSIC,
             ENGINE_SOUNDCLOUD,
             ENGINE_BANDCAMP,
+            ENGINE_MIXCLOUD,
             ENGINE_AUDIOBOOKS,
         )
         token = self.preview_token = object()
@@ -3079,6 +3122,7 @@ class SearchPanel(wx.Panel):
             ENGINE_APPLE_MUSIC,
             ENGINE_SOUNDCLOUD,
             ENGINE_BANDCAMP,
+            ENGINE_MIXCLOUD,
             ENGINE_AUDIOBOOKS,
         )
         token = self.full_playback_token = object()

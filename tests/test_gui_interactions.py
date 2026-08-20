@@ -74,6 +74,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         ENGINE_BOOKS,
         ENGINE_DEEZER,
         ENGINE_LABELS,
+        ENGINE_MIXCLOUD,
         ENGINE_MUSIC,
         ENGINE_SOULSEEK_AUDIO,
         ENGINE_SOULSEEK_BOOKS,
@@ -512,6 +513,78 @@ class GuiInteractionTests(unittest.TestCase):
                 [e["result"]["title"] for e in frame.saved.all()],
                 ["T1", "T2"],
             )
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_mixcloud_is_offered_as_its_own_choice_and_plays(self):
+        panel = SearchPanel(self.host, self.frame)
+        try:
+            labels = [panel.engine_choice.GetString(index)
+                      for index in range(panel.engine_choice.GetCount())]
+            self.assertIn("Mixcloud", labels)
+            self.assertIn(ENGINE_MIXCLOUD, panel.visible_engines)
+            # A mix is audio like everything else here, so it previews and
+            # plays rather than being one of the choices that cannot.
+            panel._apply_engine_controls(ENGINE_MIXCLOUD)
+            self.assertTrue(panel.preview_btn.IsEnabled())
+            self.assertTrue(panel.play_full_btn.IsEnabled())
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_a_mixcloud_row_queues_as_audio(self):
+        panel = SearchPanel(self.host, self.frame)
+        try:
+            self._show(panel, ENGINE_MIXCLOUD, [{
+                "id": "mixcloud:/host/show/",
+                "kind": "mixcloud",
+                "title": "Late Night Set",
+                "artist": "A Host",
+                "source": "Mixcloud",
+                "duration_s": 3600,
+                "format": "Mix",
+                "url": "https://www.mixcloud.com/host/show/",
+            }])
+            panel.on_download_selected(None)
+            self.assertEqual(
+                self.frame.queue.calls,
+                [("ytdlp", "https://www.mixcloud.com/host/show/",
+                  "Late Night Set", True)],
+            )
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_a_music_sites_search_asks_mixcloud_too(self):
+        # Mixcloud is the only source in that search carrying DJ sets and
+        # radio shows, so leaving it out loses results nothing else has.
+        panel = SearchPanel(self.host, self.frame)
+        try:
+            started = []
+
+            class _Thread:
+                def __init__(self, target=None, args=(), **kwargs):
+                    started.append(kwargs.get("name") or "")
+
+                def start(self):
+                    pass
+
+            with (
+                mock.patch("blinddl.gui.search_panel.threading.Thread",
+                           _Thread),
+                mock.patch(
+                    "blinddl.gui.search_panel.musicdl_backend.search",
+                    return_value=([], [], ["Site"]),
+                ),
+                mock.patch(
+                    "blinddl.gui.search_panel.updater.ensure_external_tools"
+                ),
+                mock.patch("blinddl.gui.search_panel.wx.CallAfter"),
+            ):
+                panel._search("house", ENGINE_MUSIC, panel.token,
+                              threading.Event(), ["Site"])
+            self.assertIn("search-mixcloud", started)
         finally:
             panel.shutdown()
             panel.Destroy()

@@ -370,8 +370,16 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
     audio and video. Native desktop players cannot combine yt-dlp's separate
     adaptive audio/video URLs themselves.
     """
+    # One progressive file, before any adaptive stream of the same audio.
+    # A native player is handed a URL and left to open it: given Mixcloud's
+    # DASH manifest -- which is what "bestaudio" alone selects there, since
+    # yt-dlp ranks it highest -- it has segments to assemble and no
+    # downloader to assemble them. Every site that publishes a plain HTTP
+    # audio file has one selected here instead, and the sites whose best
+    # audio is already served over https (YouTube, SoundCloud) resolve to
+    # exactly what they resolved to before.
     primary_format = (
-        "bestaudio/best"
+        "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio/best"
         if audio_only else
         "best[protocol^=http][vcodec!=none][acodec!=none]/"
         "best[vcodec!=none][acodec!=none]/best"

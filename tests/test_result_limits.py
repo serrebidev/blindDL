@@ -21,6 +21,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         audiobook_backend,
         book_backend,
         deezer_backend,
+        mixcloud_backend,
         musicdl_backend,
         torrent_backend,
         ytdlp_backend,
@@ -36,6 +37,8 @@ class ResultLimitFloorTests(unittest.TestCase):
             "torrents": torrent_backend.MAX_RESULTS_PER_SOURCE,
             "adult": adult_backend.MAX_RESULTS_PER_SITE,
             "annas": annas_backend.SEARCH_ROWS,
+            "mixcloud": mixcloud_backend.MAX_SEARCH_PAGES
+            * mixcloud_backend.SEARCH_PAGE,
         }
         for name, cap in floors.items():
             self.assertGreaterEqual(cap, 200, name)
@@ -49,9 +52,23 @@ class ResultLimitFloorTests(unittest.TestCase):
             "deezer": deezer_backend._SEARCH_TARGET,
             "ytdlp": ytdlp_backend.SEARCH_COUNT,
             "musicdl": musicdl_backend.SEARCH_SIZE_PER_SOURCE,
+            "mixcloud": mixcloud_backend.SEARCH_COUNT,
         }
         for name, size in sizes.items():
             self.assertGreaterEqual(size, 200, name)
+
+    def test_the_single_service_engines_ask_deeply_too(self):
+        """YouTube, SoundCloud and Mixcloud each answer one search alone.
+
+        A source with three dozen siblings can afford a thin page; these
+        three are the whole answer when they are chosen, so a shallow one
+        reads as a site that has nothing.
+        """
+        from blinddl.gui import search_panel
+
+        self.assertGreaterEqual(ytdlp_backend.SEARCH_COUNT, 200)
+        self.assertGreaterEqual(search_panel.SOUNDCLOUD_SEARCH_COUNT, 200)
+        self.assertGreaterEqual(mixcloud_backend.SEARCH_COUNT, 200)
 
 
 if __name__ == "__main__":
