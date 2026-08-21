@@ -12,9 +12,10 @@ Search page, and the three do not overlap:
 * Order (``search_order``) decides *which* of the matches a site returns.
 * Sort by rearranges the rows that already arrived.
 
-Album is the one type that changes the shape of the answer rather than the
-matching: its rows are whole albums, and pressing Enter on one queues every
-track on it. The other three all produce ordinary track rows.
+Album and Playlist are the two types that change the shape of the answer
+rather than the matching: their rows are whole releases, and pressing Enter
+on one queues every track it holds. The other three all produce ordinary
+track rows.
 
 Only Deezer and Apple Music can search a named field; everything else does
 one text search and nothing else. A site that cannot is asked for its own
@@ -31,8 +32,9 @@ _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 KIND_BEST = "best"
 KIND_TRACK = "track"
 KIND_ALBUM = "album"
+KIND_PLAYLIST = "playlist"
 KIND_ARTIST = "artist"
-KINDS = (KIND_BEST, KIND_TRACK, KIND_ALBUM, KIND_ARTIST)
+KINDS = (KIND_BEST, KIND_TRACK, KIND_ALBUM, KIND_PLAYLIST, KIND_ARTIST)
 
 # What an artist search is looking for, chosen by the extra control that
 # appears next to the search type when Artist is selected. "Artist" alone
@@ -62,6 +64,7 @@ KIND_LABELS = {
     KIND_BEST: "Best match",
     KIND_TRACK: "Track title",
     KIND_ALBUM: "Album",
+    KIND_PLAYLIST: "Playlist",
     KIND_ARTIST: "Artist",
 }
 KIND_LABEL_LIST = [KIND_LABELS[kind] for kind in KINDS]
@@ -94,6 +97,28 @@ def label(kind):
 def is_album(kind):
     """Whether *kind* asks for albums rather than individual tracks."""
     return normalize(kind) == KIND_ALBUM
+
+
+def is_playlist(kind):
+    """Whether *kind* asks for whole playlists rather than tracks.
+
+    A playlist was reachable only as one of the things an Artist search
+    could be narrowed to, which meant a playlist could be searched for by
+    the name of an artist and by nothing else -- not by what a playlist is
+    usually called, which is a mood, a decade, or an occasion.
+    """
+    return normalize(kind) == KIND_PLAYLIST
+
+
+def is_collection(kind):
+    """Whether *kind* answers with whole releases rather than tracks.
+
+    Album and Playlist rows are not queueable on their own: the search page
+    resolves one to its track list first. They are also the two types the
+    music sites cannot answer at all, so they are asked of the catalogues
+    alone.
+    """
+    return is_album(kind) or is_playlist(kind)
 
 
 def is_artist(kind):
@@ -164,6 +189,26 @@ def album_type_label(track_count, record_type=None):
     if count > 1:
         return f"{noun}, {count} tracks"
     return noun
+
+
+def collection_folder(collection):
+    """The folder a whole album or playlist downloads into.
+
+    Two artists can release an album under the same name, and a folder
+    called Greatest Hits with both of them in it is no use to anyone, so an
+    album is named "Artist - Album" (the artist is dropped when the row does
+    not name one). A playlist is its own name -- its curator is not the
+    artist whose work it collects.
+    """
+    collection = collection or {}
+    title = str(
+        collection.get("title") or collection.get("album") or "").strip()
+    artist = str(collection.get("artist") or "").strip()
+    if not title:
+        return ""
+    if str(collection.get("kind") or "").endswith("_playlist"):
+        return title
+    return f"{artist} - {title}" if artist else title
 
 
 def playlist_type_label(track_count):

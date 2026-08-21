@@ -18,6 +18,8 @@ class _Queue:
     def __init__(self):
         self.ytdlp = []
         self.sideb = []
+        self.applemusic = []
+        self.soulseek = []
         self.folders = []
 
     def add_ytdlp(self, url, title, audio_only=None, folder=""):
@@ -28,8 +30,47 @@ class _Queue:
         self.sideb.append((url, title))
         self.folders.append(folder)
 
+    def add_applemusic(self, url, title, folder=""):
+        self.applemusic.append((url, title))
+        self.folders.append(folder)
+
+    def add_soulseek(self, payload, title):
+        self.soulseek.append((payload, title))
+
     def batch_additions(self):
         return nullcontext()
+
+
+def _release(album_id, title, artist="Band"):
+    return {
+        "id": f"deezer:album:{album_id}",
+        "kind": "deezer_album",
+        "title": title,
+        "artist": artist,
+        "album": title,
+        "album_id": str(album_id),
+        "url": f"https://www.deezer.com/album/{album_id}",
+    }
+
+
+def _track(track_id, title):
+    return {
+        "id": f"deezer:{track_id}",
+        "kind": "deezer",
+        "title": title,
+        "url": f"https://www.deezer.com/track/{track_id}",
+    }
+
+
+def _shared(username, remote_path):
+    return {
+        "title": remote_path.rsplit("\\", 1)[-1],
+        "kind": "soulseek",
+        "username": username,
+        "remote_path": remote_path,
+        "folder": remote_path.rsplit("\\", 1)[0],
+        "locked": False,
+    }
 
 
 def _item(item_id):
@@ -37,7 +78,9 @@ def _item(item_id):
             "url": f"https://www.youtube.com/watch?v={item_id}"}
 
 
-class SubscriptionStoreTests(unittest.TestCase):
+class _StoreCase:
+    """A store on a scratch directory, with a queue that only records."""
+
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -49,6 +92,8 @@ class SubscriptionStoreTests(unittest.TestCase):
         self.store = subscriptions.SubscriptionStore(
             {"cookies_from_browser": None, "sub_check_hours": 6}, self.queue)
 
+
+class SubscriptionStoreTests(_StoreCase, unittest.TestCase):
     def _check(self, sub_id, items, title="Playlist"):
         with mock.patch.object(
                 subscriptions.ytdlp_backend, "extract_flat",
@@ -229,6 +274,168 @@ class SubscriptionStoreTests(unittest.TestCase):
         self.assertFalse(second.is_alive())
         self.assertEqual(len(self.queue.ytdlp), 1)
         self.assertEqual(sorted(results), [(0, ""), (1, "")])
+
+
+class FollowedArtistTests(_StoreCase, unittest.TestCase):
+    """An artist is followed by their releases, not by their tracks."""
+
+    def _artist_sub(self, seen=()):
+        return self.store.add(
+            "https://www.deezer.com/artist/9", "Band", list(seen),
+            kind=subscriptions.KIND_ARTIST)
+
+    def test_a_new_release_arrives_as_a_record_in_a_folder_of_its_own(self):
+        # A discography flattened into loose tracks is neither something to
+        # watch for changes nor something to receive: one new album has to
+        # count as one new thing and land together.
+        sub = self._artist_sub(["deezer:album:1"])
+        with mock.patch.object(
+                subscriptions.deezer_backend, "artist_albums",
+                return_value=([_release(1, "First"), _release(2, "Second")],
+                              "Band")), \
+                mock.patch.object(
+                    subscriptions.deezer_backend, "extract_flat",
+                    return_value=([_track("a", "A"), _track("b", "B")],
+                                  "Second")):
+            count, error = self.store.check_one(sub["id"])
+
+        self.assertEqual((count, error), (1, ""))
+        self.assertEqual([row[1] for row in self.queue.sideb], ["A", "B"])
+        self.assertEqual(self.queue.folders, ["Band - Second"] * 2)
+        self.assertEqual(self.store.get(sub["id"])["seen_ids"],
+                         ["deezer:album:1", "deezer:album:2"])
+
+    def test_a_release_that_could_not_be_read_is_tried_again_next_time(self):
+        sub = self._artist_sub()
+        with mock.patch.object(
+                subscriptions.deezer_backend, "artist_albums",
+                return_value=([_release(1, "First")], "Band")), \
+                mock.patch.object(
+                    subscriptions.deezer_backend, "extract_flat",
+                    side_effect=RuntimeError("geo-blocked")):
+            count, error = self.store.check_one(sub["id"])
+
+        self.assertEqual(count, 0)
+        self.assertIn("geo-blocked", error)
+        self.assertEqual(self.store.get(sub["id"])["seen_ids"], [])
+
+    def test_a_check_does_not_spend_the_rate_limit_counting_tracks(self):
+        # Deezer allows fifty requests in five seconds, and the endpoint
+        # that lists a discography leaves the track counts out. Filling
+        # forty of them in costs forty requests for a number no
+        # subscription ever shows -- and leaves none to read the new
+        # release with, which is the only thing the check is there to do.
+        with mock.patch.object(
+                subscriptions.deezer_backend, "artist_albums",
+                return_value=([], "Band")) as albums:
+            subscriptions.artist_releases("https://www.deezer.com/artist/9")
+
+        self.assertIs(albums.call_args.kwargs["track_counts"], False)
+
+    def test_an_artist_can_be_followed_by_name(self):
+        with mock.patch.object(
+                subscriptions.deezer_backend, "search_artists",
+                return_value=[{"id": "27", "name": "Daft Punk",
+                               "url": "https://www.deezer.com/artist/27"}]):
+            url, name = subscriptions.resolve_artist("daft punk")
+
+        self.assertEqual(url, "https://www.deezer.com/artist/27")
+        self.assertEqual(name, "Daft Punk")
+
+    def test_a_link_to_something_that_is_not_an_artist_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            subscriptions.resolve_artist("https://www.deezer.com/album/1")
+
+
+class FollowedUserTests(_StoreCase, unittest.TestCase):
+    """A Soulseek user is followed by what they share."""
+
+    def _user_sub(self, seen=()):
+        return self.store.add(
+            subscriptions.USER_URL_PREFIX + "dj", "dj", list(seen),
+            kind=subscriptions.KIND_USER, username="dj")
+
+    def _browse(self, paths):
+        return mock.patch.object(
+            subscriptions.soulseek_backend, "browse_user",
+            return_value=[{
+                "name": "Music",
+                "files": [_shared("dj", path) for path in paths],
+            }])
+
+    def test_a_newly_shared_file_is_queued_under_the_sharer(self):
+        sub = self._user_sub()
+        with self._browse(["Music\\Album\\one.flac"]):
+            self.store.check_one(sub["id"])
+        with self._browse(["Music\\Album\\one.flac",
+                           "Music\\Album\\two.flac"]):
+            count, error = self.store.check_one(sub["id"])
+
+        self.assertEqual((count, error), (1, ""))
+        payload, title = self.queue.soulseek[-1]
+        self.assertEqual(title, "two.flac")
+        self.assertEqual(payload["target_relative_path"],
+                         "dj\\Album\\two.flac")
+
+    def test_a_file_the_user_stopped_sharing_is_forgotten(self):
+        # A share is listed whole, so what it no longer holds is not worth
+        # remembering -- and remembering it would push a big sharer's oldest
+        # files out of the seen list, where they would arrive again as new.
+        sub = self._user_sub()
+        with self._browse(["Music\\one.flac", "Music\\two.flac"]):
+            self.store.check_one(sub["id"])
+        with self._browse(["Music\\two.flac"]):
+            count, _error = self.store.check_one(sub["id"])
+
+        self.assertEqual(count, 0)
+        self.assertEqual(len(self.store.get(sub["id"])["seen_ids"]), 1)
+
+    def test_locked_files_are_not_offered(self):
+        locked = _shared("dj", "Music\\private.flac")
+        locked["locked"] = True
+        with mock.patch.object(
+                subscriptions.soulseek_backend, "browse_user",
+                return_value=[{"name": "Music", "files": [locked]}]):
+            items, title = subscriptions.user_files("dj", {})
+
+        self.assertEqual((items, title), ([], "dj"))
+
+
+class FollowedLinkTests(_StoreCase, unittest.TestCase):
+    """A link is listed by whichever backend can read it."""
+
+    def test_an_apple_music_playlist_goes_to_the_catalogue_that_can_read_it(
+            self):
+        # yt-dlp cannot read music.apple.com at all, so a followed Apple
+        # Music playlist used to fail every check it was given.
+        url = "https://music.apple.com/us/playlist/chill/pl.123"
+        sub = self.store.add(url, "Chill", [])
+        with mock.patch.object(
+                subscriptions.applemusic_backend, "extract_flat",
+                return_value=([{"id": "applemusic:1", "kind": "applemusic",
+                                "title": "One",
+                                "url": "https://music.apple.com/us/song/1"}],
+                              "Chill")) as apple, \
+                mock.patch.object(
+                    subscriptions.ytdlp_backend, "extract_flat") as ytdlp:
+            count, error = self.store.check_one(sub["id"])
+
+        self.assertEqual((count, error), (1, ""))
+        self.assertEqual(apple.call_count, 1)
+        self.assertEqual(ytdlp.call_count, 0)
+        self.assertEqual(self.queue.applemusic,
+                         [("https://music.apple.com/us/song/1", "One")])
+
+    def test_saved_rows_from_before_kinds_existed_are_still_links(self):
+        path = Path(self.dir.name) / "subscriptions.json"
+        with path.open("w", encoding="utf-8") as stream:
+            json.dump([{"id": "old", "url": "https://example", "title": "Old"}],
+                      stream)
+
+        restored = subscriptions.SubscriptionStore(
+            {"cookies_from_browser": None, "sub_check_hours": 6}, self.queue)
+
+        self.assertEqual(restored.get("old")["kind"], subscriptions.KIND_FEED)
 
 
 if __name__ == "__main__":

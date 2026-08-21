@@ -38,6 +38,7 @@ from .search_kind import (
     KIND_ALBUM,
     KIND_ARTIST,
     KIND_BEST,
+    KIND_PLAYLIST,
     KIND_TRACK,
 )
 
@@ -163,8 +164,15 @@ _ITUNES_SEARCH_KINDS = {
 
 
 def supports_kind(kind):
-    """The iTunes API matches one named field per search, so all four work."""
-    return search_kind.normalize(kind) in _ITUNES_SEARCH_KINDS
+    """Every search type reaches a catalogue that can answer it.
+
+    Four of them are one named field of an iTunes search. Playlist is the
+    exception: iTunes search has no playlist entity, so it is answered by
+    the anonymous catalog API instead -- the same one the Playlists scope
+    of an Artist search already used.
+    """
+    kind = search_kind.normalize(kind)
+    return kind in _ITUNES_SEARCH_KINDS or kind == KIND_PLAYLIST
 
 
 def search(query, config=None, order=None, kind=KIND_BEST,
@@ -175,9 +183,9 @@ def search(query, config=None, order=None, kind=KIND_BEST,
     serves, so a hit's trackViewUrl resolves to the same song there. It
     returns up to 200 tracks, which is what the Search tab lists.
 
-    *kind* is the Search tab's search type. Album returns one row per
-    release, which downloads as every track on it; the others return tracks,
-    matched on the whole entry or on just the title or artist.
+    *kind* is the Search tab's search type. Album and Playlist return one
+    row per release, which downloads as every track on it; the others return
+    tracks, matched on the whole entry or on just the title or artist.
 
     An artist search takes *artist_scope* further: songs, albums, playlists,
     or all three. Songs and albums come from the iTunes Search API (which
@@ -216,6 +224,9 @@ def search(query, config=None, order=None, kind=KIND_BEST,
             items.append(_track_item(entry, url))
         return items
 
+    if kind == KIND_PLAYLIST:
+        return _catalog_playlist_search(query)
+
     if kind == KIND_ARTIST:
         if artist_scope == ARTIST_SCOPE_ALBUMS:
             return itunes_search("album", "artistTerm", KIND_ALBUM)
@@ -241,10 +252,11 @@ def search(query, config=None, order=None, kind=KIND_BEST,
 def _catalog_playlist_search(query, limit=25):
     """Playlists matching *query*, from the anonymous catalog API.
 
-    iTunes' public search has no playlist entity, so this is the one artist
-    scope that cannot be answered by that API. The anonymous catalog client
-    is credential-free, exactly like iTunes search, and caps a request at
-    25 results (larger limits are answered with HTTP 400).
+    iTunes' public search has no playlist entity, so a Playlist search --
+    and the Playlists scope of an Artist search -- cannot be answered by
+    that API. The anonymous catalog client is credential-free, exactly like
+    iTunes search, and caps a request at 25 results (larger limits are
+    answered with HTTP 400).
     """
     limit = max(1, min(int(limit or 25), 25))
     try:

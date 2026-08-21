@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import nullcontext
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -32,6 +33,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         sideb_backend,
         speech,
         soulseek_backend,
+        subscriptions,
         updater,
         ytdlp_backend,
     )
@@ -54,6 +56,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         discover_media,
         library_roots,
     )
+    from blinddl.gui import mainframe as mainframe_module
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
     from blinddl.gui.messages_panel import MessagesPanel
     from blinddl.gui.queue_panel import QueuePanel
@@ -97,6 +100,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SOULSEEK_COLUMN_HEADINGS,
         SOULSEEK_SORT_LABELS,
         SearchPanel,
+        artist_page_url,
         _kind_capable_sources,
         _kind_phrase,
         _order_capable_sources,
@@ -110,7 +114,9 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui.feeds_dialog import FeedsDialog
     from blinddl.gui.sources_dialog import SourcesDialog
     from blinddl.gui.subs_panel import (
+        AddSubscriptionDialog,
         SUBS_SORT_CHECKED,
+        SUBS_SORT_KIND,
         SUBS_SORT_ENABLED,
         SUBS_SORT_SITE,
         SUBS_SORT_STALE,
@@ -245,6 +251,7 @@ class _SavingConfig(dict):
 class _Subscriptions:
     def __init__(self):
         self.wake_count = 0
+        self.added = []
         self.rows = [
             {
                 "id": "one",
@@ -264,6 +271,19 @@ class _Subscriptions:
 
     def snapshot(self):
         return [dict(row) for row in self.rows]
+
+    def add(self, url, title, seen_ids, order=None, kind="feed", username=""):
+        row = {
+            "id": str(len(self.rows) + 1), "url": url, "title": title,
+            "seen_ids": list(seen_ids), "order": order, "kind": kind,
+            "username": username, "enabled": True,
+        }
+        self.rows.append(row)
+        self.added.append(row)
+        return row
+
+    def queue_all(self, items, folder="", audio_only=None):
+        return len(items), []
 
     def set_enabled(self, sub_id, enabled):
         next(row for row in self.rows if row["id"] == sub_id)["enabled"] = enabled
@@ -297,11 +317,18 @@ class _Frame:
         self.queue_panel = mock.Mock()
         self.queue_panel.count_text.return_value = "1 item in the queue."
         self.messages = []
+        self.follow_calls = []
         self.play_calls = []
         self.extra_players = []
 
     def announce(self, message):
         self.messages.append(message)
+
+    def follow(self, text, kind, download_existing=False):
+        self.follow_calls.append((text, kind))
+
+    def follow_soulseek_user(self, username):
+        self.follow_calls.append((username, subscriptions.KIND_USER))
 
     def on_choose_sources(self):
         pass
@@ -5342,6 +5369,14 @@ class GuiInteractionTests(unittest.TestCase):
             [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_ENABLED)],
             ["Alpha", "Beta", "Zulu"],
         )
+        # A list holding feeds, artists and people is worth grouping by
+        # which is which; a row saved before kinds existed is a link.
+        rows[0]["kind"] = subscriptions.KIND_USER
+        rows[1]["kind"] = subscriptions.KIND_ARTIST
+        self.assertEqual(
+            [row["title"] for row in _sorted_subscriptions(rows, SUBS_SORT_KIND)],
+            ["Alpha", "Beta", "Zulu"],
+        )
 
     def test_subscription_feed_order_updates_selected_rows(self):
         panel = SubsPanel(self.host, self.frame)
@@ -5376,6 +5411,156 @@ class GuiInteractionTests(unittest.TestCase):
             extract.call_args.kwargs["limit"],
             ytdlp_backend.SUBSCRIPTION_FEED_LIMIT,
         )
+
+
+    # -- following what is already on screen --------------------------------
+
+    def test_a_deezer_row_can_be_followed_by_its_artist(self):
+        # An artist found in a search is an artist worth following, and
+        # typing their name into a dialog again to do it is a step that
+        # only exists because nobody asked the row.
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_DEEZER, [{
+            "title": "One More Time", "artist": "Daft Punk",
+            "kind": "deezer", "artist_id": "27", "album_id": "302127",
+            "url": "https://www.deezer.com/track/3135556",
+        }])
+
+        labels = self._results_menu_labels(panel)
+        self.assertIn("Follow this artist", labels)
+        self.assertNotIn("Follow this playlist", labels)
+        self.assertEqual(artist_page_url(panel.results[0]),
+                         "https://www.deezer.com/artist/27")
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_an_apple_music_row_is_followed_on_apple_music(self):
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_APPLE_MUSIC, [{
+            "title": "One More Time", "artist": "Daft Punk",
+            "kind": "applemusic", "artist_id": "5468295",
+            "url": "https://music.apple.com/us/song/1",
+        }])
+
+        self.assertIn("Follow this artist", self._results_menu_labels(panel))
+        self.assertEqual(artist_page_url(panel.results[0]),
+                         "https://music.apple.com/us/artist/5468295")
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_playlist_row_offers_to_be_followed(self):
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_DEEZER, [{
+            "title": "Rainy Sunday", "artist": "Editor",
+            "kind": "deezer_playlist", "tracks": 40,
+            "url": "https://www.deezer.com/playlist/5",
+        }])
+
+        self.assertIn("Follow this playlist",
+                      self._results_menu_labels(panel))
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_row_with_no_catalogue_behind_it_is_not_offered_following(self):
+        panel = SearchPanel(self.host, self.frame)
+        self._show(panel, ENGINE_YOUTUBE, [{
+            "title": "A video", "artist": "", "kind": "ytdlp",
+            "url": "https://www.youtube.com/watch?v=1",
+        }])
+
+        labels = self._results_menu_labels(panel)
+        self.assertNotIn("Follow this artist", labels)
+        self.assertNotIn("Follow this playlist", labels)
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_a_soulseek_row_can_be_followed_by_its_user(self):
+        panel = SearchPanel(self.host, self.frame)
+        self.frame.config["soulseek_enabled"] = True
+        self._show(panel, ENGINE_SOULSEEK_AUDIO, [{
+            "title": "one.flac", "kind": "soulseek", "username": "dj",
+            "remote_path": "Music\\one.flac", "folder": "Music",
+        }])
+
+        self.assertIn("Follow this user", self._results_menu_labels(panel))
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_following_an_artist_saves_a_subscription_to_their_releases(self):
+        panel = SubsPanel(self.host, self.frame)
+        releases = [{"id": "deezer:album:7", "kind": "deezer_album",
+                     "title": "Discovery", "artist": "Daft Punk",
+                     "url": "https://www.deezer.com/album/7"}]
+        with mock.patch.object(
+                subscriptions, "resolve_artist",
+                return_value=("https://www.deezer.com/artist/27",
+                              "Daft Punk")), \
+                mock.patch.object(
+                    subscriptions, "artist_releases",
+                    return_value=(releases, "Daft Punk")), \
+                mock.patch("blinddl.gui.subs_panel.wx.CallAfter",
+                           side_effect=lambda fn, *args: fn(*args)):
+            panel._add_worker("daft punk", False,
+                              kind=subscriptions.KIND_ARTIST)
+
+        saved = self.frame.subs.added[-1]
+        self.assertEqual(saved["kind"], subscriptions.KIND_ARTIST)
+        self.assertEqual(saved["url"], "https://www.deezer.com/artist/27")
+        # Everything already released counts as seen, so following someone
+        # brings their next record rather than their whole back catalogue.
+        self.assertEqual(saved["seen_ids"], ["deezer:album:7"])
+        self.assertEqual(self.frame.messages[-1], "Subscribed: Daft Punk.")
+        panel.Destroy()
+
+    def test_following_a_user_reads_their_shares_before_saving_them(self):
+        panel = SubsPanel(self.host, self.frame)
+        with mock.patch.object(
+                subscriptions, "user_files",
+                return_value=([{"id": "one", "kind": "soulseek",
+                                "title": "one.flac", "username": "dj",
+                                "remote_path": "Music\\one.flac",
+                                "folder": "Music"}], "dj")), \
+                mock.patch("blinddl.gui.subs_panel.wx.CallAfter",
+                           side_effect=lambda fn, *args: fn(*args)):
+            panel._add_worker("dj", False, kind=subscriptions.KIND_USER)
+
+        saved = self.frame.subs.added[-1]
+        self.assertEqual(saved["kind"], subscriptions.KIND_USER)
+        self.assertEqual(saved["username"], "dj")
+        # What they already share is not new, so following someone does not
+        # start by downloading their whole share.
+        self.assertEqual(saved["seen_ids"], ["one"])
+        panel.Destroy()
+
+    def test_the_add_dialog_asks_for_the_thing_that_was_chosen(self):
+        dialog = AddSubscriptionDialog(self.host)
+        self.assertTrue(dialog.order_choice.IsEnabled())
+
+        dialog.kind_choice.SetSelection(
+            subscriptions.KINDS.index(subscriptions.KIND_USER))
+        dialog.on_kind_changed(None)
+
+        self.assertEqual(dialog.url_label.GetLabel(), "Soulseek &username:")
+        # A feed order is a question about a feed; a share has one order.
+        self.assertFalse(dialog.order_choice.IsEnabled())
+        dialog.Destroy()
+
+    def test_the_download_queue_comes_after_the_two_transfer_tabs(self):
+        # The queue is a shelf for what has not been started yet; the tabs
+        # that say what is happening now are reached far more often.
+        source = Path(mainframe_module.__file__).read_text(encoding="utf-8")
+        pages = re.findall(
+            r"self\.notebook\.AddPage\(self\.\w+, \"([^\"]+)\"\)", source)
+
+        self.assertEqual(pages[:7], [
+            "URL", "Search", "Downloads", "Uploads", "Download queue",
+            "Library", "Subscriptions"])
+        self.assertEqual(
+            [mainframe_module.TAB_URL, mainframe_module.TAB_SEARCH,
+             mainframe_module.TAB_DOWNLOADS, mainframe_module.TAB_UPLOADS,
+             mainframe_module.TAB_QUEUE, mainframe_module.TAB_LIBRARY,
+             mainframe_module.TAB_SUBS],
+            list(range(7)))
 
 
 if __name__ == "__main__":

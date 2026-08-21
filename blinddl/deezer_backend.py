@@ -32,6 +32,7 @@ from .search_kind import (
     KIND_ALBUM,
     KIND_ARTIST,
     KIND_BEST,
+    KIND_PLAYLIST,
     KIND_TRACK,
 )
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
@@ -406,6 +407,48 @@ def is_deezer_url(url):
     return bool(_DEEZER_URL_RE.search(url))
 
 
+def parse_url(url):
+    """(kind, id) for a Deezer link, or None when it is not one.
+
+    *kind* is "track", "album", "playlist" or "artist". Callers that need
+    to know which of those a link is -- following an artist, for one --
+    should ask here rather than matching the URL themselves.
+    """
+    match = _DEEZER_URL_RE.search(str(url or ""))
+    if not match:
+        return None
+    return match.group(1).lower(), match.group(2)
+
+
+def search_artists(query, limit=_ARTIST_SEARCH_LIMIT):
+    """The artists whose names match *query*, best match first.
+
+    Each row is {"id", "name", "url"}: enough to follow one, or to open
+    their releases, without a second look-up.
+    """
+    query = str(query or "").strip()
+    if not query:
+        return []
+    try:
+        found = _api_get(
+            "/search/artist", {"q": query, "limit": max(1, int(limit))}
+        ).get("data", [])
+    except Exception:  # noqa: BLE001 - offline is not an error here
+        return []
+    artists = []
+    for artist in found:
+        artist_id = str(artist.get("id") or "").strip()
+        if not artist_id:
+            continue
+        artists.append({
+            "id": artist_id,
+            "name": artist.get("name") or "",
+            "url": artist.get("link")
+            or f"https://www.deezer.com/artist/{artist_id}",
+        })
+    return artists
+
+
 def _api_get(path, params=None):
     # `next` links returned by the API are absolute URLs; only prefix the
     # base for the relative paths callers build by hand.
@@ -544,14 +587,14 @@ def _playlist_to_item(data):
 def supports_order(order, kind=KIND_BEST):
     """Deezer publishes a rank per track, and no release date to sort on.
 
-    Album search is the exception both ways: /search/album returns neither a
-    date nor a popularity figure, so an album search can only be answered by
-    best match.
+    A whole-release search is the exception both ways: /search/album and
+    /search/playlist return neither a date nor a popularity figure, so
+    those can only be answered by best match.
     """
     order = search_order.normalize(order)
     if order == ORDER_RECENT:
         return False
-    return not (search_kind.is_album(kind) and order == ORDER_POPULAR)
+    return not (search_kind.is_collection(kind) and order == ORDER_POPULAR)
 
 
 def supports_kind(kind):
@@ -666,12 +709,13 @@ def _search_artist_albums(query, limit=_SEARCH_TARGET):
     return _fill_track_counts(items[:limit])
 
 
-def _search_artist_playlists(query, limit=_SEARCH_TARGET):
-    """Playlists whose titles match *query* ("playlists by them").
+def _search_playlists(query, limit=_SEARCH_TARGET):
+    """Playlists whose titles match *query*.
 
-    Deezer has no artist-playlists endpoint, so this searches the playlist
-    catalogue by the artist's name -- the same playlists Deezer's own
-    search box surfaces for an artist.
+    This is both what a Playlist search asks for and what the Playlists
+    scope of an Artist search asks for: Deezer has no artist-playlists
+    endpoint, so a search for the artist's name is what surfaces the
+    playlists about them, exactly as Deezer's own search box does.
     """
     items = []
     seen = set()
@@ -701,10 +745,11 @@ def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
            artist_scope=ARTIST_SCOPE_ALL):
     """Search Deezer via the public API.  Returns normalized items.
 
-    *kind* is the Search tab's search type. Album asks Deezer's album
-    endpoint and returns one row per album, artist asks its artist endpoint
-    and returns what those artists are known for, and track title keeps only
-    the results whose title really does contain what was typed.
+    *kind* is the Search tab's search type. Album and Playlist ask Deezer's
+    album and playlist endpoints and return one row per release, artist asks
+    its artist endpoint and returns what those artists are known for, and
+    track title keeps only the results whose title really does contain what
+    was typed.
 
     An artist search takes *artist_scope* further: songs, albums, playlists,
     or all three. Each scope looks the artist up first (Deezer's
@@ -720,11 +765,13 @@ def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
     artist_scope = search_kind.normalize_artist_scope(artist_scope)
     if kind == KIND_ALBUM:
         return _search_albums(query)
+    if kind == KIND_PLAYLIST:
+        return _search_playlists(query)
     if kind == KIND_ARTIST:
         if artist_scope == ARTIST_SCOPE_ALBUMS:
             return _search_artist_albums(query)
         if artist_scope == ARTIST_SCOPE_PLAYLISTS:
-            return _search_artist_playlists(query)
+            return _search_playlists(query)
         if artist_scope == ARTIST_SCOPE_ALL:
             # Split the budget between the three kinds so songs do not
             # crowd the albums and playlists out of the list entirely.
@@ -735,7 +782,7 @@ def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
             combined.extend(
                 _search_artist_albums(query, _ARTIST_SCOPE_ALL_BUDGET))
             combined.extend(
-                _search_artist_playlists(query, _ARTIST_SCOPE_ALL_BUDGET))
+                _search_playlists(query, _ARTIST_SCOPE_ALL_BUDGET))
             return combined
         # ARTIST_SCOPE_SONGS
         items = _search_artist_tracks(query)
@@ -781,10 +828,10 @@ def extract_flat(url, config=None):
 
     Same contract as sideb_backend.extract_flat and ytdlp_backend.extract_flat.
     """
-    match = _DEEZER_URL_RE.search(url)
-    if not match:
+    parsed = parse_url(url)
+    if parsed is None:
         raise RuntimeError(f"Not a Deezer URL: {url}")
-    kind, obj_id = match.group(1).lower(), match.group(2)
+    kind, obj_id = parsed
 
     if kind == "track":
         data = _api_get(f"/track/{obj_id}")
@@ -878,12 +925,19 @@ def album_items(album_id):
     return extract_flat(f"https://www.deezer.com/album/{album_id}")
 
 
-def artist_albums(artist_id, limit=_SEARCH_TARGET):
+def artist_albums(artist_id, limit=_SEARCH_TARGET, track_counts=True):
     """(album rows, artist name) for one Deezer artist id.
 
     Everything Deezer lists for them -- albums, EPs, singles and
     compilations alike, each row saying which it is -- so a discography can
     be walked one release at a time instead of as several hundred tracks.
+
+    *track_counts* fills in the counts this endpoint leaves out, which
+    costs one request per release. A subscription checking for a new record
+    never shows those counts and does not ask for them: Deezer allows fifty
+    requests in five seconds, and a discography of forty spends the lot on
+    a number nobody reads -- then has nothing left to read the new release
+    with.
     """
     artist_id = str(artist_id or "").strip()
     if not artist_id:
@@ -909,7 +963,8 @@ def artist_albums(artist_id, limit=_SEARCH_TARGET):
                 seen.add(item["id"])
                 items.append(item)
         next_path = page.get("next")
-    return _fill_track_counts(items[:limit]), name
+    items = items[:limit]
+    return (_fill_track_counts(items) if track_counts else items), name
 
 
 def _media_candidates(payload):

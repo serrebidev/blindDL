@@ -380,6 +380,61 @@ class DeezerBackendTests(unittest.TestCase):
         self.assertEqual(items[0]["artist"], "Editor")
         self.assertEqual(items[0]["format"], "Playlist, 12 tracks")
 
+    def test_a_playlist_search_asks_the_playlist_catalogue(self):
+        # A playlist used to be reachable only as one of the things an
+        # Artist search could be narrowed to, so the only way to find one
+        # was to know an artist on it -- not a mood, a decade or a party.
+        payload = {"data": [
+            {"id": 5, "title": "Rainy Sunday", "nb_tracks": 40,
+             "user": {"name": "Editor"},
+             "link": "https://www.deezer.com/playlist/5"},
+        ]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload) as api:
+            items = deezer_backend.search(
+                "rainy sunday", kind=search_kind.KIND_PLAYLIST)
+
+        self.assertEqual(api.call_args.args[0], "/search/playlist")
+        self.assertEqual(api.call_args.args[1]["q"], "rainy sunday")
+        self.assertEqual([item["kind"] for item in items],
+                         ["deezer_playlist"])
+        self.assertEqual(items[0]["format"], "Playlist, 40 tracks")
+
+    def test_a_link_says_what_it_points_at(self):
+        # Following an artist needs to know an artist link from an album
+        # one, and every caller matching the URL itself is one more place
+        # for a locale prefix or a shortlink to be forgotten.
+        self.assertEqual(
+            deezer_backend.parse_url("https://www.deezer.com/en/artist/27"),
+            ("artist", "27"))
+        self.assertEqual(
+            deezer_backend.parse_url("https://www.deezer.com/album/7"),
+            ("album", "7"))
+        self.assertIsNone(deezer_backend.parse_url("https://example.com/27"))
+
+    def test_artists_can_be_looked_up_by_name(self):
+        payload = {"data": [{"id": 27, "name": "Daft Punk"}]}
+        with mock.patch.object(deezer_backend, "_api_get",
+                               return_value=payload) as api:
+            artists = deezer_backend.search_artists("daft punk")
+
+        self.assertEqual(api.call_args.args[0], "/search/artist")
+        self.assertEqual(artists, [{
+            "id": "27", "name": "Daft Punk",
+            "url": "https://www.deezer.com/artist/27"}])
+
+    def test_an_artist_lookup_that_fails_is_no_artists_rather_than_an_error(
+            self):
+        with mock.patch.object(deezer_backend, "_api_get",
+                               side_effect=RuntimeError("offline")):
+            self.assertEqual(deezer_backend.search_artists("daft punk"), [])
+
+    def test_playlist_search_cannot_answer_most_popular_either(self):
+        self.assertFalse(deezer_backend.supports_order(
+            search_order.ORDER_POPULAR, search_kind.KIND_PLAYLIST))
+        self.assertTrue(deezer_backend.supports_kind(
+            search_kind.KIND_PLAYLIST))
+
     def test_artist_search_all_scope_combines_all_three_kinds(self):
         def api(path, params=None):
             if path == "/search/artist":
@@ -557,6 +612,23 @@ class DeezerBackendTests(unittest.TestCase):
             items, _name = deezer_backend.artist_albums(27, limit=3)
 
         self.assertEqual(len(items), 3)
+
+    def test_a_discography_can_be_listed_without_the_extra_requests(self):
+        artist = {"name": "Daft Punk"}
+        page = {"data": [{"id": 7, "title": "Discovery"}]}
+
+        def api_get(path, params=None):
+            return artist if path == "/artist/27" else page
+
+        with mock.patch.object(
+                deezer_backend, "_api_get", side_effect=api_get) as api:
+            items, _name = deezer_backend.artist_albums(
+                27, limit=1, track_counts=False)
+
+        # One request for the artist, one for their releases, and none for
+        # the counts -- what a subscription check needs and no more.
+        self.assertEqual(api.call_count, 2)
+        self.assertEqual(items[0]["format"], "Album")
 
     def test_album_search_cannot_answer_most_popular(self):
         # /search/album publishes neither a rank nor a date, so claiming the

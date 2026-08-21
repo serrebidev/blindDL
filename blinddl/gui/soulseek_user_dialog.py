@@ -102,6 +102,11 @@ class UserBrowserDialog(wx.Dialog):
         self.slot_button.SetName("Give this user a free slot")
         self.profile_button = wx.Button(self, label="View &profile")
         self.profile_button.SetName("View this user's profile")
+        self.follow_button = wx.Button(self, label="F&ollow user")
+        self.follow_button.SetName("Follow this user's shared files")
+        self.follow_button.SetHelpText(
+            "Adds this user to Subscriptions. Anything they share from now "
+            "on is downloaded automatically.")
         user_row.Add(user_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         user_row.Add(self.username_text, 1, wx.RIGHT, 6)
         for button in (
@@ -110,6 +115,7 @@ class UserBrowserDialog(wx.Dialog):
             self.friend_button,
             self.slot_button,
             self.profile_button,
+            self.follow_button,
         ):
             user_row.Add(button, 0, wx.RIGHT, 6)
 
@@ -163,6 +169,7 @@ class UserBrowserDialog(wx.Dialog):
         self.friend_button.Bind(wx.EVT_BUTTON, self.on_friend)
         self.slot_button.Bind(wx.EVT_BUTTON, self.on_slot)
         self.profile_button.Bind(wx.EVT_BUTTON, self.on_profile)
+        self.follow_button.Bind(wx.EVT_BUTTON, self.on_follow)
         self.filter_text.Bind(wx.EVT_TEXT, self.on_filter)
         self.tree.Bind(wx.EVT_TREE_SEL_CHANGED, self.on_tree_selected)
         self.tree.Bind(wx.EVT_CONTEXT_MENU, self.on_tree_menu)
@@ -428,6 +435,9 @@ class UserBrowserDialog(wx.Dialog):
 
     def on_slot(self, event=None):
         self.frame.give_soulseek_free_slot(self._username())
+
+    def on_follow(self, event=None):
+        self.frame.follow_soulseek_user(self._username())
 
     def on_profile(self, event=None):
         self.frame.view_soulseek_profile(self._username())

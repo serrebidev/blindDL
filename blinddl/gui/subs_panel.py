@@ -2,18 +2,25 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Subscriptions tab: follow playlists/channels and auto-grab new items."""
+"""Subscriptions tab: follow feeds, artists and people, and auto-grab.
+
+Three things can be followed and they are added the same way: pick what it
+is, type it, and the check that follows lists it accordingly. An artist can
+be named rather than linked -- "Daft Punk" is what someone means, and
+finding their catalogue page first is a step they should not have to take.
+"""
 
 import threading
 from urllib.parse import urlparse
 
 import wx
 
-from .. import search_order, sideb_backend, ytdlp_backend
+from .. import search_order, subscriptions, ytdlp_backend
 
 
 SUBS_SORT_ADDED = "added"
 SUBS_SORT_TITLE = "title"
+SUBS_SORT_KIND = "kind"
 SUBS_SORT_SITE = "site"
 SUBS_SORT_CHECKED = "checked"
 SUBS_SORT_STALE = "stale"
@@ -22,6 +29,7 @@ SUBS_SORT_ENABLED = "enabled"
 SUBS_SORTS = (
     SUBS_SORT_ADDED,
     SUBS_SORT_TITLE,
+    SUBS_SORT_KIND,
     SUBS_SORT_SITE,
     SUBS_SORT_CHECKED,
     SUBS_SORT_STALE,
@@ -31,6 +39,7 @@ SUBS_SORTS = (
 SUBS_SORT_LABELS = (
     "Date added",
     "Title",
+    "What it follows",
     "Site",
     "Recently checked",
     "Needs checking",
@@ -40,7 +49,10 @@ SUBS_SORT_LABELS = (
 
 
 def _site_name(url):
-    host = urlparse(str(url or "")).hostname or ""
+    url = str(url or "")
+    if url.startswith(subscriptions.USER_URL_PREFIX):
+        return "soulseek"
+    host = urlparse(url).hostname or ""
     return host.removeprefix("www.").casefold()
 
 
@@ -50,11 +62,15 @@ def _checked_value(sub):
     return int(digits or 0)
 
 
-def _sorted_subscriptions(subscriptions, mode):
-    """Return a stable, useful view order without changing check order."""
+def _sorted_subscriptions(rows, mode):
+    """Return a stable, useful view order without changing check order.
+
+    The rows are named *rows* rather than *subscriptions*: the module of
+    that name is what says which kind each of them is.
+    """
     if mode not in SUBS_SORTS:
         mode = SUBS_SORT_ADDED
-    indexed = list(enumerate(subscriptions))
+    indexed = list(enumerate(rows))
 
     if mode == SUBS_SORT_ADDED:
         # Saved subscriptions from older releases have no timestamp; keeping
@@ -66,6 +82,12 @@ def _sorted_subscriptions(subscriptions, mode):
         def title_sort_key(pair):
             return str(pair[1].get("title") or "").casefold(), pair[0]
         key = title_sort_key
+    elif mode == SUBS_SORT_KIND:
+        def kind_sort_key(pair):
+            return (
+                subscriptions.kind_label(pair[1].get("kind")),
+                str(pair[1].get("title") or "").casefold(), pair[0])
+        key = kind_sort_key
     elif mode == SUBS_SORT_SITE:
         def site_sort_key(pair):
             return (
@@ -95,24 +117,57 @@ def _sorted_subscriptions(subscriptions, mode):
     return [sub for _index, sub in sorted(indexed, key=key)]
 
 
+# What the text box asks for, and what it is called, for each thing that can
+# be followed. A choice that renames the field next to it is what keeps one
+# dialog from needing three.
+_PROMPTS = {
+    subscriptions.KIND_FEED: (
+        "&URL, @handle, #hashtag, or playlist id:",
+        "Subscription URL",
+        "Follow a playlist, channel, hashtag, or search results page. "
+        "Deezer and Apple Music playlist links work here too.",
+    ),
+    subscriptions.KIND_ARTIST: (
+        "&Artist name, or a link to their page:",
+        "Artist to follow",
+        "Follow an artist by name, or by a Deezer or Apple Music link to "
+        "their page. Their new releases are downloaded a record at a time, "
+        "each into a folder of its own.",
+    ),
+    subscriptions.KIND_USER: (
+        "Soulseek &username:",
+        "Soulseek user to follow",
+        "Follow what a Soulseek user shares. Anything they add to their "
+        "shares afterwards is downloaded into a folder named after them.",
+    ),
+}
+
+
 class AddSubscriptionDialog(wx.Dialog):
-    def __init__(self, parent):
+    def __init__(self, parent, kind=subscriptions.KIND_FEED):
         super().__init__(parent, title="Add subscription")
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        url_label = wx.StaticText(
-            self,
-            label="&URL, @handle, #hashtag, or playlist id:")
+        kind_label = wx.StaticText(self, label="&Follow:")
+        self.kind_choice = wx.Choice(
+            self, choices=subscriptions.KIND_LABEL_LIST)
+        self.kind_choice.SetName("What to follow")
+        self.kind_choice.SetHelpText(
+            "A link publishes items, an artist publishes releases, and a "
+            "Soulseek user shares files. Each is listed the way it is "
+            "published.")
+        self.kind_choice.SetSelection(
+            subscriptions.KINDS.index(subscriptions.normalize_kind(kind)))
+        self.kind_choice.Bind(wx.EVT_CHOICE, self.on_kind_changed)
+
+        self.url_label = wx.StaticText(self, label=_PROMPTS[
+            subscriptions.KIND_FEED][0])
         self.url_text = wx.TextCtrl(self)
-        self.url_text.SetName("Subscription URL")
-        self.url_text.SetHelpText(
-            "Subscribe to a playlist, channel, hashtag, or search results "
-            "page.")
         self.existing_check = wx.CheckBox(
             self, label="&Download existing items")
         self.existing_check.SetName("Download existing items")
 
-        order_label = wx.StaticText(self, label="Feed &order:")
+        self.order_label = wx.StaticText(self, label="Feed &order:")
         self.order_choice = wx.Choice(
             self, choices=search_order.ORDER_LABEL_LIST)
         self.order_choice.SetName("Subscription feed order")
@@ -124,14 +179,40 @@ class AddSubscriptionDialog(wx.Dialog):
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
 
-        sizer.Add(url_label, 0, wx.ALL, 8)
+        sizer.Add(kind_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sizer.Add(self.kind_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        sizer.Add(self.url_label, 0, wx.ALL, 8)
         sizer.Add(self.url_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
-        sizer.Add(order_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sizer.Add(self.order_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
         sizer.Add(self.order_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.existing_check, 0, wx.ALL, 8)
         sizer.Add(buttons, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizerAndFit(sizer)
+        self.on_kind_changed(None)
         self.url_text.SetFocus()
+
+    def selected_kind(self):
+        selection = self.kind_choice.GetSelection()
+        if 0 <= selection < len(subscriptions.KINDS):
+            return subscriptions.KINDS[selection]
+        return subscriptions.KIND_FEED
+
+    def on_kind_changed(self, event):
+        """Ask for the thing that was chosen, by the name it goes by."""
+        kind = self.selected_kind()
+        label, name, help_text = _PROMPTS[kind]
+        self.url_label.SetLabel(label)
+        self.url_text.SetName(name)
+        self.url_text.SetHelpText(help_text)
+        # A feed order is a question about a feed. An artist's releases and
+        # a person's shares have one order apiece, so it is switched off
+        # rather than left there offering a choice that changes nothing.
+        feed = kind == subscriptions.KIND_FEED
+        self.order_choice.Enable(feed)
+        self.order_label.Enable(feed)
+        self.Layout()
+        if event is not None:
+            event.Skip()
 
 
 class SubsPanel(wx.Panel):
@@ -177,11 +258,12 @@ class SubsPanel(wx.Panel):
         self.list.SetName("Subscriptions")
         self.list.SetHelpText(
             "Select subscriptions. Context Menu opens actions.")
-        for i, heading in enumerate(("Title", "URL", "Feed order", "Enabled",
-                                     "Last checked", "Tracked")):
+        for i, heading in enumerate(("Title", "Follows", "URL", "Feed order",
+                                     "Enabled", "Last checked", "Tracked")):
             self.list.InsertColumn(i, heading)
         self.list.SetColumnWidth(0, 250)
-        self.list.SetColumnWidth(1, 300)
+        self.list.SetColumnWidth(1, 110)
+        self.list.SetColumnWidth(2, 300)
         self.list.Bind(wx.EVT_CONTEXT_MENU, self.on_context_menu)
 
         sizer.Add(controls_row, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
@@ -203,13 +285,17 @@ class SubsPanel(wx.Panel):
             self.frame.subs.snapshot(), mode)
         self.list.DeleteAllItems()
         for row, sub in enumerate(self.displayed_subs):
+            kind = subscriptions.normalize_kind(sub.get("kind"))
             self.list.InsertItem(row, sub["title"])
-            self.list.SetItem(row, 1, sub["url"])
+            self.list.SetItem(row, 1, subscriptions.kind_label(kind))
+            self.list.SetItem(row, 2, sub["url"])
             self.list.SetItem(
-                row, 2, search_order.label(sub.get("order")))
-            self.list.SetItem(row, 3, "Yes" if sub.get("enabled", True) else "No")
-            self.list.SetItem(row, 4, sub.get("last_checked") or "Never")
-            self.list.SetItem(row, 5, str(len(sub.get("seen_ids") or [])))
+                row, 3,
+                search_order.label(sub.get("order"))
+                if kind == subscriptions.KIND_FEED else "")
+            self.list.SetItem(row, 4, "Yes" if sub.get("enabled", True) else "No")
+            self.list.SetItem(row, 5, sub.get("last_checked") or "Never")
+            self.list.SetItem(row, 6, str(len(sub.get("seen_ids") or [])))
             if sub["id"] in selected_ids:
                 self.list.Select(row)
 
@@ -249,23 +335,25 @@ class SubsPanel(wx.Panel):
             check_item = menu.Append(wx.ID_ANY, "&Check now")
             enable_item = menu.Append(wx.ID_ANY, "&Enable")
             disable_item = menu.Append(wx.ID_ANY, "&Disable")
-            order_menu = wx.Menu()
             selected_subs = self._selected_subs()
-            selected_orders = {
-                search_order.normalize(sub.get("order"))
-                for sub in selected_subs
-            }
-            for order in search_order.ORDERS:
-                order_item = order_menu.AppendRadioItem(
-                    wx.ID_ANY, search_order.label(order))
-                order_item.Check(selected_orders == {order})
-                order_menu.Bind(
-                    wx.EVT_MENU,
-                    lambda _event, selected_order=order:
-                    self._set_feed_order(selected_order),
-                    order_item,
-                )
-            menu.AppendSubMenu(order_menu, "Feed &order")
+            if any(subscriptions.normalize_kind(sub.get("kind"))
+                   == subscriptions.KIND_FEED for sub in selected_subs):
+                order_menu = wx.Menu()
+                selected_orders = {
+                    search_order.normalize(sub.get("order"))
+                    for sub in selected_subs
+                }
+                for order in search_order.ORDERS:
+                    order_item = order_menu.AppendRadioItem(
+                        wx.ID_ANY, search_order.label(order))
+                    order_item.Check(selected_orders == {order})
+                    order_menu.Bind(
+                        wx.EVT_MENU,
+                        lambda _event, selected_order=order:
+                        self._set_feed_order(selected_order),
+                        order_item,
+                    )
+                menu.AppendSubMenu(order_menu, "Feed &order")
             remove_item = menu.Append(wx.ID_REMOVE, "&Remove")
             menu.Bind(wx.EVT_MENU, self.on_check_now, check_item)
             menu.Bind(wx.EVT_MENU, self.on_enable, enable_item)
@@ -322,67 +410,105 @@ class SubsPanel(wx.Panel):
 
     # -- actions -----------------------------------------------------------
 
-    def on_add(self, event):
-        dialog = AddSubscriptionDialog(self)
+    def on_add(self, event, kind=subscriptions.KIND_FEED):
+        dialog = AddSubscriptionDialog(self, kind)
         if dialog.ShowModal() != wx.ID_OK:
             dialog.Destroy()
             return
-        url = ytdlp_backend.normalize_url(dialog.url_text.GetValue())
+        kind = dialog.selected_kind()
+        text = dialog.url_text.GetValue().strip()
         download_existing = dialog.existing_check.GetValue()
         order_selection = dialog.order_choice.GetSelection()
         order = (search_order.ORDERS[order_selection]
                  if 0 <= order_selection < len(search_order.ORDERS)
                  else search_order.ORDER_RECENT)
         dialog.Destroy()
-        if not url:
-            self.frame.announce("Enter a URL.")
+        if not text:
+            self.frame.announce(
+                "Enter a username." if kind == subscriptions.KIND_USER
+                else "Enter a name or a URL.")
             return
-        self.frame.announce("Reading URL...")
+        self.follow(text, kind, download_existing, order)
+
+    def follow(self, text, kind=subscriptions.KIND_FEED,
+               download_existing=False, order=search_order.ORDER_RECENT):
+        """Start following *text*, whatever kind of thing it names.
+
+        Called by the Add dialog and by the Follow commands on the Search
+        page and the Soulseek browser, so subscribing to what is already on
+        screen never means typing its name out again.
+        """
+        kind = subscriptions.normalize_kind(kind)
+        text = str(text or "").strip()
+        if not text:
+            self.frame.announce("Nothing to follow.")
+            return
+        if kind == subscriptions.KIND_FEED:
+            text = ytdlp_backend.normalize_url(text)
+        self.frame.announce({
+            subscriptions.KIND_ARTIST: f"Looking up {text}...",
+            subscriptions.KIND_USER: f"Reading {text}'s shared files...",
+        }.get(kind, "Reading URL..."))
         threading.Thread(target=self._add_worker,
-                         args=(url, download_existing, order),
+                         args=(text, download_existing, order, kind),
                          daemon=True).start()
 
-    def _add_worker(self, url, download_existing,
-                    order=search_order.ORDER_RECENT):
+    def _add_worker(self, text, download_existing,
+                    order=search_order.ORDER_RECENT,
+                    kind=subscriptions.KIND_FEED):
+        username = ""
+        url = text
         try:
-            if sideb_backend.is_deezer_url(url):
-                items, title = sideb_backend.extract_flat(
-                    url, self.frame.config)
+            if kind == subscriptions.KIND_ARTIST:
+                url, name = subscriptions.resolve_artist(text)
+                items, title = subscriptions.artist_releases(url)
+                title = title or name
+            elif kind == subscriptions.KIND_USER:
+                username = text
+                url = subscriptions.USER_URL_PREFIX + username
+                items, title = subscriptions.user_files(
+                    username, self.frame.config)
             else:
-                items, title = ytdlp_backend.extract_flat(
-                    url, cookies_from_browser=
-                    self.frame.config["cookies_from_browser"],
-                    cookies_file=self.frame.config.get("cookies_file"),
-                    limit=ytdlp_backend.SUBSCRIPTION_FEED_LIMIT,
-                    order=order)
+                items, title = subscriptions.listing(
+                    {"url": url, "kind": kind, "order": order},
+                    self.frame.config)
         except Exception as exc:  # noqa: BLE001 - shown to the user
-            wx.CallAfter(self._add_failed, str(exc))
+            wx.CallAfter(self._add_failed, str(exc), kind)
             return
-        wx.CallAfter(
-            self._add_done, url, title, items, download_existing, order)
+        wx.CallAfter(self._add_done, url, title, items, download_existing,
+                     order, kind, username)
 
-    def _add_failed(self, error):
+    def _add_failed(self, error, kind=subscriptions.KIND_FEED):
         self.frame.announce("Could not add subscription.")
-        wx.MessageBox(f"Could not read that URL:\n{error}", "blindDL",
+        what = {
+            subscriptions.KIND_ARTIST: "Could not follow that artist",
+            subscriptions.KIND_USER: "Could not read that user's files",
+        }.get(kind, "Could not read that URL")
+        wx.MessageBox(f"{what}:\n{error}", "blindDL",
                       wx.OK | wx.ICON_ERROR, self)
 
     def _add_done(self, url, title, items, download_existing,
-                  order=search_order.ORDER_RECENT):
+                  order=search_order.ORDER_RECENT,
+                  kind=subscriptions.KIND_FEED, username=""):
         self.frame.subs.add(
-            url, title, [i["id"] for i in items], order=order)
-        if download_existing:
-            with self.frame.queue.batch_additions():
-                for item in items:
-                    if item.get("kind") == "sideb":
-                        self.frame.queue.add_sideb(item["url"], item["title"])
-                    else:
-                        self.frame.queue.add_ytdlp(item["url"], item["title"])
-            noun = "item" if len(items) == 1 else "items"
-            self.frame.announce(
-                f"Subscribed: {title}. Queued {len(items)} {noun}.")
-        else:
-            self.frame.announce(f"Subscribed: {title}.")
+            url, title, [i["id"] for i in items], order=order, kind=kind,
+            username=username)
         self.refresh()
+        if not download_existing:
+            self.frame.announce(f"Subscribed: {title}.")
+            return
+        # An artist's releases are albums, and one row of the listing is a
+        # whole record, so what is queued is counted in transfers rather
+        # than in rows: "queued 3 items" for a discography would be a lie.
+        folder = "" if kind in (
+            subscriptions.KIND_ARTIST, subscriptions.KIND_USER) else title
+        added, errors = self.frame.subs.queue_all(items, folder=folder)
+        noun = "item" if added == 1 else "items"
+        message = f"Subscribed: {title}. Queued {added} {noun}."
+        if errors:
+            failed = "one" if len(errors) == 1 else str(len(errors))
+            message += f" {failed} could not be read."
+        self.frame.announce(message)
 
     def on_remove(self, event):
         subs = self._selected_subs()

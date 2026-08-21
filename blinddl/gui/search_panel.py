@@ -28,12 +28,13 @@ from .. import (
     search_order,
     sideb_backend,
     soulseek_backend,
+    subscriptions,
     torrent_backend,
     updater,
     ytdlp_backend,
 )
 from .. import search_kind
-from ..search_kind import KIND_ALBUM, KIND_BEST
+from ..search_kind import KIND_BEST
 from ..search_order import ORDER_RECENT, ORDER_RELEVANCE
 from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
@@ -410,24 +411,6 @@ def _dropdown_is_open(control):
         return False
 
 
-def _collection_folder(collection):
-    """The folder a whole album or playlist downloads into.
-
-    Two artists can release an album under the same name, and a folder
-    called Greatest Hits with both of them in it is no use to anyone, so an
-    album is named "Artist - Album" (the artist is dropped when the row does
-    not name one). A playlist is its own name -- its curator is not the
-    artist whose work it collects.
-    """
-    title = str(collection.get("title") or collection.get("album") or "").strip()
-    artist = str(collection.get("artist") or "").strip()
-    if not title:
-        return ""
-    if str(collection.get("kind") or "").endswith("_playlist"):
-        return title
-    return f"{artist} - {title}" if artist else title
-
-
 def queue_result(queue, item, engine, folder=""):
     """Put one search result into the transfer queue; return its add action.
 
@@ -480,7 +463,7 @@ def collection_tracks(collection, config):
 def queue_collection_tracks(queue, collection, tracks):
     """Queue the tracks of one album or playlist into a folder of its own."""
     apple = str(collection.get("kind") or "").startswith("applemusic_")
-    folder = _collection_folder(collection)
+    folder = search_kind.collection_folder(collection)
     added = []
     titles = []
     for track in tracks:
@@ -582,6 +565,38 @@ def _can_browse_artist(item):
     )
 
 
+# The catalogue page one row's artist has, built from the id the row is
+# carrying. A subscription needs somewhere to look them up again later, and
+# these are the two catalogues that publish a discography.
+_ARTIST_PAGES = {
+    "applemusic": "https://music.apple.com/us/artist/{id}",
+    "deezer": "https://www.deezer.com/artist/{id}",
+    "sideb": "https://www.deezer.com/artist/{id}",
+}
+
+
+def artist_page_url(item):
+    """The page to follow one row's artist on, or "" when it has none."""
+    kind = str((item or {}).get("kind") or "")
+    artist_id = str((item or {}).get("artist_id") or "").strip()
+    if not artist_id:
+        return ""
+    for prefix, page in _ARTIST_PAGES.items():
+        if kind.startswith(prefix):
+            return page.format(id=artist_id)
+    return ""
+
+
+def _can_follow_artist(item):
+    """Whether this row names an artist with a catalogue page to follow."""
+    return bool(artist_page_url(item))
+
+
+def _can_follow_playlist(item):
+    """Whether this row is a whole playlist with a link to follow it by."""
+    return bool(item and _is_playlist_item(item) and item.get("url"))
+
+
 def _kind_capable_sources(engine, sources, kind):
     """Split *sources* into the ones that can search by *kind* and the rest.
 
@@ -624,7 +639,7 @@ def _kind_phrase(kind, able, unable):
         return f"No site here can search by {label}; showing best match."
     site_word = "site" if len(unable) == 1 else "sites"
     names = ", ".join(able[:3])
-    if kind == KIND_ALBUM:
+    if search_kind.is_collection(kind):
         return (
             f"Only {names} can search by {label}, so the other "
             f"{len(unable)} {site_word} were not asked."
@@ -1030,9 +1045,9 @@ class SearchPanel(wx.Panel):
         self.kind_choice.SetName("Search type")
         self.kind_choice.SetHelpText(
             "Best match searches everything. Track title and Artist match "
-            "only that field. Album lists whole albums, and Enter on an "
-            "album row downloads every track it contains. Choosing a type "
-            "here takes effect on the next search."
+            "only that field. Album and Playlist list whole releases, and "
+            "Enter on one of those rows downloads every track it contains. "
+            "Choosing a type here takes effect on the next search."
         )
         self.kind_choice.SetSelection(search_kind.KINDS.index(self.current_kind))
         self.kind_choice.Bind(wx.EVT_CHOICE, self.on_kind_changed)
@@ -1437,10 +1452,11 @@ class SearchPanel(wx.Panel):
         engine = self._selected_engine()
         kind = self._selected_kind()
         artist_scope = self._selected_artist_scope()
-        # An album search asks for a different thing, not a differently
-        # matched one, so only the sites that can return albums go out. The
-        # rest would answer with tracks and bury the albums under them.
-        albums_only = search_kind.is_album(kind)
+        # An album or playlist search asks for a different thing, not a
+        # differently matched one, so only the sites that can return whole
+        # releases go out. The rest would answer with tracks and bury the
+        # releases under them.
+        collections_only = search_kind.is_collection(kind)
         # Artist + Albums/Playlists scope is answered by Deezer's catalogue,
         # so the musicdl sites are skipped the same way an album search is.
         catalogue_scope = (
@@ -1454,7 +1470,7 @@ class SearchPanel(wx.Panel):
             sources = musicdl_backend.enabled_sources(
                 self.frame.config["disabled_music_sources"]
             )
-            if not sources and not albums_only and not catalogue_scope:
+            if not sources and not collections_only and not catalogue_scope:
                 self.frame.announce("No music sites selected. Use Tools, Search sites.")
                 return
         elif engine == ENGINE_BOOKS:
@@ -1604,8 +1620,9 @@ class SearchPanel(wx.Panel):
             self.frame.announce(
                 f"Searching {ENGINE_LABELS[engine]}. Results arrive as they come."
             )
-        elif engine == ENGINE_MUSIC and (albums_only or catalogue_scope):
-            what = "albums" if albums_only else "albums and playlists"
+        elif engine == ENGINE_MUSIC and (collections_only or catalogue_scope):
+            what = (search_kind.label(kind).lower() + "s" if collections_only
+                    else "albums and playlists")
             self.frame.announce(
                 f"Searching {deezer_backend._SEARCH_SOURCE} for {what} "
                 f"({self.frame.config['search_timeout_s']:g} seconds)..."
@@ -1706,7 +1723,7 @@ class SearchPanel(wx.Panel):
                 )
                 asked = [soulseek_backend.SOURCE]
             elif engine == ENGINE_MUSIC and (
-                    search_kind.is_album(kind) or catalogue_scope):
+                    search_kind.is_collection(kind) or catalogue_scope):
                 # Deezer is the only one of the music sources with an album
                 # or playlist catalogue to search. The musicdl sites and
                 # Side B match song titles, so asking them here would bury
@@ -2857,8 +2874,17 @@ class SearchPanel(wx.Panel):
             if self.browse_history:
                 browse_back = menu.Append(
                     wx.ID_ANY, "&Go back to previous results\tAlt+Left")
+        follow_artist = follow_playlist = None
+        if _can_follow_artist(focused) or _can_follow_playlist(focused):
+            menu.AppendSeparator()
+            if _can_follow_artist(focused):
+                follow_artist = menu.Append(
+                    wx.ID_ANY, "&Follow this artist")
+            if _can_follow_playlist(focused):
+                follow_playlist = menu.Append(
+                    wx.ID_ANY, "Fo&llow this playlist")
         download_folder = browse_user = send_message = None
-        add_friend = free_slot = view_profile = None
+        add_friend = free_slot = view_profile = follow_user = None
         if soulseek_item is not None:
             menu.AppendSeparator()
             download_folder = menu.Append(
@@ -2868,6 +2894,7 @@ class SearchPanel(wx.Panel):
             add_friend = menu.Append(wx.ID_ANY, "Add user to &friends")
             free_slot = menu.Append(wx.ID_ANY, "Give user a free &slot")
             view_profile = menu.Append(wx.ID_ANY, "View user &profile")
+            follow_user = menu.Append(wx.ID_ANY, "&Follow this user")
         menu.AppendSeparator()
         copy_url = menu.Append(wx.ID_ANY, "Copy &URL\tCtrl+C")
         open_browser = menu.Append(wx.ID_ANY, "&Open in browser")
@@ -2916,6 +2943,20 @@ class SearchPanel(wx.Panel):
             menu.Bind(
                 wx.EVT_MENU, lambda selected: self.browse_back(), browse_back
             )
+        if follow_artist is not None:
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.follow(
+                    artist_page_url(focused), subscriptions.KIND_ARTIST),
+                follow_artist,
+            )
+        if follow_playlist is not None:
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.follow(
+                    focused["url"], subscriptions.KIND_FEED),
+                follow_playlist,
+            )
         if soulseek_item is not None:
             username = soulseek_item.get("username", "")
             menu.Bind(
@@ -2947,6 +2988,11 @@ class SearchPanel(wx.Panel):
                 wx.EVT_MENU,
                 lambda selected: self.frame.view_soulseek_profile(username),
                 view_profile,
+            )
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda selected: self.frame.follow_soulseek_user(username),
+                follow_user,
             )
         menu.Bind(wx.EVT_MENU, self.on_copy_url, copy_url)
         menu.Bind(wx.EVT_MENU, self.on_open_browser, open_browser)

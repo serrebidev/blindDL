@@ -21,10 +21,10 @@ class SearchKindTests(unittest.TestCase):
         )
         self.assertEqual(search_kind.label("nonsense"), "Best match")
 
-    def test_the_four_types_read_the_way_the_choice_lists_them(self):
+    def test_the_five_types_read_the_way_the_choice_lists_them(self):
         self.assertEqual(
             search_kind.KIND_LABEL_LIST,
-            ["Best match", "Track title", "Album", "Artist"],
+            ["Best match", "Track title", "Album", "Playlist", "Artist"],
         )
         self.assertTrue(search_kind.is_album(search_kind.KIND_ALBUM))
         self.assertFalse(search_kind.is_album(search_kind.KIND_ARTIST))

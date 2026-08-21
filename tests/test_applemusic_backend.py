@@ -127,6 +127,30 @@ class AppleMusicSearchTests(unittest.TestCase):
             items[0]["url"], "https://music.apple.com/us/playlist/pl.1"
         )
 
+    def test_a_playlist_search_goes_to_the_catalog_api_too(self):
+        # iTunes search has no playlist entity at all, so a Playlist search
+        # asks the one catalogue that can answer it rather than answering
+        # with songs and calling them playlists.
+        api = mock.Mock()
+        api.getsearchresults.return_value = {
+            "results": {"playlists": {"data": [{
+                "id": "pl.9",
+                "attributes": {"name": "Rainy Sunday", "trackCount": 40},
+            }]}},
+        }
+        with mock.patch.object(
+            applemusic_backend, "_anonymous_api", return_value=api
+        ):
+            items = applemusic_backend.search(
+                "rainy sunday", kind=search_kind.KIND_PLAYLIST)
+
+        self.assertTrue(
+            applemusic_backend.supports_kind(search_kind.KIND_PLAYLIST))
+        self.assertEqual(api.getsearchresults.call_args.kwargs["types"],
+                         "playlists")
+        self.assertEqual(items[0]["kind"], "applemusic_playlist")
+        self.assertEqual(items[0]["title"], "Rainy Sunday")
+
     def test_album_search_returns_album_rows(self):
         payload = {"results": [{
             "collectionId": 55,

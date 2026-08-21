@@ -24,6 +24,7 @@ from ..config import Config
 from ..downloader import DownloadQueue, STATUS_DONE, STATUS_ERROR
 from ..runtime import open_folder
 from ..saved_queue import SavedQueue
+from .. import subscriptions
 from ..subscriptions import SubscriptionStore
 from .chat_panel import ChatPanel
 from .downloads_panel import DownloadsPanel
@@ -56,11 +57,14 @@ UPDATE_IDLE_TICK_MS = 60 * 1000
 # lists; long enough to catch the burst, short enough not to be noticed.
 AUTO_CLEAR_DELAY_MS = 250
 
+# The running transfers come before the list of things not started yet: a
+# download queue is where results wait until they are wanted, so it is
+# visited far less often than the two tabs that say what is happening now.
 TAB_URL = 0
 TAB_SEARCH = 1
-TAB_QUEUE = 2
-TAB_DOWNLOADS = 3
-TAB_UPLOADS = 4
+TAB_DOWNLOADS = 2
+TAB_UPLOADS = 3
+TAB_QUEUE = 4
 TAB_LIBRARY = 5
 TAB_SUBS = 6
 
@@ -226,9 +230,9 @@ class MainFrame(wx.Frame):
         self.subs_panel = SubsPanel(self.notebook, self)
         self.notebook.AddPage(self.url_panel, "URL")
         self.notebook.AddPage(self.search_panel, "Search")
-        self.notebook.AddPage(self.queue_panel, "Download queue")
         self.notebook.AddPage(self.downloads_panel, "Downloads")
         self.notebook.AddPage(self.uploads_panel, "Uploads")
+        self.notebook.AddPage(self.queue_panel, "Download queue")
         self.notebook.AddPage(self.library_panel, "Library")
         self.notebook.AddPage(self.subs_panel, "Subscriptions")
         # Three fields, so a screen reader can be asked for one of them:
@@ -452,6 +456,23 @@ class MainFrame(wx.Frame):
         dialog.ShowModal()
         if dialog:
             dialog.Destroy()
+
+    def follow(self, text, kind, download_existing=False):
+        """Start following something named elsewhere in the app.
+
+        The Search page and the Soulseek browser both have the thing on
+        screen already, so following it should not mean typing its name
+        into a dialog again. Nothing changes tabs: the subscription is made
+        where the user is, and the Subscriptions tab is there when wanted.
+        """
+        self.subs_panel.follow(text, kind, download_existing)
+
+    def follow_soulseek_user(self, username):
+        username = str(username or "").strip()
+        if not username:
+            self.announce("Enter a Soulseek username.")
+            return
+        self.follow(username, subscriptions.KIND_USER)
 
     def message_soulseek_user(self, username):
         username = str(username or "").strip()
@@ -812,7 +833,7 @@ class MainFrame(wx.Frame):
             "Accessible media downloader.\n"
             "MIT licensed. Copyright (c) 2024-2026 "
             "serrebidev and contributors.\n\n"
-            "Tabs: Ctrl+1-6, or Ctrl+7-8 for Soulseek Chat and Messages "
+            "Tabs: Ctrl+1-7, or Ctrl+8-9 for Soulseek Chat and Messages "
             "when enabled. URL: Ctrl+L. Search: Ctrl+F.\n"
             "Play from URL or Search without downloading, or use Library "
             "to play completed downloads.\n"
