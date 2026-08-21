@@ -11,6 +11,7 @@ import importlib
 import os
 import sys
 import threading
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 import wx
@@ -147,6 +148,11 @@ class MediaPlayerPanel(wx.Panel):
         # answering that there is nothing to play. Returns True when it
         # took the request on.
         self._play_request = None
+        # Set by an owner that is playing through a list rather than one
+        # track, and called when a track reaches its own end -- never when
+        # playback was stopped or replaced. That distinction is the whole
+        # point: a list should carry on by itself, and stop when stopped.
+        self.finished_request: Callable[[], None] | None = None
         self._title = ""
         self._loaded = False
         self._updating_position = False
@@ -365,6 +371,8 @@ class MediaPlayerPanel(wx.Panel):
         self.position.SetValue(1000)
         self._report_status("")
         self.frame.announce(f"Finished playing: {self._title}")
+        if self.finished_request is not None:
+            self.finished_request()
 
     def _on_vlc_error(self, event):
         wx.CallAfter(self._playback_error, self._load_generation)

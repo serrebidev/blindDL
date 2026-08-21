@@ -26,6 +26,15 @@ class ItemPickerDialog(wx.Dialog):
     blindDL that could not be played from -- so an album's tracks had to be
     queued blind, or the dialog closed and the album browsed again from the
     results list to hear any of it.
+
+    Playing works two ways, because choosing works two ways. Preview and Play
+    full song take the track being read, ticked or not, for the listen that
+    settles one track. The two ticked buttons play straight through
+    everything that is ticked, in the order it was ticked, moving on by
+    themselves as each track ends -- which is what a tick was otherwise only
+    good for downloading with. Tick four songs off a twenty-track reissue in
+    the order you want to hear them, and the dialog plays you your four, in
+    your order, before you commit to the download.
     """
 
     def __init__(self, parent, items, title):
@@ -36,6 +45,17 @@ class ItemPickerDialog(wx.Dialog):
         )
         self.items = list(items)
         self._changing_selection = False
+        # Rows in the order they were ticked, which is the order the ticked
+        # tracks play in. The list itself only knows which rows are ticked,
+        # never when, and "in the order I chose them" is not a question a row
+        # order can answer.
+        self._tick_order = []
+        # The ticked tracks a run is working through: a snapshot taken when
+        # the run started, so ticking something else halfway through changes
+        # what will be downloaded rather than what is currently playing.
+        self._run = []
+        self._run_at = 0
+        self._run_full = True
         # The main window, when this dialog was opened from a panel that has
         # one. Playback needs its config and its "stop the other players"
         # rule; without it the dialog is still a perfectly good picker.
@@ -51,8 +71,9 @@ class ItemPickerDialog(wx.Dialog):
         self.item_list.SetHelpText(
             "Space ticks the track you are on, and Enter downloads every "
             "ticked track. Alt+P previews the focused track and Alt+F plays "
-            "its full song without ticking it. Nothing is ticked to start "
-            "with."
+            "its full song, neither of which ticks anything. Alt+I and Alt+L "
+            "play the ticked tracks straight through, in the order you "
+            "ticked them. Nothing is ticked to start with."
         )
         self.item_list.EnableCheckBoxes()
         for column, heading in enumerate(
@@ -70,8 +91,8 @@ class ItemPickerDialog(wx.Dialog):
         self.item_list.SetColumnWidth(0, 380)
         self.item_list.SetColumnWidth(1, 200)
         self.item_list.SetColumnWidth(2, 90)
-        self.item_list.Bind(wx.EVT_LIST_ITEM_CHECKED, self._on_check_changed)
-        self.item_list.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self._on_check_changed)
+        self.item_list.Bind(wx.EVT_LIST_ITEM_CHECKED, self._on_checked)
+        self.item_list.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self._on_unchecked)
         self.item_list.Bind(wx.EVT_CONTEXT_MENU, self._on_context_menu)
 
         self.count_text = wx.StaticText(self)
@@ -86,6 +107,18 @@ class ItemPickerDialog(wx.Dialog):
             "Plays the whole of the track you are on, rather than a clip."
         )
         self.play_full_btn.Bind(wx.EVT_BUTTON, self.on_play_full)
+        self.preview_ticked_btn = wx.Button(self, label="Preview t&icked")
+        self.preview_ticked_btn.SetHelpText(
+            "Plays a short clip of each ticked track in turn, in the order "
+            "you ticked them, moving on by itself as each clip ends."
+        )
+        self.preview_ticked_btn.Bind(wx.EVT_BUTTON, self.on_preview_ticked)
+        self.play_ticked_btn = wx.Button(self, label="P&lay ticked")
+        self.play_ticked_btn.SetHelpText(
+            "Plays the whole of each ticked track in turn, in the order you "
+            "ticked them, moving on by itself as each track ends."
+        )
+        self.play_ticked_btn.Bind(wx.EVT_BUTTON, self.on_play_ticked)
 
         self.select_all_btn = wx.Button(self, label="Select &all")
         self.select_all_btn.Bind(wx.EVT_BUTTON, self.on_select_all)
@@ -99,7 +132,9 @@ class ItemPickerDialog(wx.Dialog):
 
         play_buttons = wx.BoxSizer(wx.HORIZONTAL)
         play_buttons.Add(self.preview_btn, 0, wx.RIGHT, 8)
-        play_buttons.Add(self.play_full_btn, 0)
+        play_buttons.Add(self.play_full_btn, 0, wx.RIGHT, 8)
+        play_buttons.Add(self.preview_ticked_btn, 0, wx.RIGHT, 8)
+        play_buttons.Add(self.play_ticked_btn, 0)
 
         selection_buttons = wx.BoxSizer(wx.HORIZONTAL)
         selection_buttons.Add(self.select_all_btn, 0, wx.RIGHT, 8)
@@ -119,15 +154,17 @@ class ItemPickerDialog(wx.Dialog):
         if self.frame is not None:
             self.player = MediaPlayerPanel(self, self.frame, video_height=120)
             self.player.play_request = self.play_focused
+            self.player.finished_request = self._track_finished
             self.frame.register_player(self.player)
             sizer.Add(
                 self.player, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         else:
-            self.preview_btn.Disable()
-            self.play_full_btn.Disable()
+            for button in (self.preview_btn, self.play_full_btn,
+                           self.preview_ticked_btn, self.play_ticked_btn):
+                button.Disable()
         sizer.Add(action_buttons, 0, wx.EXPAND | wx.ALL, 8)
         self.SetSizer(sizer)
-        self.SetSize((720, 620) if self.player is not None else (720, 480))
+        self.SetSize((760, 640) if self.player is not None else (760, 480))
         self.SetMinSize((520, 360))
 
         self._update_selection_state()
@@ -139,9 +176,30 @@ class ItemPickerDialog(wx.Dialog):
     # -- selection -----------------------------------------------------------
 
     def selected_items(self):
-        """Return selected item dictionaries in their original order."""
+        """The ticked items, in the album's own order.
+
+        What gets downloaded is a release, and a release has a running
+        order; the order the ticks happened to be made in is not it. Playing
+        is the other way round -- see :meth:`ticked_items`.
+        """
         return [item for row, item in enumerate(self.items)
                 if self.item_list.IsItemChecked(row)]
+
+    def ticked_items(self):
+        """The ticked items, in the order they were ticked.
+
+        Reconciled against the list rather than trusted outright: a tick
+        event can arrive after the tick itself, so anything ticked that the
+        running order has not heard about yet goes on the end, and anything
+        no longer ticked drops out.
+        """
+        ticked = [row for row in range(len(self.items))
+                  if self.item_list.IsItemChecked(row)]
+        still_ticked = set(ticked)
+        ordered = [row for row in self._tick_order if row in still_ticked]
+        known = set(ordered)
+        ordered.extend(row for row in ticked if row not in known)
+        return [self.items[row] for row in ordered]
 
     def on_select_all(self, event):
         self._set_all_selected(True)
@@ -174,15 +232,36 @@ class ItemPickerDialog(wx.Dialog):
         finally:
             self.item_list.Thaw()
             self._changing_selection = False
+        if selected:
+            # Select all gives the rows it adds the album's own order, and
+            # leaves anything already ticked by hand where it was put.
+            known = set(self._tick_order)
+            self._tick_order.extend(
+                row for row in range(len(self.items)) if row not in known)
+        else:
+            self._tick_order = []
         self._update_selection_state()
         self._announce_count()
         self.item_list.SetFocus()
 
-    def _on_check_changed(self, event):
+    def _on_checked(self, event):
+        row = event.GetIndex()
+        if row not in self._tick_order:
+            self._tick_order.append(row)
+        self._check_changed()
+        event.Skip()
+
+    def _on_unchecked(self, event):
+        row = event.GetIndex()
+        if row in self._tick_order:
+            self._tick_order.remove(row)
+        self._check_changed()
+        event.Skip()
+
+    def _check_changed(self):
         if not self._changing_selection:
             self._update_selection_state()
             self._announce_count()
-        event.Skip()
 
     def _update_selection_state(self):
         selected = sum(self.item_list.IsItemChecked(row)
@@ -192,6 +271,9 @@ class ItemPickerDialog(wx.Dialog):
         self.download_btn.Enable(selected > 0)
         self.select_all_btn.Enable(selected < total)
         self.clear_btn.Enable(selected > 0)
+        if self.player is not None:
+            self.preview_ticked_btn.Enable(selected > 0)
+            self.play_ticked_btn.Enable(selected > 0)
 
     def _announce(self, message):
         if self.frame is not None:
@@ -203,11 +285,12 @@ class ItemPickerDialog(wx.Dialog):
     # -- playing one of the rows ---------------------------------------------
 
     def _focused_item(self):
-        """The row the reader is on, which is what plays.
+        """The row the reader is on, which is what Preview plays.
 
         Deliberately not the ticked rows: a tick says "download this", and
         having to tick a track before hearing it would be the opposite of
-        what listening first is for.
+        what listening first is for. The ticked rows have two buttons of
+        their own.
         """
         row = self.item_list.GetFocusedItem()
         if 0 <= row < len(self.items):
@@ -222,19 +305,75 @@ class ItemPickerDialog(wx.Dialog):
         return True
 
     def on_preview(self, event):
-        self._start_playback(full=False)
+        self._play_one(full=False)
 
     def on_play_full(self, event):
-        self._start_playback(full=True)
+        self._play_one(full=True)
 
-    def _start_playback(self, full):
-        if self.player is None:
-            return
+    def on_preview_ticked(self, event):
+        self._play_ticked(full=False)
+
+    def on_play_ticked(self, event):
+        self._play_ticked(full=True)
+
+    def _play_one(self, full):
+        """Play the row being read, and end any run of ticked tracks."""
+        self._run = []
         item = self._focused_item()
         if item is None:
             self._announce("Move to a track first.")
             return
+        self._start_playback(full, item)
+
+    def _play_ticked(self, full):
+        """Play through the ticked tracks, in the order they were ticked."""
+        items = self.ticked_items()
+        if not items:
+            self._announce(
+                "Nothing is ticked. Press Space to tick the track you are "
+                "on, or choose Select all."
+            )
+            self.item_list.SetFocus()
+            return
+        self._run = items
+        self._run_at = 0
+        self._run_full = full
+        noun = "track" if len(items) == 1 else "tracks"
+        self._announce(
+            f"Playing {len(items)} ticked {noun}, in the order you ticked "
+            f"them."
+        )
+        self._play_run_item()
+
+    def _play_run_item(self):
+        self._start_playback(
+            self._run_full,
+            self._run[self._run_at],
+            place=(self._run_at + 1, len(self._run)),
+        )
+
+    def _track_finished(self):
+        """A track played to its end: move on to the next ticked one.
+
+        Only reached when playback ended by itself. Stopping the player, or
+        starting something else, ends the run instead of advancing it --
+        Stop has to mean stop.
+        """
+        if self._closing or not self._run:
+            return
+        if self._run_at + 1 >= len(self._run):
+            noun = "track" if len(self._run) == 1 else "tracks"
+            self._announce(f"Finished the {len(self._run)} ticked {noun}.")
+            self._run = []
+            return
+        self._run_at += 1
+        self._play_run_item()
+
+    def _start_playback(self, full, item, place=None):
+        if self.player is None:
+            return
         token = object()
+        where = f"track {place[0]} of {place[1]}, " if place else ""
         if full:
             self._full_playback_token = token
             # A preview still resolving must not land on top of this and
@@ -242,13 +381,15 @@ class ItemPickerDialog(wx.Dialog):
             self._preview_token = None
             self.play_full_btn.Disable()
             self.preview_btn.Enable()
-            self._announce(f"Loading: {item.get('title') or 'track'}")
+            self._announce(f"Loading {where}{item.get('title') or 'track'}")
         else:
             self._preview_token = token
             self._full_playback_token = None
             self.preview_btn.Disable()
             self.play_full_btn.Enable()
-            self._announce(f"Preparing preview: {item.get('title') or 'track'}")
+            self._announce(
+                f"Preparing preview of {where}"
+                f"{item.get('title') or 'track'}")
         threading.Thread(
             target=self._resolve_playback,
             args=(token, item, full),
@@ -281,6 +422,15 @@ class ItemPickerDialog(wx.Dialog):
             return
         self.preview_btn.Enable()
         self.play_full_btn.Enable()
+        if self._run:
+            # One track that will not play must not end a run of twelve, and
+            # a dialog box in the middle of one would stop the run just as
+            # surely as the failure did. Say which track was lost, and carry
+            # on to the next.
+            lost = self._run[self._run_at].get("title") or "that track"
+            self._announce(f"Skipping {lost}: it could not be played.")
+            self._track_finished()
+            return
         noun = "that song" if full else "that preview"
         self._announce(f"Could not play {noun}.")
         wx.MessageBox(
@@ -302,8 +452,10 @@ class ItemPickerDialog(wx.Dialog):
         self._closing = True
         self._preview_token = None
         self._full_playback_token = None
+        self._run = []
         if self.player is not None:
             player, self.player = self.player, None
+            player.finished_request = None
             player.shutdown()
             if self.frame is not None:
                 self.frame.unregister_player(player)
@@ -314,12 +466,17 @@ class ItemPickerDialog(wx.Dialog):
                        for row in range(len(self.items)))
         menu = wx.Menu()
         preview_item = play_full_item = None
+        preview_ticked_item = play_ticked_item = None
         if self.player is not None:
             preview_item = menu.Append(wx.ID_ANY, "&Preview")
             play_full_item = menu.Append(wx.ID_ANY, "Play &full song")
             menu.Enable(preview_item.GetId(), self._focused_item() is not None)
             menu.Enable(
                 play_full_item.GetId(), self._focused_item() is not None)
+            preview_ticked_item = menu.Append(wx.ID_ANY, "Preview t&icked")
+            play_ticked_item = menu.Append(wx.ID_ANY, "P&lay ticked")
+            menu.Enable(preview_ticked_item.GetId(), selected > 0)
+            menu.Enable(play_ticked_item.GetId(), selected > 0)
             menu.AppendSeparator()
         download_item = menu.Append(wx.ID_OK, "Download selected")
         menu.Enable(download_item.GetId(), selected > 0)
@@ -335,5 +492,7 @@ class ItemPickerDialog(wx.Dialog):
         if preview_item is not None:
             menu.Bind(wx.EVT_MENU, self.on_preview, preview_item)
             menu.Bind(wx.EVT_MENU, self.on_play_full, play_full_item)
+            menu.Bind(wx.EVT_MENU, self.on_preview_ticked, preview_ticked_item)
+            menu.Bind(wx.EVT_MENU, self.on_play_ticked, play_ticked_item)
         self.item_list.PopupMenu(menu)
         menu.Destroy()

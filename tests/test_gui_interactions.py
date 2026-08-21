@@ -394,6 +394,143 @@ class GuiInteractionTests(unittest.TestCase):
         # The dialog's player leaves the one-at-a-time rule with the dialog.
         self.assertEqual(self.frame.extra_players, [])
 
+    def test_the_picker_plays_the_ticked_tracks_in_the_order_ticked(self):
+        # The ticks were only ever good for downloading: a list you can tick
+        # four songs out of is a list you want to hear those four songs from,
+        # and in the order you picked them, not the order the album has them
+        # in. Nothing else in blindDL knows what order a set of ticks was
+        # made in, so the dialog has to remember it.
+        items = [
+            {"title": "One", "url": "https://example.test/1"},
+            {"title": "Two", "url": "https://example.test/2"},
+            {"title": "Three", "url": "https://example.test/3"},
+        ]
+        panel = SearchPanel(self.host, self.frame)
+        dialog = ItemPickerDialog(panel, items, "Album")
+        try:
+            for row in (2, 0):
+                dialog.item_list.CheckItem(row, True)
+                self.app.Yield()
+            self.assertEqual(
+                [item["title"] for item in dialog.ticked_items()],
+                ["Three", "One"],
+            )
+            # Downloading is the other way round: a release keeps its own
+            # running order however the ticks were made.
+            self.assertEqual(
+                [item["title"] for item in dialog.selected_items()],
+                ["One", "Three"],
+            )
+
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.on_play_ticked(None)
+            self.assertEqual(
+                thread.call_args.kwargs["args"][1]["title"], "Three")
+            self.assertTrue(thread.call_args.kwargs["args"][2])
+
+            # The player reports the end of a track, and the run moves on by
+            # itself -- which is the whole difference between a list and a
+            # track that has to be started again by hand.
+            self.assertEqual(
+                dialog.player.finished_request, dialog._track_finished)
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.player.finished_request()
+            self.assertEqual(
+                thread.call_args.kwargs["args"][1]["title"], "One")
+
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.player.finished_request()
+            thread.assert_not_called()
+            self.assertIn("Finished the 2 ticked tracks.", self.frame.messages)
+        finally:
+            dialog.Destroy()
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_a_ticked_track_that_will_not_play_does_not_end_the_run(self):
+        # A run of twelve must not be ended by the one track Deezer will not
+        # serve, and a modal error box in the middle of one would end it just
+        # as surely as the failure did.
+        items = [
+            {"title": "One", "url": "https://example.test/1"},
+            {"title": "Two", "url": "https://example.test/2"},
+        ]
+        panel = SearchPanel(self.host, self.frame)
+        dialog = ItemPickerDialog(panel, items, "Album")
+        try:
+            dialog.on_select_all(None)
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.on_play_ticked(None)
+            token = thread.call_args.kwargs["args"][0]
+
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread, mock.patch.object(wx, "MessageBox") as box:
+                dialog._playback_failed(token, True, "no stream")
+            box.assert_not_called()
+            self.assertEqual(
+                thread.call_args.kwargs["args"][1]["title"], "Two")
+            self.assertIn(
+                "Skipping One: it could not be played.", self.frame.messages)
+        finally:
+            dialog.Destroy()
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_playing_one_row_ends_a_run_of_ticked_tracks(self):
+        # Preview means "this one, now". Leaving the run in place would have
+        # the album carry on over the top of it as soon as the clip ended.
+        items = [
+            {"title": "One", "url": "https://example.test/1"},
+            {"title": "Two", "url": "https://example.test/2"},
+        ]
+        panel = SearchPanel(self.host, self.frame)
+        dialog = ItemPickerDialog(panel, items, "Album")
+        try:
+            dialog.on_select_all(None)
+            with mock.patch("blinddl.gui.item_picker_dialog.threading.Thread"):
+                dialog.on_play_ticked(None)
+            dialog.item_list.Focus(1)
+            self.app.Yield()
+            with mock.patch("blinddl.gui.item_picker_dialog.threading.Thread"):
+                dialog.on_preview(None)
+            with mock.patch(
+                "blinddl.gui.item_picker_dialog.threading.Thread"
+            ) as thread:
+                dialog.player.finished_request()
+            thread.assert_not_called()
+        finally:
+            dialog.Destroy()
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_the_ticked_buttons_wait_until_something_is_ticked(self):
+        items = [{"title": "One"}, {"title": "Two"}]
+        panel = SearchPanel(self.host, self.frame)
+        dialog = ItemPickerDialog(panel, items, "Album")
+        try:
+            self.assertFalse(dialog.play_ticked_btn.IsEnabled())
+            self.assertFalse(dialog.preview_ticked_btn.IsEnabled())
+            dialog.item_list.CheckItem(1, True)
+            self.app.Yield()
+            self.assertTrue(dialog.play_ticked_btn.IsEnabled())
+            self.assertTrue(dialog.preview_ticked_btn.IsEnabled())
+            dialog.item_list.CheckItem(1, False)
+            self.app.Yield()
+            self.assertFalse(dialog.play_ticked_btn.IsEnabled())
+        finally:
+            dialog.Destroy()
+            panel.shutdown()
+            panel.Destroy()
+
     def test_the_picker_says_why_enter_did_nothing_with_nothing_ticked(self):
         panel = SearchPanel(self.host, self.frame)
         dialog = ItemPickerDialog(panel, [{"title": "One"}], "Album")
@@ -1405,6 +1542,40 @@ class GuiInteractionTests(unittest.TestCase):
 
         panel.frame.announce.assert_called_once_with(
             "Choose media to play first.")
+
+    def test_a_track_that_ends_by_itself_tells_its_owner(self):
+        # What lets a list of tracks carry on without being started again by
+        # hand. Only a track that reached its own end reports: stopping the
+        # player has to mean the list stops too.
+        panel = SimpleNamespace(
+            _shutting_down=False,
+            _loaded=True,
+            _title="One",
+            timer=mock.Mock(),
+            play_btn=mock.Mock(),
+            position=mock.Mock(),
+            frame=mock.Mock(),
+            finished_request=mock.Mock(),
+            _load_generation=1,
+            IsBeingDeleted=lambda: False,
+            _report_status=lambda state: None,
+        )
+
+        media_player.MediaPlayerPanel._playback_finished(panel)
+
+        panel.finished_request.assert_called_once_with()
+
+    def test_a_replaced_track_reports_nothing_to_carry_on_with(self):
+        panel = SimpleNamespace(
+            _shutting_down=False,
+            _loaded=False,
+            finished_request=mock.Mock(),
+            IsBeingDeleted=lambda: False,
+        )
+
+        media_player.MediaPlayerPanel._playback_finished(panel)
+
+        panel.finished_request.assert_not_called()
 
     def test_a_book_search_leaves_the_play_button_to_say_so(self):
         panel = SearchPanel(self.host, self.frame)
