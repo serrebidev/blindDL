@@ -504,6 +504,27 @@ def _is_playlist_item(item):
     return str(item.get("kind") or "").endswith("_playlist")
 
 
+# Said to whoever asks an album or playlist to play. A release holding one
+# track is not one of these -- see _play_collection_track.
+_NOTHING_SINGLE_TO_PLAY = (
+    "An album or playlist has no single track to play. Press Enter to "
+    "choose which of its tracks to download."
+)
+
+
+def collection_track_count(item):
+    """How many tracks an album or playlist row says it holds, or 0.
+
+    Catalogue rows carry their track count so the Type column can read
+    "Single, 1 track"; the count is missing on rows from a site that does
+    not publish one, and 0 there means "not known", not "empty".
+    """
+    try:
+        return int((item or {}).get("tracks") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def is_collection_item(item):
     """Whether this row is a whole album or playlist, not one track.
 
@@ -960,6 +981,7 @@ class SearchPanel(wx.Panel):
         self.full_playback_token = None
         self.archive_token = None
         self.collection_token = None
+        self.collection_playback_token = None
         self.browse_token = None
         # The lists a browse stepped away from, newest last, so following an
         # artist into a release can be walked back out of.
@@ -2495,9 +2517,13 @@ class SearchPanel(wx.Panel):
                     self,
                 )
             return
-        if len(resolved) == 1 and len(resolved[0][1]) > 1:
+        if len(resolved) == 1:
             # One collection is a list worth reading before it fills the
-            # queue, the same way one Archive item is.
+            # queue, the same way one Archive item is. A release with one
+            # track on it is still a release, and used to be the exception:
+            # Enter went straight to downloading, so the one row a single
+            # holds -- the only place to see its title, tick it, or play it
+            # before deciding -- could not be reached at all.
             collection, tracks = resolved[0]
             dialog = ItemPickerDialog(self, tracks, collection["title"])
             try:
@@ -3024,11 +3050,12 @@ class SearchPanel(wx.Panel):
             )
             return
         if is_collection_item(item):
-            self.frame.announce(
-                "An album or playlist has no single track to play. Press "
-                "Enter to choose which of its tracks to download."
-            )
+            self._play_collection_track(item, full=False)
             return
+        self._start_preview(item)
+
+    def _start_preview(self, item):
+        """Play the 30-second clip of one track row."""
         audio_only = self.result_engine in (
             ENGINE_MUSIC,
             ENGINE_DEEZER,
@@ -3043,6 +3070,7 @@ class SearchPanel(wx.Panel):
         # A full-song resolve started moments ago must not land after this
         # preview and swap it out; drop it and leave its button usable.
         self.full_playback_token = None
+        self.collection_playback_token = None
         self.play_full_btn.Enable(_plays(self.result_engine))
         self.frame.announce(f"Preparing preview: {item['title']}")
         threading.Thread(
@@ -3111,11 +3139,12 @@ class SearchPanel(wx.Panel):
             )
             return
         if is_collection_item(item):
-            self.frame.announce(
-                "An album or playlist has no single track to play. Press "
-                "Enter to choose which of its tracks to download."
-            )
+            self._play_collection_track(item, full=True)
             return
+        self._start_full_playback(item)
+
+    def _start_full_playback(self, item):
+        """Play the whole of one track row."""
         audio_only = self.result_engine in (
             ENGINE_MUSIC,
             ENGINE_DEEZER,
@@ -3129,6 +3158,7 @@ class SearchPanel(wx.Panel):
         self.play_full_btn.Disable()
         # Ditto for a preview that is still resolving.
         self.preview_token = None
+        self.collection_playback_token = None
         self.preview_btn.Enable(_plays(self.result_engine))
         self.frame.announce(f"Loading: {item['title']}")
         threading.Thread(
@@ -3137,6 +3167,73 @@ class SearchPanel(wx.Panel):
             daemon=True,
             name="blinddl-search-play-full",
         ).start()
+
+    # -- playing a release that holds one track ------------------------------
+
+    def _play_collection_track(self, item, full):
+        """Play the only track of a one-track release, or say why not.
+
+        A single is an album row like any other -- it has no URL of its own
+        to play, only a track list to read -- but there is exactly one thing
+        it could play, so Preview and Play full song do play it instead of
+        refusing on the grounds that it is an album. A release the row says
+        holds more than one track still has no single thing to play, and
+        says so without reading anything.
+        """
+        if collection_track_count(item) > 1:
+            self.frame.announce(_NOTHING_SINGLE_TO_PLAY)
+            return
+        token = self.collection_playback_token = object()
+        self.preview_token = None
+        self.full_playback_token = None
+        self.preview_btn.Disable()
+        self.play_full_btn.Disable()
+        self.frame.announce(f"Reading track list: {item['title']}")
+        threading.Thread(
+            target=self._resolve_collection_playback,
+            args=(token, item, full),
+            daemon=True,
+            name="blinddl-collection-playback",
+        ).start()
+
+    def _resolve_collection_playback(self, token, item, full):
+        try:
+            tracks = collection_tracks(item, self.frame.config)
+            error = ""
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            tracks, error = [], str(exc)
+        wx.CallAfter(
+            self._collection_playback_ready, token, item, tracks, full, error)
+
+    def _collection_playback_ready(self, token, item, tracks, full, error):
+        if self.closing or token is not self.collection_playback_token:
+            return
+        self.preview_btn.Enable(_plays(self.result_engine))
+        self.play_full_btn.Enable(_plays(self.result_engine))
+        if len(tracks) == 1:
+            # The track list is the only place the artist is named on some
+            # releases, and the only place it is not on others; the row
+            # fills in whatever its track came without, since a YouTube
+            # fallback match is only as good as the name it searches for.
+            track = dict(tracks[0])
+            for field in ("artist", "album"):
+                if not track.get(field):
+                    track[field] = item.get(field) or ""
+            if full:
+                self._start_full_playback(track)
+            else:
+                self._start_preview(track)
+            return
+        if error:
+            self.frame.announce("Could not read that album's track list.")
+            wx.MessageBox(
+                f"Could not read that album's track list:\n{error}",
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+        self.frame.announce(_NOTHING_SINGLE_TO_PLAY)
 
     def _resolve_full_playback(self, token, item, audio_only):
         try:

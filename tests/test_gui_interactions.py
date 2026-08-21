@@ -636,6 +636,59 @@ class GuiInteractionTests(unittest.TestCase):
             panel.shutdown()
             panel.Destroy()
 
+    def test_a_single_kept_for_later_can_still_be_played(self):
+        # A shelved single is an album row with one track on it, and the
+        # Download queue tab answered every album row with "no single track
+        # to play" -- so a row holding exactly one song could not be heard.
+        frame = self.frame
+        single = {"id": "deezer:album:8", "kind": "deezer_album",
+                  "title": "Da Funk", "artist": "Daft Punk", "tracks": 1,
+                  "source": "Deezer",
+                  "url": "https://www.deezer.com/album/8"}
+        frame.saved.add(single, ENGINE_DEEZER)
+        panel = QueuePanel(self.host, frame)
+        try:
+            panel.list.Select(0)
+            track = {"title": "Da Funk",
+                     "url": "https://www.deezer.com/track/1"}
+            with mock.patch(
+                "blinddl.gui.queue_panel.threading.Thread"
+            ) as thread:
+                panel.on_preview(None)
+                self.assertIn("Reading track list", frame.messages[-1])
+                panel._collection_play_ready(
+                    panel._play_token, single, [track], False, "")
+            played = thread.call_args.kwargs["args"][1]
+            self.assertEqual(played["url"], track["url"])
+            self.assertEqual(played["artist"], "Daft Punk")
+
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_a_full_album_kept_for_later_still_has_nothing_to_play(self):
+        # And says so without reading a track list first.
+        frame = self.frame
+        frame.saved.add(
+            {"id": "deezer:album:7", "kind": "deezer_album",
+             "title": "Discovery", "artist": "Daft Punk", "tracks": 14,
+             "source": "Deezer",
+             "url": "https://www.deezer.com/album/7"},
+            ENGINE_DEEZER,
+        )
+        panel = QueuePanel(self.host, frame)
+        try:
+            panel.list.Select(0)
+            with mock.patch(
+                "blinddl.gui.queue_panel.threading.Thread"
+            ) as thread:
+                panel.on_preview(None)
+            thread.assert_not_called()
+            self.assertIn("no single track to play", frame.messages[-1])
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
     def test_removing_from_the_download_queue(self):
         frame = self.frame
         for number in range(3):
@@ -3918,20 +3971,53 @@ class GuiInteractionTests(unittest.TestCase):
         }
         tracks = [{"title": "One", "url": "https://www.deezer.com/track/1"}]
 
-        panel._collection_tracks_ready(
-            panel.collection_token, [(album, tracks)], []
-        )
+        with (
+            mock.patch.object(ItemPickerDialog, "ShowModal",
+                              return_value=wx.ID_OK),
+            mock.patch.object(ItemPickerDialog, "selected_items",
+                              return_value=tracks),
+        ):
+            panel._collection_tracks_ready(
+                panel.collection_token, [(album, tracks)], []
+            )
 
-        self.assertEqual(self.frame.queue.folders, ["Daft Punk - Discovery"])
+            self.assertEqual(self.frame.queue.folders,
+                             ["Daft Punk - Discovery"])
 
-        # An album row with no artist named still gets its own folder.
-        self.frame.queue.folders.clear()
-        panel._collection_tracks_ready(
-            panel.collection_token,
-            [({ "title": "Untitled", "kind": "deezer_album"}, tracks)],
-            [],
-        )
+            # An album row with no artist named still gets its own folder.
+            self.frame.queue.folders.clear()
+            panel._collection_tracks_ready(
+                panel.collection_token,
+                [({"title": "Untitled", "kind": "deezer_album"}, tracks)],
+                [],
+            )
         self.assertEqual(self.frame.queue.folders, ["Untitled"])
+
+    def test_a_one_track_release_opens_before_it_downloads(self):
+        # Enter on a single used to start the download from a row that had
+        # never shown what it held: no track title, no tick box, nothing to
+        # play. It opens like every other release now.
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        album = {"title": "One More Time", "kind": "deezer_album",
+                 "url": "https://www.deezer.com/album/7"}
+        tracks = [{"title": "One More Time",
+                   "url": "https://www.deezer.com/track/1"}]
+
+        with (
+            mock.patch.object(ItemPickerDialog, "ShowModal",
+                              return_value=wx.ID_CANCEL) as shown,
+            mock.patch.object(ItemPickerDialog, "selected_items",
+                              return_value=tracks),
+        ):
+            panel._collection_tracks_ready(
+                panel.collection_token, [(album, tracks)], []
+            )
+
+        shown.assert_called_once()
+        # Cancelled means cancelled: nothing was queued behind the dialog.
+        self.assertEqual(self.frame.queue.calls, [])
+        self.assertEqual(self.frame.messages[-1], "Download cancelled.")
 
     def test_an_artist_search_files_its_downloads_under_the_artist(self):
         panel = SearchPanel(self.host, self.frame)
@@ -3992,13 +4078,87 @@ class GuiInteractionTests(unittest.TestCase):
     def test_albums_cannot_be_previewed(self):
         panel = SearchPanel(self.host, self.frame)
         panel.result_engine = ENGINE_DEEZER
-        panel.results = [{"title": "Discovery", "kind": "deezer_album"}]
+        panel.results = [{"title": "Discovery", "kind": "deezer_album",
+                          "tracks": 14}]
         panel.results_list.SetItemCount(1)
         panel.results_list.Select(0)
 
         panel.on_preview_selected(None)
 
         self.assertIn("no single track to play", self.frame.messages[-1])
+
+    def test_a_one_track_release_is_played_rather_than_refused(self):
+        # A single is an album row, so Preview used to answer that an album
+        # has no single track to play -- of the one track it holds. Most of
+        # what an artist has out is singles, so most of a discography could
+        # be listened to only by downloading it first.
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        single = {"title": "One More Time", "kind": "deezer_album",
+                  "artist": "Daft Punk", "tracks": 1,
+                  "url": "https://www.deezer.com/album/7"}
+        panel.results = [single]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+        track = {"title": "One More Time",
+                 "url": "https://www.deezer.com/track/3135556"}
+
+        with mock.patch("blinddl.gui.search_panel.collection_tracks",
+                        return_value=[track]) as read:
+            with mock.patch.object(threading, "Thread") as thread:
+                panel.on_preview_selected(None)
+                thread.call_args.kwargs["target"](
+                    *thread.call_args.kwargs["args"])
+        read.assert_called_once()
+
+        with mock.patch.object(threading, "Thread") as thread:
+            panel._collection_playback_ready(
+                panel.collection_playback_token, single, [track], False, "")
+        played = thread.call_args.kwargs["args"][1]
+        self.assertEqual(played["url"], track["url"])
+        # The row's artist carries over: a track list need not name one, and
+        # the YouTube fallback is only as good as the name it searches for.
+        self.assertEqual(played["artist"], "Daft Punk")
+
+    def test_a_one_track_release_can_be_played_in_full_too(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        single = {"title": "Da Funk", "kind": "deezer_album", "tracks": 1,
+                  "url": "https://www.deezer.com/album/8"}
+        track = {"title": "Da Funk", "url": "https://www.deezer.com/track/1"}
+        panel.results = [single]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+
+        with mock.patch.object(threading, "Thread"):
+            panel.on_play_full_selected(None)
+        with mock.patch.object(threading, "Thread") as thread:
+            panel._collection_playback_ready(
+                panel.collection_playback_token, single, [track], True, "")
+
+        self.assertEqual(thread.call_args.kwargs["name"],
+                         "blinddl-search-play-full")
+        self.assertEqual(
+            thread.call_args.kwargs["args"][1]["url"], track["url"])
+
+    def test_a_release_that_turns_out_to_hold_several_says_so(self):
+        # A row from a site that publishes no track count is read rather
+        # than guessed at, and what comes back can be a whole album.
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_DEEZER
+        album = {"title": "Discovery", "kind": "deezer_album", "url": "u"}
+        panel.results = [album]
+        panel.results_list.SetItemCount(1)
+        panel.results_list.Select(0)
+
+        with mock.patch.object(threading, "Thread"):
+            panel.on_preview_selected(None)
+        panel._collection_playback_ready(
+            panel.collection_playback_token, album,
+            [{"title": "One"}, {"title": "Two"}], False, "")
+
+        self.assertIn("no single track to play", self.frame.messages[-1])
+        self.assertTrue(panel.preview_btn.IsEnabled())
 
     def test_starting_a_preview_cancels_an_inflight_full_playback(self):
         panel = SearchPanel(self.host, self.frame)

@@ -22,6 +22,7 @@ from ..downloader import addition_summary
 from .media_player import MediaPlayerPanel
 from .search_panel import (
     ResultsList,
+    collection_track_count,
     collection_tracks,
     is_collection_item,
     queue_collection_tracks,
@@ -187,11 +188,67 @@ class QueuePanel(wx.Panel):
             self.frame.announce(f"Could not read that saved result: {exc}")
             return
         if is_collection_item(result):
+            self._play_collection_track(result, full)
+            return
+        self._start_play(result, full)
+
+    def _play_collection_track(self, result, full):
+        """Play the only track of a saved one-track release, or say why not.
+
+        A single that was kept for later is a row with one thing on it and
+        no way to hear it: the release has no stream of its own, only a
+        track list, which is read here so its track can be played like any
+        other. A release that says it holds more than one is left alone.
+        """
+        if collection_track_count(result) > 1:
             self.frame.announce(
                 "An album or playlist has no single track to play. Download "
                 "it to choose which of its tracks to keep."
             )
             return
+        token = self._play_token = object()
+        self.preview_btn.Disable()
+        self.play_full_btn.Disable()
+        self.frame.announce(
+            f"Reading track list: {result.get('title') or 'album'}")
+        threading.Thread(
+            target=self._resolve_collection_play,
+            args=(token, result, full),
+            daemon=True,
+            name="blinddl-queue-collection-play",
+        ).start()
+
+    def _resolve_collection_play(self, token, result, full):
+        try:
+            tracks = collection_tracks(result, self.frame.config)
+            error = ""
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            tracks, error = [], str(exc)
+        wx.CallAfter(
+            self._collection_play_ready, token, result, tracks, full, error)
+
+    def _collection_play_ready(self, token, result, tracks, full, error):
+        if self.closing or token is not self._play_token:
+            return
+        self.preview_btn.Enable()
+        self.play_full_btn.Enable()
+        if len(tracks) == 1:
+            track = dict(tracks[0])
+            for field in ("artist", "album"):
+                if not track.get(field):
+                    track[field] = result.get(field) or ""
+            self._start_play(track, full)
+            return
+        if error:
+            self._play_failed(token, error)
+            return
+        self.frame.announce(
+            "An album or playlist has no single track to play. Download it "
+            "to choose which of its tracks to keep."
+        )
+
+    def _start_play(self, result, full):
+        """Play one saved track row, whole or as a clip."""
         token = self._play_token = object()
         self.preview_btn.Disable()
         self.play_full_btn.Disable()
