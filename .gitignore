@@ -21,6 +21,9 @@ dist/
 release/
 
 # Local application and smoke-test data
+# musicdl's own progress dashboard drops a lock file here whenever a
+# client is built, tests included.
+downloaded_files/
 .dlhistory
 .smoke_*/
 .freebuff/
