@@ -1119,11 +1119,16 @@ class MainFrame(wx.Frame):
         # so a failure there has no window to appear in. It writes down what
         # happened instead, and this is where that gets read out.
         try:
-            failure = updater.last_update_failure()
+            failure = updater.last_update_failure(forget=False)
         except Exception:  # noqa: BLE001 - never block the check itself
             failure = None
         if failure:
             wx.CallAfter(self.announce, failure)
+            # Keep the application usable after a post-exit helper failure.
+            # A blind automatic retry would close and restart into the same
+            # failure indefinitely. Help, Check for updates consumes the
+            # failure record and is the explicit retry path.
+            return
         try:
             update = updater.check_for_app_update(log)
         except Exception:  # noqa: BLE001 - a network blip must not nag

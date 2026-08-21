@@ -962,6 +962,23 @@ class GuiInteractionTests(unittest.TestCase):
             MainFrame._check_for_release(holder, lambda _line: None)
         holder.announce.assert_not_called()
 
+    def test_a_failed_helper_is_not_automatically_retried_in_a_restart_loop(self):
+        holder = self._update_holder()
+        with (
+            mock.patch.object(
+                updater, "last_update_failure",
+                return_value="blindDL 9.9.9 did not install: folder is in use.",
+            ) as failure,
+            mock.patch.object(updater, "check_for_app_update") as check,
+            mock.patch.object(wx, "CallAfter",
+                              side_effect=lambda fn, *a: fn(*a)),
+        ):
+            MainFrame._check_for_release(holder, lambda _line: None)
+
+        failure.assert_called_once_with(forget=False)
+        check.assert_not_called()
+        self.assertIn("did not install", holder.announce.call_args.args[0])
+
     def test_auto_install_downloads_and_reports_a_download_that_fails(self):
         update = SimpleNamespace(version="9.9.9")
         holder = self._update_holder(

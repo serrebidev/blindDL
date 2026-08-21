@@ -29,7 +29,9 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Updates its downloader components — yt-dlp and friends — from inside the app.
 - When automatic updates are enabled, checks on startup and every 12 hours,
   downloads and verifies the release, waits for queued transfers to finish,
-  installs it silently, and restarts BlindDL without a Download update step.
+  installs it unattended after any Windows permission prompt, and restarts
+  BlindDL without a Download update step. A failed post-exit update is not
+  retried in a restart loop; Help, Check for updates retries it explicitly.
 - Searches music by track title, album, or artist, and downloads a whole album as every track on it. Album rows say how many tracks are on them, so a single is not mistaken for a record.
 - Opens the album or the artist behind any Deezer or Apple Music result, so a search is somewhere to browse from rather than a list that ends.
 - Uses native controls, labeled fields, status-bar announcements, context menus, and complete keyboard operation.
@@ -62,7 +64,25 @@ spoken either way.
 1. Download `blindDL-vX.Y.Z-windows-x64.zip`.
 2. Extract it anywhere and run `blindDL.exe` — no installation required.
 
+Keep `blindDL.exe` together with its `_internal` folder. The portable updater
+replaces that whole folder so obsolete Python runtime files cannot survive an
+update. It preserves unrelated files placed beside BlindDL and requests
+administrator permission when the portable folder is in a protected local
+location such as Program Files. Writable network locations work without that
+prompt; a read-only location must be copied somewhere writable first. Windows
+on ARM uses the published x64 build through Windows compatibility support.
+
 The portable ZIP uses the same automatic background setup as the installer.
+If a post-exit update fails, BlindDL reports the reason on the next start and
+keeps the verified download for Help, Check for updates to retry. Technical
+helper output, when Windows produced any, is in
+`%APPDATA%\blindDL\updates\vX.Y.Z\windows-update-helper.log`.
+
+For a one-time manual recovery from an older updater, close BlindDL, extract
+the new ZIP into a **new empty folder**, and run its `blindDL.exe`. Do not merge
+the ZIP over the old folder: mixing two bundled Python runtimes can leave the
+old version running. Settings and subscriptions remain in `%APPDATA%\blindDL`,
+so they follow the new portable folder automatically.
 
 Bundled components update together through BlindDL releases. Large Windows
 media tools update through WinGet, so they are not duplicated inside every

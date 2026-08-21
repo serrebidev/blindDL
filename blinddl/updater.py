@@ -145,6 +145,7 @@ DOWNLOAD_BLOCK = 256 * 1024
 PROGRESS_PERCENT_STEP = 10
 # What a server that sends no Content-Length gets instead of percentages.
 PROGRESS_BYTES_STEP = 16 * 1024 * 1024
+WINDOWS_UPDATE_LOG_NAME = "windows-update-helper.log"
 
 
 class UpdateError(RuntimeError):
@@ -234,8 +235,17 @@ def _select_update(release):
     system, arch = _release_platform()
     assets = _asset_map(release)
     if system == "windows":
-        suffix = (f"windows-{arch}.exe" if _windows_installed_build()
-                  else f"windows-{arch}.zip")
+        installed = _windows_installed_build()
+        extension = "exe" if installed else "zip"
+        # Windows releases are currently x64. Windows 11 on ARM runs them
+        # through its x64 compatibility layer, so an ARM machine must use the
+        # package the running application was built from instead of looking
+        # for a windows-arm64 asset that does not exist.
+        if arch == "arm64" and not any(
+            name.endswith(f"windows-arm64.{extension}") for name in assets
+        ):
+            arch = "x64"
+        suffix = f"windows-{arch}.{extension}"
     elif system == "macos":
         suffix = f"macos-{arch}.dmg"
     else:
@@ -269,9 +279,14 @@ def _open_url(url, timeout=30):
         "User-Agent": UPDATE_USER_AGENT,
     })
     try:
-        return urlopen(request, timeout=timeout)  # nosec B310
+        response = urlopen(request, timeout=timeout)  # nosec B310
     except (HTTPError, URLError, OSError) as exc:
         raise UpdateError(f"Could not reach the update server: {exc}") from exc
+    final_url = getattr(response, "geturl", lambda: url)()
+    if urlparse(str(final_url)).scheme.casefold() != "https":
+        response.close()
+        raise UpdateError("The update server redirected to a non-HTTPS URL.")
+    return response
 
 
 def check_for_app_update(log=lambda _line: None):
@@ -403,12 +418,17 @@ def download_app_update(update, log=lambda _line: None, progress=None):
         return package_path
     log(f"Downloading {update.package_name}...")
     partial = package_path.with_name(package_path.name + ".part")
-    actual = _download(
-        update.package_url, partial, digest=True,
-        on_progress=_progress_reporter(
-            f"blindDL {update.version}", progress if progress is not None else log
-        ),
-    )
+    try:
+        actual = _download(
+            update.package_url, partial, digest=True,
+            on_progress=_progress_reporter(
+                f"blindDL {update.version}",
+                progress if progress is not None else log,
+            ),
+        )
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
     if actual.lower() != expected:
         partial.unlink(missing_ok=True)
         raise UpdateError(
@@ -471,7 +491,14 @@ function Save([bool]$Ok, [string]$Detail) {
     if (-not (Test-Path -LiteralPath $folder)) {
       New-Item -ItemType Directory -Path $folder -Force | Out-Null
     }
-    [ordered]@{ ok = $Ok; version = $Version; detail = $Detail; steps = @($Steps) } |
+    [ordered]@{
+      status = 'complete'
+      ok = $Ok
+      version = $Version
+      detail = $Detail
+      steps = @($Steps)
+      log = $Log
+    } |
       ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Result -Encoding UTF8
   } catch { }
 }
@@ -531,16 +558,17 @@ function Wait-ForRelease([string]$Path) {
 # replaced and still start as the version it was.
 _PORTABLE_HELPER = (
     "param([int]$BlindDLPid, [string]$Source, [string]$Target,\n"
-    "      [string]$Result, [string]$Version)\n"
+    "      [string]$Result, [string]$Version, [string]$Log)\n"
     + _HELPER_COMMON
     + r"""
 $Exe = Join-Path $Target 'blindDL.exe'
-$Backup = $Target + '.previous'
+$Backup = $Target + '.blinddl-update-backup-' + [guid]::NewGuid().ToString('N')
 
 function Restart-BlindDL {
-  if (Test-Path -LiteralPath $Exe) {
-    Start-Process -FilePath $Exe -WorkingDirectory $Target
+  if (-not (Test-Path -LiteralPath $Exe)) {
+    throw 'blindDL.exe is missing, so BlindDL could not be restarted.'
   }
+  Start-Process -FilePath $Exe -WorkingDirectory $Target
 }
 
 function Move-Folder([string]$From, [string]$To) {
@@ -557,6 +585,7 @@ function Move-FolderSoon([string]$From, [string]$To) {
   $deadline = (Get-Date).AddSeconds(60)
   while ($true) {
     try { Move-Folder $From $To; return }
+    catch [System.UnauthorizedAccessException] { throw }
     catch {
       if ((Get-Date) -ge $deadline) { throw }
       Start-Sleep -Milliseconds 500
@@ -585,9 +614,6 @@ if (-not (Wait-ForRelease $Exe)) {
 }
 
 try {
-  if (Test-Path -LiteralPath $Backup) {
-    Remove-Item -LiteralPath $Backup -Recurse -Force
-  }
   Move-FolderSoon $Target $Backup
   Note 'Moved the old blindDL folder aside.'
 } catch {
@@ -604,7 +630,8 @@ try {
     Move-Folder $Source $Target
   } catch {
     New-Item -ItemType Directory -Path $Target -Force | Out-Null
-    Copy-Item -Path (Join-Path $Source '*') -Destination $Target -Recurse -Force
+    Get-ChildItem -LiteralPath $Source -Force | Copy-Item `
+      -Destination $Target -Recurse -Force
   }
   if (-not (Test-Path -LiteralPath $Exe)) {
     throw 'The new blindDL folder arrived without blindDL.exe.'
@@ -620,7 +647,10 @@ try {
     }
   }
   $installed = Read-InstalledVersion $Exe
-  if ($installed -and (Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
+  if (-not $installed) {
+    throw 'The new blindDL.exe has no readable version information.'
+  }
+  if ((Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
     throw ('The folder now holds blindDL ' + $installed + ', not ' + $Version + '.')
   }
 } catch {
@@ -637,7 +667,12 @@ try {
   Note 'The previous version is still on disk beside the new one.'
 }
 Save $true ''
-Restart-BlindDL
+try {
+  Restart-BlindDL
+} catch {
+  Save $false ('blindDL was updated but could not be restarted: ' + (Get-Reason $_))
+  exit 1
+}
 """)
 
 
@@ -646,7 +681,7 @@ Restart-BlindDL
 # code, and confirming that the version on disk actually moved.
 _INSTALLED_HELPER = (
     "param([int]$BlindDLPid, [string]$Installer, [string]$Target,\n"
-    "      [string]$Result, [string]$Version)\n"
+    "      [string]$Result, [string]$Version, [string]$Log)\n"
     + _HELPER_COMMON
     + r"""
 if (-not (Wait-ForRelease $Target)) {
@@ -665,14 +700,23 @@ try {
     throw 'The installer finished but blindDL.exe is gone.'
   }
   $installed = Read-InstalledVersion $Target
-  if ($installed -and (Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
+  if (-not $installed) {
+    throw 'The installed blindDL.exe has no readable version information.'
+  }
+  if ((Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
     throw ('blindDL ' + $installed + ' is still installed, not ' + $Version + '.')
   }
   Save $true ''
 } catch {
   Save $false (Get-Reason $_)
 }
-Start-Process -FilePath $Target
+try {
+  Start-Process -FilePath $Target
+} catch {
+  Save $false ('The update finished but blindDL could not be restarted: ' +
+    (Get-Reason $_))
+  exit 1
+}
 """)
 
 
@@ -680,27 +724,53 @@ def _update_result_path():
     return Path(app_data_dir()) / "updates" / UPDATE_RESULT_NAME
 
 
-def take_update_result():
-    """Return what the last update helper recorded, and forget it.
+def _write_update_result(result):
+    """Atomically leave a result for the next BlindDL process to read."""
+    path = _update_result_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(result), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise UpdateError(
+            f"Could not prepare the update status file in {path.parent}: {exc}"
+        ) from exc
 
-    The record is read once. An update that failed is worth one sentence on
-    the next start, not the same sentence every twelve hours afterwards.
+
+def _forget_update_result():
+    try:
+        _update_result_path().unlink()
+    except OSError:
+        pass
+
+
+def take_update_result(forget=True):
+    """Return what the last update helper recorded.
+
+    Manual checks consume the record before deliberately retrying. Automatic
+    checks leave failures in place so the same broken install is not started
+    again every time BlindDL restarts.
     """
     path = _update_result_path()
     try:
         raw = path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
-    finally:
-        try:
-            path.unlink()
-        except OSError:
-            pass
+    if forget:
+        _forget_update_result()
     try:
         result = json.loads(raw)
     except ValueError:
+        if not forget:
+            _forget_update_result()
         return None
-    return result if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        if not forget:
+            _forget_update_result()
+        return None
+    return result
 
 
 def _discard_staged_update(version):
@@ -720,9 +790,9 @@ def _discard_staged_update(version):
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def last_update_failure():
+def last_update_failure(forget=True):
     """One spoken sentence when the previous update did not take, else None."""
-    result = take_update_result()
+    result = take_update_result(forget=forget)
     if result is None:
         return None
     version = str(result.get("version") or "").strip()
@@ -731,8 +801,32 @@ def last_update_failure():
         # is not this install's, and the package may still be wanted.
         if _version_tuple(version) == _version_tuple(__version__):
             _discard_staged_update(version)
+        if not forget:
+            _forget_update_result()
+        return None
+    if (
+        result.get("status") == "pending"
+        and _version_tuple(version) == _version_tuple(__version__)
+    ):
+        # The helper's final status write was lost, but the executable itself
+        # proves the requested version is now running.
+        _discard_staged_update(version)
+        if not forget:
+            _forget_update_result()
         return None
     detail = str(result.get("detail") or "").strip()
+    if result.get("status") == "pending" and not detail:
+        detail = (
+            "the Windows update helper did not report finishing. The verified "
+            "package is still downloaded, so try the update again"
+        )
+    log_path = str(result.get("log") or "").strip()
+    try:
+        log_has_content = bool(log_path and Path(log_path).stat().st_size)
+    except OSError:
+        log_has_content = False
+    if detail and log_has_content:
+        detail += f". Technical details are in {log_path}"
     head = (f"blindDL {version} did not install" if version
             else "The last blindDL update did not install")
     return f"{head}: {detail}" if detail else f"{head}."
@@ -758,7 +852,144 @@ def _write_helper(path, script):
     path.write_text(script, encoding="utf-8-sig")
 
 
+def _find_windows_powershell():
+    """Return a PowerShell host that can run the post-exit helper."""
+    candidates = []
+    windows = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or ""
+    if windows:
+        candidates.append(
+            Path(windows) / "System32" / "WindowsPowerShell" / "v1.0"
+            / "powershell.exe"
+        )
+    candidates.extend(
+        Path(found) for found in (
+            shutil.which("powershell.exe"), shutil.which("pwsh.exe")
+        ) if found
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    # Unit tests exercise Windows selection on non-Windows builders with the
+    # process launch mocked. A real Windows run must resolve an actual host.
+    if os.name != "nt":
+        return "powershell.exe"
+    raise UpdateError(
+        "Windows PowerShell is unavailable, so BlindDL cannot finish the update."
+    )
+
+
+def _validate_windows_helper(powershell, script):
+    """Prove the selected host starts and parses *script* before BlindDL exits."""
+    if os.name != "nt":
+        return
+    command = [
+        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-Command", "[void][ScriptBlock]::Create([Console]::In.ReadToEnd())",
+    ]
+    try:
+        completed = subprocess.run(
+            command, input=script, capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace", **_subprocess_options(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"Windows PowerShell could not start: {exc}") from exc
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout or "unknown parse error").strip()
+        raise UpdateError(f"The Windows update helper is invalid: {detail}")
+
+
+def _portable_update_needs_elevation(target):
+    """Test the parent operations required to replace a portable folder."""
+    if os.name != "nt":
+        return False
+    parent = target.parent
+    probe = moved = None
+    try:
+        probe = Path(tempfile.mkdtemp(prefix=".blinddl-update-access-", dir=parent))
+        moved = probe.with_name(probe.name + "-moved")
+        probe.rename(moved)
+        moved.rmdir()
+        return False
+    except PermissionError:
+        if str(parent).startswith(("\\\\", "//")):
+            raise UpdateError(
+                f"The portable BlindDL folder cannot be replaced on this network "
+                f"location: {target}. Move it to a writable local folder and try again."
+            )
+        return True
+    except OSError as exc:
+        raise UpdateError(
+            f"The portable BlindDL folder cannot be replaced in {parent}: {exc}"
+        ) from exc
+    finally:
+        for leftover in (moved, probe):
+            if leftover is not None and leftover.exists():
+                shutil.rmtree(leftover, ignore_errors=True)
+
+
+def _start_elevated_windows_helper(powershell, arguments):
+    """Start *powershell* with UAC and fail without closing on cancellation."""
+    import ctypes  # noqa: PLC0415 - Windows-only standard library
+
+    shell_execute = ctypes.windll.shell32.ShellExecuteW
+    shell_execute.restype = ctypes.c_void_p
+    result = shell_execute(
+        None, "runas", powershell, subprocess.list2cmdline(arguments),
+        _helper_cwd(), 0,
+    )
+    code = int(result or 0)
+    if code <= 32:
+        raise UpdateError(
+            "Administrator permission was not granted, so the portable BlindDL "
+            "folder was left unchanged."
+        )
+
+
+def _launch_windows_helper(helper, script, arguments, version, *, elevated=False):
+    """Validate and launch a helper, leaving a diagnostic if it disappears."""
+    powershell = _find_windows_powershell()
+    _validate_windows_helper(powershell, script)
+    log_path = helper.parent / WINDOWS_UPDATE_LOG_NAME
+    _write_update_result({
+        "status": "pending",
+        "ok": False,
+        "version": str(version),
+        "detail": "",
+        "log": str(log_path),
+    })
+    command_arguments = [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(helper), *arguments, "-Log", str(log_path),
+    ]
+    try:
+        if elevated:
+            _start_elevated_windows_helper(powershell, command_arguments)
+        else:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "wb") as output:
+                subprocess.Popen(
+                    [powershell, *command_arguments], cwd=_helper_cwd(),
+                    stdout=output, stderr=subprocess.STDOUT,
+                    **_subprocess_options(),
+                )
+    except (OSError, UpdateError) as exc:
+        _write_update_result({
+            "status": "complete",
+            "ok": False,
+            "version": str(version),
+            "detail": f"the Windows update helper could not start: {exc}",
+            "log": str(log_path),
+        })
+        if isinstance(exc, UpdateError):
+            raise
+        raise UpdateError(f"The Windows update helper could not start: {exc}") from exc
+
+
 def _portable_windows_update(package_path, version):
+    target = Path(sys.executable).resolve().parent
+    if not (target / "blindDL.exe").is_file():
+        raise UpdateError("The current portable BlindDL folder is not valid.")
+    elevated = _portable_update_needs_elevation(target)
     update_root = package_path.parent / "portable"
     if update_root.exists():
         shutil.rmtree(update_root)
@@ -767,38 +998,46 @@ def _portable_windows_update(package_path, version):
     source = update_root / "blindDL"
     if not (source / "blindDL.exe").is_file():
         raise UpdateError("The portable update does not contain blindDL.exe.")
-    target = Path(sys.executable).resolve().parent
-    if not (target / "blindDL.exe").is_file():
-        raise UpdateError("The current portable BlindDL folder is not valid.")
     helper = package_path.parent / "finish-portable-update.ps1"
     _write_helper(helper, _PORTABLE_HELPER)
-    subprocess.Popen([
-        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", str(helper), "-BlindDLPid", str(os.getpid()),
+    arguments = [
+        "-BlindDLPid", str(os.getpid()),
         "-Source", str(source), "-Target", str(target),
         "-Result", str(_update_result_path()), "-Version", str(version),
-    ], cwd=_helper_cwd(), **_subprocess_options())
+    ]
+    _launch_windows_helper(
+        helper, _PORTABLE_HELPER, arguments, version, elevated=elevated
+    )
     return True
 
 
 def install_app_update(update, package_path, log=lambda _line: None):
     """Launch or stage the platform updater. True means BlindDL should exit."""
+    package_path = Path(package_path)
+    if not package_path.is_file():
+        raise UpdateError(f"The downloaded update is missing: {package_path}")
     suffixes = "".join(package_path.suffixes).lower()
     if sys.platform == "win32":
         if suffixes.endswith(".zip"):
             log("Staging the portable update; BlindDL will restart itself.")
             return _portable_windows_update(package_path, update.version)
+        if not suffixes.endswith(".exe"):
+            raise UpdateError(
+                f"Cannot install this Windows update package: {package_path.name}"
+            )
         log("Staging the silent BlindDL installer; BlindDL will restart itself.")
         helper = package_path.parent / "finish-installed-update.ps1"
         target = Path(sys.executable).resolve()
         _write_helper(helper, _INSTALLED_HELPER)
-        subprocess.Popen([
-            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-            "-File", str(helper), "-BlindDLPid", str(os.getpid()),
+        arguments = [
+            "-BlindDLPid", str(os.getpid()),
             "-Installer", str(package_path), "-Target", str(target),
             "-Result", str(_update_result_path()),
             "-Version", str(update.version),
-        ], cwd=_helper_cwd(), **_subprocess_options())
+        ]
+        _launch_windows_helper(
+            helper, _INSTALLED_HELPER, arguments, update.version
+        )
         return True
     if sys.platform == "darwin":
         log("Opening the update disk image. Replace BlindDL in Applications.")
