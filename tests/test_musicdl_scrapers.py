@@ -166,7 +166,12 @@ TOKENS = [
 class Zvu4ITTests(unittest.TestCase):
     def test_parses_result_block(self):
         client = _client(Zvu4ITMusicClient)
-        song = client._parsesearchresultfromblock(ZVU4IT_BLOCK)
+        # The parser checks the MP3 link before it builds anything, so
+        # without the stand-in tester this one test reached out to
+        # zvu4it.org for a URL out of a fixture -- and a build host whose
+        # network said otherwise failed on a parser that was working.
+        with _patch_tester():
+            song = client._parsesearchresultfromblock(ZVU4IT_BLOCK)
         self.assertEqual(song.cover_url, "https://img.zvu4it.org/img/123")
 
         self.assertTrue(song.with_valid_download_url)
