@@ -50,7 +50,9 @@ class ItemPickerDialog(wx.Dialog):
         self.item_list.SetName("Items to download")
         self.item_list.SetHelpText(
             "Space ticks the track you are on, and Enter downloads every "
-            "ticked track. Nothing is ticked to start with."
+            "ticked track. Alt+P previews the focused track and Alt+F plays "
+            "its full song without ticking it. Nothing is ticked to start "
+            "with."
         )
         self.item_list.EnableCheckBoxes()
         for column, heading in enumerate(

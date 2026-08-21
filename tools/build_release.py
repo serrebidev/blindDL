@@ -367,10 +367,7 @@ def package_deb(app_version: str) -> Path:
 def write_checksums(artifacts: list[Path], arch: str) -> Path:
     import hashlib
 
-    platform_name = {"win32": "windows", "darwin": "macos"}.get(
-        sys.platform, "linux"
-    )
-    output = RELEASE / f"SHA256SUMS-{platform_name}-{arch}.txt"
+    output = checksum_path(arch)
     lines = []
     for artifact in sorted(artifacts):
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -379,18 +376,30 @@ def write_checksums(artifacts: list[Path], arch: str) -> Path:
     return output
 
 
+def checksum_path(arch: str) -> Path:
+    """The fixed-name checksum file for this build platform."""
+    platform_name = {"win32": "windows", "darwin": "macos"}.get(
+        sys.platform, "linux"
+    )
+    return RELEASE / f"SHA256SUMS-{platform_name}-{arch}.txt"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
 
     RELEASE.mkdir(exist_ok=True)
+    arch = architecture()
+    # The filename has no version in it. Remove the preceding release's copy
+    # before the long native build starts so an uploader can never mistake a
+    # stale checksum for the one belonging to artifacts still being built.
+    checksum_path(arch).unlink(missing_ok=True)
     if not args.skip_build:
         build_application()
         verify_application()
 
     app_version = version()
-    arch = architecture()
     if sys.platform == "win32":
         artifacts = package_windows(app_version, arch)
     elif sys.platform == "darwin":

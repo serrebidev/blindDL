@@ -72,6 +72,11 @@ class MainFrame(wx.Frame):
 
         self._closing = False
         self._background_started = False
+        # Windows can focus a notebook's tab while the top-level window is
+        # inactive. Remember the actual child control separately so Alt+Tab,
+        # Windows+M, and a tray round-trip return to the exact place the user
+        # was reading rather than to the tab label.
+        self._last_child_focus = None
         # Set when the user asks to leave outright -- File > Exit or the
         # tray's own Exit -- so that path is never turned into a hide.
         self._quitting = False
@@ -117,6 +122,8 @@ class MainFrame(wx.Frame):
 
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(wx.EVT_ICONIZE, self.on_iconize)
+        self.Bind(wx.EVT_CHILD_FOCUS, self.on_child_focus)
+        self.Bind(wx.EVT_ACTIVATE, self.on_window_activate)
         self._apply_tray_setting()
         # MainFrame is constructed before __main__ can show it. Defer all
         # background services briefly so Windows can paint a responsive window
@@ -350,6 +357,61 @@ class MainFrame(wx.Frame):
             panel.focus_input()
         elif hasattr(panel, "list"):
             panel.list.SetFocus()
+
+    def _is_restorable_child_focus(self, window):
+        """Whether *window* is a live control owned by this frame.
+
+        The notebook itself is deliberately excluded: that is the transient
+        focus Windows assigns on reactivation and the state this code exists
+        to avoid restoring.
+        """
+        if window is None or window is self or window is self.notebook:
+            return False
+        try:
+            return (
+                wx.GetTopLevelParent(window) is self
+                and not window.IsBeingDeleted()
+            )
+        except (AttributeError, RuntimeError):
+            return False
+
+    def on_child_focus(self, event):
+        """Remember the last meaningful control focused inside the window."""
+        window = event.GetWindow()
+        if self._is_restorable_child_focus(window):
+            self._last_child_focus = window
+        event.Skip()
+
+    def on_window_activate(self, event):
+        """Restore child focus after Windows reactivates the application."""
+        if event.GetActive():
+            wx.CallAfter(self._restore_last_child_focus, True)
+        else:
+            # Capture before Windows replaces the child's focus with the
+            # notebook tab. EVT_CHILD_FOCUS keeps this current on platforms
+            # where the activation event arrives after focus already moved.
+            window = wx.Window.FindFocus()
+            if self._is_restorable_child_focus(window):
+                self._last_child_focus = window
+        event.Skip()
+
+    def _restore_last_child_focus(self, fallback=False):
+        """Focus the remembered control, optionally falling back to its page."""
+        if self._closing:
+            return False
+        target = self._last_child_focus
+        if self._is_restorable_child_focus(target):
+            try:
+                if target.IsShownOnScreen() and target.IsEnabled():
+                    target.SetFocus()
+                    return True
+            except (AttributeError, RuntimeError):
+                pass
+        if fallback:
+            page = self.notebook.GetSelection()
+            if page != wx.NOT_FOUND:
+                self.show_tab(page)
+        return False
 
     def show_downloads_tab(self):
         self.show_tab(TAB_DOWNLOADS)
@@ -819,9 +881,10 @@ class MainFrame(wx.Frame):
             self.Iconize(False)
         self.Show()
         self.Raise()
-        page = self.notebook.GetSelection()
-        if page != wx.NOT_FOUND:
-            self.show_tab(page)
+        # Showing and raising are asynchronous native operations. Restore the
+        # exact child after Windows has finished them; the activation handler
+        # uses the same path for ordinary Alt+Tab and Windows+M round-trips.
+        wx.CallAfter(self._restore_last_child_focus, True)
 
     def _hide_to_tray(self):
         if self.tray is None or not self.tray.is_available():

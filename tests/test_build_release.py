@@ -19,6 +19,48 @@ def test_release_build_uses_an_importable_libtorrent_without_pip():
     run.assert_not_called()
 
 
+def test_checksum_path_is_specific_to_the_current_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_release, "RELEASE", tmp_path)
+    monkeypatch.setattr(build_release.sys, "platform", "linux")
+
+    assert build_release.checksum_path("x64") == (
+        tmp_path / "SHA256SUMS-linux-x64.txt"
+    )
+
+
+def test_release_build_removes_stale_checksum_before_native_build(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(build_release, "RELEASE", tmp_path)
+    monkeypatch.setattr(build_release.sys, "platform", "win32")
+    monkeypatch.setattr(build_release.sys, "argv", ["build_release.py"])
+    monkeypatch.setattr(build_release, "architecture", lambda: "x64")
+    monkeypatch.setattr(build_release, "version", lambda: "9.9.9")
+    stale = tmp_path / "SHA256SUMS-windows-x64.txt"
+    stale.write_text("old release\n", encoding="utf-8")
+
+    def build():
+        assert not stale.exists()
+
+    archive = tmp_path / "blindDL-v9.9.9-windows-x64.zip"
+    installer = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
+    archive.write_bytes(b"archive")
+    installer.write_bytes(b"installer")
+    monkeypatch.setattr(build_release, "build_application", build)
+    monkeypatch.setattr(build_release, "verify_application", lambda: None)
+    monkeypatch.setattr(
+        build_release,
+        "package_windows",
+        lambda _version, _arch: [archive, installer],
+    )
+
+    assert build_release.main() == 0
+    listing = stale.read_text(encoding="utf-8")
+    assert "blindDL-v9.9.9-windows-x64.zip" in listing
+    assert "blindDL-Setup-v9.9.9-windows-x64.exe" in listing
+    assert "old release" not in listing
+
+
 def test_windows_release_policy_reinstalls_the_maintained_wheel(
     tmp_path, monkeypatch
 ):

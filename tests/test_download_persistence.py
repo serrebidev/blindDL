@@ -13,6 +13,7 @@ from blinddl import soulseek_backend, torrent_engine
 from blinddl.config import DEFAULTS
 from blinddl.downloader import (
     ADD_ALREADY_ACTIVE,
+    ADD_QUEUED,
     ADD_RESUMED,
     ADD_SKIPPED,
     SOULSEEK_RETRY_ATTEMPTS,
@@ -228,6 +229,38 @@ class DownloadPersistenceTests(unittest.TestCase):
         self.assertIs(result, completed)
         self.assertEqual(result.add_action, ADD_SKIPPED)
         self.assertEqual(result.status, STATUS_DONE)
+        self.assertEqual(len(queue.items), 1)
+
+    def test_requeueing_completed_file_that_was_deleted_downloads_it_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = self.config()
+            config["download_dir"] = folder
+            queue = DownloadQueue(
+                config,
+                None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            completed = queue.add_ytdlp(
+                "https://example.invalid/watch?v=deleted", "Finished"
+            )
+            result_path = Path(folder) / "Finished.mp3"
+            result_path.write_bytes(b"audio")
+            completed.result_path = str(result_path)
+            completed.percent = 100
+            completed.status = STATUS_DONE
+            queue._notify(completed)
+            result_path.unlink()
+
+            result = queue.add_ytdlp(
+                "https://example.invalid/watch?v=deleted", "Fresh search title"
+            )
+
+        self.assertIs(result, completed)
+        self.assertEqual(result.add_action, ADD_QUEUED)
+        self.assertEqual(result.status, STATUS_QUEUED)
+        self.assertEqual(result.percent, 0)
+        self.assertEqual(result.result_path, "")
         self.assertEqual(len(queue.items), 1)
 
     def test_requeueing_known_partial_resumes_existing_row(self):

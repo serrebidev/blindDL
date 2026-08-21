@@ -129,7 +129,12 @@ musicdl = [
 ]
 sideb = ["VENDORED.md"]
 
+[tool.ruff]
+# These are pinned upstream snapshots. Lint blindDL's integration code, not
+# thousands of deliberate upstream style choices in the vendored sources.
+exclude = ["musicdl", "sideb"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider --basetemp=.pytest-tmp"

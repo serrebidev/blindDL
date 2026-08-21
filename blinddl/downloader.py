@@ -418,8 +418,21 @@ class DownloadQueue:
 
             if existing is not None:
                 if existing.status == STATUS_DONE:
-                    existing.add_action = ADD_SKIPPED
-                    return existing
+                    if existing.seeding:
+                        existing.add_action = ADD_ALREADY_ACTIVE
+                        return existing
+                    # A finished row is history, not proof that its file is
+                    # still on disk. Keep the fast de-duplication when the
+                    # backend did not report a path (old saved rows included),
+                    # but let a known result that was deleted be downloaded
+                    # again through the same queue row.
+                    result_path = str(existing.result_path or "").strip()
+                    if not result_path or os.path.exists(result_path):
+                        existing.add_action = ADD_SKIPPED
+                        return existing
+                    missing_result = True
+                else:
+                    missing_result = False
                 if existing.status in ACTIVE_STATUSES:
                     existing.add_action = ADD_ALREADY_ACTIVE
                     return existing
@@ -438,9 +451,14 @@ class DownloadQueue:
                 existing.speed = ""
                 existing.eta = ""
                 existing.seeding = False
+                if missing_result:
+                    existing.percent = 0.0
+                    existing.result_path = ""
                 existing.cancel_event.clear()
                 existing.pause_requested = False
-                existing.add_action = ADD_RESUMED
+                existing.add_action = (
+                    ADD_QUEUED if missing_result else ADD_RESUMED
+                )
                 item = existing
                 changed = True
             else:

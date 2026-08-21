@@ -1119,6 +1119,59 @@ class GuiInteractionTests(unittest.TestCase):
         call_after.assert_called_once_with(finish)
         finish.assert_called_once_with()
 
+    def test_reactivating_the_window_restores_its_last_child_control(self):
+        target = mock.Mock()
+        target.IsBeingDeleted.return_value = False
+        target.IsShownOnScreen.return_value = True
+        target.IsEnabled.return_value = True
+        notebook = mock.Mock()
+        holder = SimpleNamespace(
+            _closing=False,
+            _last_child_focus=target,
+            notebook=notebook,
+            show_tab=mock.Mock(),
+        )
+        holder._is_restorable_child_focus = (
+            lambda window: window is target
+        )
+        holder._restore_last_child_focus = (
+            lambda fallback=False: MainFrame._restore_last_child_focus(
+                holder, fallback
+            )
+        )
+        event = mock.Mock()
+        event.GetActive.return_value = True
+
+        with mock.patch(
+            "blinddl.gui.mainframe.wx.CallAfter",
+            side_effect=lambda callback, *args: callback(*args),
+        ) as call_after:
+            MainFrame.on_window_activate(holder, event)
+
+        call_after.assert_called_once_with(
+            holder._restore_last_child_focus, True
+        )
+        target.SetFocus.assert_called_once_with()
+        notebook.SetFocus.assert_not_called()
+        holder.show_tab.assert_not_called()
+        event.Skip.assert_called_once_with()
+
+    def test_native_notebook_focus_does_not_replace_the_last_child(self):
+        target = object()
+        notebook = object()
+        holder = SimpleNamespace(
+            _last_child_focus=target,
+            notebook=notebook,
+            _is_restorable_child_focus=lambda window: window is target,
+        )
+        event = mock.Mock()
+        event.GetWindow.return_value = notebook
+
+        MainFrame.on_child_focus(holder, event)
+
+        self.assertIs(holder._last_child_focus, target)
+        event.Skip.assert_called_once_with()
+
     def test_background_services_start_only_once_after_window_creation(self):
         holder = SimpleNamespace(
             _closing=False,
