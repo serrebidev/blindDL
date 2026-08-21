@@ -1115,6 +1115,13 @@ class MainFrame(wx.Frame):
         because by then something was expected to happen. So is an install
         that was staged last time and never took.
         """
+        # An update that had to rename a file aside to get past it leaves
+        # the husk behind if it was still held as the helper finished. It
+        # will not be held now, an application start later.
+        try:
+            updater.sweep_replaced_files()
+        except Exception:  # noqa: BLE001 - tidying must not stop the check
+            pass
         # The helper that finishes an update runs after blindDL has closed,
         # so a failure there has no window to appear in. It writes down what
         # happened instead, and this is where that gets read out.

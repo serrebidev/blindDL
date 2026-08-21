@@ -505,6 +505,9 @@ set "EXE_NAME=blindDL.exe"
 set "EXE=%INSTALL_DIR%\%EXE_NAME%"
 set "BACKUP_DIR="
 set "DETAIL="
+rem Kept beside the result file blindDL already knows how to find, so the
+rem list of files an update had to leave behind needs no argument of its own.
+for %%D in ("%BLINDDL_RESULT%") do set "LEFTOVERS=%%~dpDleftover-files.txt"
 
 call :main >> "%BLINDDL_LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
@@ -554,11 +557,12 @@ if not exist "%SOURCE%\%EXE_NAME%" (
     set "DETAIL=the staged update does not contain blindDL.exe"
     goto :fail
 )
+rem A wait, not a gate. A file still held after this is not a reason to
+rem abandon the update: the moves below are the real test of whether it can
+rem be replaced, and they go on without a file that nothing needs. This once
+rem failed the update outright, which meant one file open in a sync client
+rem stopped a release from installing before a single thing had been tried.
 call :wait_for_unlock
-if errorlevel 1 (
-    set "DETAIL=the files in the blindDL folder were still in use"
-    goto :fail
-)
 
 set "BACKUP_DIR=%INSTALL_DIR%.blinddl-update-backup-%RANDOM%%RANDOM%"
 if exist "%BACKUP_DIR%\." rmdir /s /q "%BACKUP_DIR%" >nul 2>nul
@@ -566,8 +570,8 @@ if exist "%BACKUP_DIR%\." rmdir /s /q "%BACKUP_DIR%" >nul 2>nul
 rem A blindDL that has just closed can leave one of its own DLLs held for a
 rem second or two by a virus scanner or the search indexer, and robocopy
 rem /MOVE will copy such a file but fail to delete the original. /R retries
-rem the copy, not the delete, so the whole move is repeated a few times
-rem before a file left behind is taken for a failure.
+rem the copy, not the delete, so the whole move is repeated, waiting a
+rem little longer after each go: most holds are over within seconds.
 set "ATTEMPT=0"
 :drain_attempt
 set /a ATTEMPT+=1
@@ -579,12 +583,31 @@ if errorlevel 8 (
 )
 call :verify_drained
 if not errorlevel 1 goto :drained
-if !ATTEMPT! geq 5 (
-    set "DETAIL=some of the old blindDL files stayed in use and could not be replaced"
-    goto :rollback
+if !ATTEMPT! lss 6 (
+    "%PS%" -NoProfile -InputFormat None -Command "Start-Sleep -Seconds !ATTEMPT!" >nul 2>nul
+    goto :drain_attempt
 )
-"%PS%" -NoProfile -InputFormat None -Command "Start-Sleep -Seconds 2" >nul 2>nul
-goto :drain_attempt
+
+rem Some hold outlasts the waiting. It is not blindDL -- that has been gone
+rem since :wait_for_exit -- but something watching the folder: a sync client
+rem hashing a hundred-odd megabytes it has just seen change, a scanner
+rem reading the same, the indexer. A reader that opens a file without
+rem sharing deletion blocks every way of shifting it: it cannot be deleted,
+rem and it cannot be renamed out of the way either. Waiting is the only
+rem thing that works on it, and a sync client given a folder this size can
+rem outlast any wait worth making somebody sit through.
+rem
+rem So the update goes on without it. What is left behind is a file of the
+rem old version's that the new one does not need -- the new files are about
+rem to land on top of the ones that share their names, and a stale extra is
+rem loaded by nothing. Compare that against the alternative: rolling back a
+rem working update, every time, on any machine that syncs its folder. Where
+rem the leftover is a file the new release *does* need, the move below fails
+rem on it and that is still a rollback, which is the case that warrants one.
+rem The paths are written down so the last of them can be cleared once the
+rem hold is over, here if it ends quickly and by blindDL itself if not.
+echo [blindDL update] Some old files would not move; going on without them
+call :note_leftovers
 :drained
 
 echo [blindDL update] Putting the new blindDL files in place
@@ -605,6 +628,7 @@ if errorlevel 1 (
     goto :rollback
 )
 
+call :clear_leftovers
 rmdir /s /q "%BACKUP_DIR%" >nul 2>nul
 if exist "%BACKUP_DIR%\." echo [blindDL update] The previous version is still on disk at "%BACKUP_DIR%"
 call :save 1 ""
@@ -656,6 +680,10 @@ goto :fail
 :fail
 if "%DETAIL%"=="" set "DETAIL=the update did not finish"
 echo [blindDL update] %DETAIL%
+rem A rollback puts the old version back whole, so nothing in the folder is
+rem left over from anything -- the note would only send blindDL deleting
+rem files of the version it is still running.
+if not "%LEFTOVERS%"=="" del /f /q "%LEFTOVERS%" >nul 2>nul
 call :save 0 "%DETAIL%"
 exit /b 1
 
@@ -680,6 +708,22 @@ exit /b %ERRORLEVEL%
 :verify_drained
 "%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $install=[string]$env:INSTALL_DIR; $left=@(Get-ChildItem -LiteralPath $install -File -Recurse -Force | Select-Object -First 5); if ($left.Count -gt 0) { Write-Host 'Files left in the blindDL folder:'; $left | ForEach-Object { Write-Host $_.FullName }; exit 1 }; exit 0"
 exit /b %ERRORLEVEL%
+
+rem Writes down every file the moves could not shift, so that whoever gets
+rem the chance next can finish the job.
+:note_leftovers
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $install=[string]$env:INSTALL_DIR; $left=@(Get-ChildItem -LiteralPath $install -File -Recurse -Force | ForEach-Object { $_.FullName }); if ($left.Count -eq 0) { exit 0 }; Write-Host 'Left where they are for now:'; $left | ForEach-Object { Write-Host $_ }; $note=[string]$env:LEFTOVERS; $folder=Split-Path -Parent $note; if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }; Set-Content -LiteralPath $note -Value $left -Encoding UTF8; exit 0"
+exit /b 0
+
+rem One more go at the noted files, now that the update itself is done and
+rem some seconds have passed. What still will not go stays on the list for
+rem blindDL to sweep at its next start; an emptied list is removed, because
+rem a list of nothing would have blindDL looking every time.
+:clear_leftovers
+if "%LEFTOVERS%"=="" exit /b 0
+if not exist "%LEFTOVERS%" exit /b 0
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $note=[string]$env:LEFTOVERS; $rest=@(); foreach ($file in @(Get-Content -LiteralPath $note)) { if (-not $file) { continue }; if (-not (Test-Path -LiteralPath $file)) { continue }; try { Remove-Item -LiteralPath $file -Force -ErrorAction Stop } catch { $rest += $file } }; if ($rest.Count -gt 0) { Set-Content -LiteralPath $note -Value $rest -Encoding UTF8; Write-Host ('Still there, left for blindDL: ' + $rest.Count) } else { Remove-Item -LiteralPath $note -Force }; exit 0"
+exit /b 0
 
 rem Anything the folder held that the release does not ship is the user's own
 rem -- a tool dropped in beside blindDL, a file saved there -- and comes back.
@@ -722,6 +766,73 @@ if not exist "%EXE%" (
 start "" /d "%INSTALL_DIR%" "%EXE%"
 exit /b 0
 """
+
+
+# Where the helper writes the files it could not shift. A sibling of the
+# result file, which is how the batch finds it without another argument.
+LEFTOVERS_NAME = "leftover-files.txt"
+
+
+def _leftovers_path():
+    return Path(app_data_dir()) / "updates" / LEFTOVERS_NAME
+
+
+def _within(folder, path):
+    """Whether *path* is the folder itself or something inside it."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == folder or folder in resolved.parents
+
+
+def sweep_replaced_files(folder=None):
+    """Delete the old files an update could not move at the time.
+
+    Rather than abandon a working update over a file a sync client or a
+    scanner happened to have open, the helper leaves that file where it is,
+    writes down where, and carries on -- a stale file beside the new ones is
+    loaded by nothing, and an update that rolled back helps no one. Whatever
+    held it has long since let go by the time blindDL next starts, which is
+    when this runs. Returns how many went.
+
+    Only files inside *folder* -- the one blindDL is running from -- are
+    touched. The note outlives the folder it was written for: copy a
+    portable blindDL somewhere else and the copy reads a list of paths in an
+    installation it has nothing to do with. Those are dropped rather than
+    kept, since no later run will be any better placed to remove them.
+    """
+    note = _leftovers_path()
+    try:
+        # PowerShell's UTF8 writes a byte order mark; utf-8-sig reads the
+        # file with or without one.
+        listed = note.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return 0
+    root = Path(folder) if folder else Path(sys.executable).resolve().parent
+    root = Path(root).resolve()
+    swept = 0
+    remaining = []
+    for line in listed:
+        stale = line.strip()
+        if not stale or not _within(root, stale):
+            continue
+        try:
+            path = Path(stale)
+            if not path.is_file():
+                continue
+            path.unlink()
+            swept += 1
+        except OSError:
+            remaining.append(stale)  # still held; try again next time
+    try:
+        if remaining:
+            note.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+        else:
+            note.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return swept
 
 
 def _update_result_path():

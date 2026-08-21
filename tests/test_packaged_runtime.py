@@ -492,6 +492,228 @@ def test_the_portable_helper_puts_the_old_version_back_when_it_cannot_finish(tmp
     helper.unlink(missing_ok=True)
 
 
+# Opens a file the way an ordinary reader does -- FILE_SHARE_READ and
+# nothing else -- and sits on it. That hold blocks deleting the file and
+# blocks renaming it too, which is exactly what a sync client hashing the
+# blindDL folder does to an update trying to replace it.
+_HOLD_FILE_OPEN = """
+import ctypes, sys, time
+from ctypes import wintypes
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel32.CreateFileW.restype = wintypes.HANDLE
+handle = kernel32.CreateFileW(sys.argv[1], 0x80000000, 1, None, 3, 0, None)
+if handle == wintypes.HANDLE(-1).value:
+    raise SystemExit('could not hold: %s' % ctypes.get_last_error())
+print('held', flush=True)
+time.sleep(float(sys.argv[2]))
+"""
+
+
+def _file_version(powershell, path):
+    return subprocess.run(
+        [
+            powershell, "-NoProfile", "-NonInteractive", "-Command",
+            "$path = [Console]::In.ReadToEnd(); "
+            "(Get-Item -LiteralPath $path).VersionInfo.FileVersion",
+        ],
+        input=str(path), check=True, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=60,
+    ).stdout.strip()
+
+
+def _holding(path, seconds=180):
+    """Start the holder and wait until it actually has the handle."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_FILE_OPEN, str(path), str(seconds)],
+        stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "held"
+    return holder
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows filesystem semantics")
+def test_one_file_held_by_something_else_no_longer_loses_the_update(tmp_path):
+    # The bug that made portable updates fail on any machine syncing its
+    # blindDL folder. One old file is open elsewhere, robocopy can copy it
+    # but cannot delete it, and a perfectly good update was rolled back --
+    # every time, for a file the new version does not even use.
+    powershell = updater._find_windows_powershell()
+    shell = updater._find_windows_shell()
+    system_exe = Path(os.environ["SystemRoot"]) / "System32" / "where.exe"
+    version = _file_version(powershell, system_exe)
+
+    target = tmp_path / "app"
+    source = tmp_path / "stage" / "blindDL"
+    (target / "_internal").mkdir(parents=True)
+    (source / "_internal").mkdir(parents=True)
+    shutil.copy2(system_exe, target / "blindDL.exe")
+    shutil.copy2(system_exe, source / "blindDL.exe")
+    (source / "_internal" / "new-runtime.dll").write_bytes(b"new")
+    held = target / "_internal" / "held-by-the-sync-client.dll"
+    held.write_bytes(b"old")
+
+    helper = updater._stage_windows_helper()
+    result_path = tmp_path / "result.json"
+    log_path = tmp_path / "helper.log"
+    holder = _holding(held)
+    try:
+        completed = subprocess.run(
+            [
+                shell, "/d", "/c", str(helper), "portable", "2147483647",
+                str(target), str(source), str(result_path), version,
+                str(log_path), powershell,
+            ],
+            cwd=updater._helper_cwd(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300,
+        )
+
+        # The update took.
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        assert result["ok"] is True
+        assert (target / "_internal" / "new-runtime.dll").read_bytes() == b"new"
+        # The file nothing could shift is still where it was, and written
+        # down so that it does not stay there forever.
+        assert held.is_file()
+        note = tmp_path / updater.LEFTOVERS_NAME
+        assert str(held) in note.read_text(encoding="utf-8-sig")
+    finally:
+        holder.terminate()
+        holder.wait(timeout=30)
+        helper.unlink(missing_ok=True)
+
+    # And blindDL finishes the job at its next start, once the hold is over.
+    with mock.patch.object(updater, "_leftovers_path", return_value=note):
+        assert updater.sweep_replaced_files(folder=target) == 1
+    assert not held.exists()
+    assert not note.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows filesystem semantics")
+def test_a_held_file_the_new_version_needs_is_still_a_rollback(tmp_path):
+    # Going on without a leftover is safe only while the leftover is one the
+    # new release does not ship. Where it is a file the release has to write
+    # over, there is no update to be had, and half a version in the folder
+    # is worse than none -- so that case rolls back exactly as it did.
+    powershell = updater._find_windows_powershell()
+    shell = updater._find_windows_shell()
+    system_exe = Path(os.environ["SystemRoot"]) / "System32" / "where.exe"
+    version = _file_version(powershell, system_exe)
+
+    target = tmp_path / "app"
+    source = tmp_path / "stage" / "blindDL"
+    (target / "_internal").mkdir(parents=True)
+    (source / "_internal").mkdir(parents=True)
+    shutil.copy2(system_exe, target / "blindDL.exe")
+    shutil.copy2(system_exe, source / "blindDL.exe")
+    contested = target / "_internal" / "runtime.dll"
+    # Different lengths on purpose. Robocopy takes a file of the same size
+    # and timestamp for one it has already copied and skips it, which with
+    # two three-byte fixtures made this test pass or fail on whether the two
+    # writes landed in the same second.
+    contested.write_bytes(b"the old runtime")
+    (source / "_internal" / "runtime.dll").write_bytes(b"new")
+
+    helper = updater._stage_windows_helper()
+    result_path = tmp_path / "result.json"
+    log_path = tmp_path / "helper.log"
+    holder = _holding(contested)
+    try:
+        completed = subprocess.run(
+            [
+                shell, "/d", "/c", str(helper), "portable", "2147483647",
+                str(target), str(source), str(result_path), version,
+                str(log_path), powershell,
+            ],
+            cwd=updater._helper_cwd(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300,
+        )
+
+        report = (log_path.read_text(encoding="utf-8", errors="replace")
+                  if log_path.exists() else "(no log)")
+        assert completed.returncode == 1, report
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        assert result["ok"] is False
+        # The old version is back, whole.
+        assert (target / "blindDL.exe").is_file()
+        assert contested.read_bytes() == b"the old runtime"
+        # And no note was left telling blindDL to delete files of the
+        # version it is about to go on running.
+        assert not (tmp_path / updater.LEFTOVERS_NAME).exists()
+    finally:
+        holder.terminate()
+        holder.wait(timeout=30)
+        helper.unlink(missing_ok=True)
+
+
+def test_the_sweep_keeps_what_it_still_cannot_delete(tmp_path):
+    # The note is the only record, so a file that is still held has to stay
+    # on it -- dropping it would leave the stale file there for good.
+    note = tmp_path / updater.LEFTOVERS_NAME
+    went = tmp_path / "gone.dll"
+    stays = tmp_path / "stays.dll"
+    for path in (went, stays):
+        path.write_bytes(b"old")
+    note.write_text(f"{went}\n{stays}\n", encoding="utf-8")
+
+    real_unlink = Path.unlink
+
+    def refuse_one(self, *args, **kwargs):
+        if self == stays:
+            raise PermissionError(32, "in use")
+        return real_unlink(self, *args, **kwargs)
+
+    with mock.patch.object(updater, "_leftovers_path", return_value=note), \
+            mock.patch.object(Path, "unlink", refuse_one):
+        assert updater.sweep_replaced_files(folder=tmp_path) == 1
+
+    assert not went.exists()
+    assert stays.is_file()
+    assert note.read_text(encoding="utf-8").strip() == str(stays)
+
+
+def test_a_swept_folder_forgets_the_note(tmp_path):
+    note = tmp_path / updater.LEFTOVERS_NAME
+    stale = tmp_path / "stale.dll"
+    stale.write_bytes(b"old")
+    note.write_text(f"{stale}\n\n", encoding="utf-8")
+
+    with mock.patch.object(updater, "_leftovers_path", return_value=note):
+        assert updater.sweep_replaced_files(folder=tmp_path) == 1
+        # A file already gone is not a file that failed to go.
+        assert updater.sweep_replaced_files(folder=tmp_path) == 0
+
+    assert not stale.exists()
+    assert not note.exists()
+
+
+def test_no_note_means_nothing_to_sweep(tmp_path):
+    with mock.patch.object(updater, "_leftovers_path",
+                           return_value=tmp_path / "absent.txt"):
+        assert updater.sweep_replaced_files(folder=tmp_path) == 0
+
+
+def test_the_sweep_leaves_alone_what_is_not_in_its_own_folder(tmp_path):
+    # The note lives in the application data folder, which a portable
+    # blindDL copied to a second machine or a second folder shares with the
+    # one it was copied from. A list of another installation's files is not
+    # this one's to act on.
+    note = tmp_path / updater.LEFTOVERS_NAME
+    mine = tmp_path / "here" / "stale.dll"
+    theirs = tmp_path / "elsewhere" / "theirs.dll"
+    for path in (mine, theirs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"old")
+    note.write_text(f"{theirs}\n{mine}\n", encoding="utf-8")
+
+    with mock.patch.object(updater, "_leftovers_path", return_value=note):
+        assert updater.sweep_replaced_files(folder=tmp_path / "here") == 1
+
+    assert not mine.exists()
+    assert theirs.is_file()
+    # Nothing here will ever be able to remove them, so the note goes.
+    assert not note.exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell")
 def test_installed_helper_executes_and_verifies_the_target(tmp_path):
     powershell = updater._find_windows_powershell()
