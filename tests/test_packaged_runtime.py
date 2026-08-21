@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import types
 import zipfile
 from pathlib import Path
@@ -221,32 +222,58 @@ def test_macos_deno_falls_back_to_a_user_install_without_homebrew():
     install.assert_called_once()
 
 
+def _helper_arguments(popen):
+    """The helper's own arguments, past the cmd.exe that runs it."""
+    command = popen.call_args.args[0]
+    assert command[1:3] == ["/d", "/c"]
+    return command[3:]
+
+
+def _staged_helper(popen):
+    return Path(_helper_arguments(popen)[0])
+
+
 def test_installed_windows_update_uses_a_silent_restart_helper(tmp_path):
     package = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
     package.write_bytes(b"installer")
     update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+    installed = tmp_path / "Program Files" / "blindDL"
+    installed.mkdir(parents=True)
 
     with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")), \
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
             mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
-    helper = tmp_path / "finish-installed-update.ps1"
-    script = helper.read_text(encoding="utf-8-sig")
+    helper = _staged_helper(popen)
+    try:
+        script = helper.read_text(encoding="ascii")
+    finally:
+        helper.unlink(missing_ok=True)
     assert "/VERYSILENT" in script
     assert "/SUPPRESSMSGBOXES" in script
-    assert "Start-Process -FilePath $Target" in script
-    assert "powershell.exe" in popen.call_args.args[0][0]
+    assert "start \"\" /d" in script
     # An installer that exits non-zero, or leaves the old version in place,
     # has to reach the user: it happens after blindDL itself has closed.
-    assert "Save $false" in script
-    assert "Read-InstalledVersion" in script
-    arguments = popen.call_args.args[0]
-    assert "-Result" in arguments and "-Version" in arguments
-    assert arguments[arguments.index("-Version") + 1] == "9.9.9"
+    assert "call :save 0" in script
+    assert ":verify_version" in script
+
+    mode, pid, install_dir, source, result, version, log, powershell = (
+        _helper_arguments(popen)[1:])
+    assert mode == "installed"
+    assert int(pid) == os.getpid()
+    # The folder, not the executable: it is what the installer is pointed at
+    # and what the helper watches for processes still running out of it.
+    assert Path(install_dir) == installed
+    assert Path(source) == package
+    assert version == "9.9.9"
+    assert Path(result) == tmp_path / "updates" / updater.UPDATE_RESULT_NAME
+    assert Path(log).name == updater.WINDOWS_UPDATE_LOG_NAME
+    assert powershell == "powershell.exe"
 
 
 def _portable_update_zip(path, version="9.9.9"):
@@ -256,10 +283,14 @@ def _portable_update_zip(path, version="9.9.9"):
     return path
 
 
-def test_the_portable_update_swaps_folders_rather_than_merging_them(tmp_path):
+def test_the_portable_update_moves_the_files_and_not_the_folder(tmp_path):
     # Copying the new files over the old ones leaves every file the release
-    # dropped behind it. After a Python upgrade that means two runtimes in one
-    # folder, and a blindDL that was replaced but still starts as it was.
+    # dropped behind it -- after a Python upgrade, two runtimes in one folder
+    # and a blindDL that was replaced but still starts as it was. Renaming the
+    # folder does not have that problem and has a worse one: a sync client or
+    # an open Explorer window holds a directory open without holding any file
+    # in it, and the rename then fails every single time. So the contents
+    # move and the folder stays where it is.
     package = _portable_update_zip(tmp_path / "blindDL-v9.9.9-windows-x64.zip")
     installed = tmp_path / "app"
     installed.mkdir()
@@ -270,26 +301,29 @@ def test_the_portable_update_swaps_folders_rather_than_merging_them(tmp_path):
             mock.patch.object(updater.sys, "executable",
                               str(installed / "blindDL.exe")), \
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
             mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
-    script = (tmp_path / "finish-portable-update.ps1").read_text(
-        encoding="utf-8-sig")
-    assert "Move-FolderSoon $Target $Backup" in script
-    assert "Move-Folder $Source $Target" in script
-    assert "Get-ChildItem -LiteralPath $Source -Force | Copy-Item" in script
-    # Directory.Move is a rename: it either happens or it does not. Move-Item
-    # walks the tree, so one locked file used to leave the folder half emptied.
-    assert "[System.IO.Directory]::Move" in script
-    assert "Undo-Swap" in script
+    helper = _staged_helper(popen)
+    try:
+        script = helper.read_text(encoding="ascii")
+    finally:
+        helper.unlink(missing_ok=True)
+    assert 'robocopy "%INSTALL_DIR%" "%BACKUP_DIR%" /E /MOVE' in script
+    assert 'robocopy "%SOURCE%" "%INSTALL_DIR%" /E /MOVE' in script
+    # Nothing renames the folder itself.
+    assert "Directory]::Move" not in script
+    assert ":rollback" in script
 
-    arguments = popen.call_args.args[0]
-    assert arguments[arguments.index("-Version") + 1] == "9.9.9"
-    assert arguments[arguments.index("-Result") + 1] == str(
-        tmp_path / "updates" / updater.UPDATE_RESULT_NAME)
+    mode, _pid, install_dir, source, result, version, _log, _ps = (
+        _helper_arguments(popen)[1:])
+    assert mode == "portable"
+    assert Path(install_dir) == installed
+    assert Path(source) == package.parent / "portable" / "blindDL"
+    assert version == "9.9.9"
+    assert Path(result) == tmp_path / "updates" / updater.UPDATE_RESULT_NAME
 
 
 def test_a_protected_portable_folder_uses_a_uac_helper(tmp_path):
@@ -305,28 +339,58 @@ def test_a_protected_portable_folder_uses_a_uac_helper(tmp_path):
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
             mock.patch.object(updater, "_portable_update_needs_elevation",
                               return_value=True), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
             mock.patch.object(updater, "_start_elevated_windows_helper") as elevated, \
             mock.patch.object(updater.subprocess, "Popen") as ordinary:
         assert updater.install_app_update(update, package)
 
     elevated.assert_called_once()
     ordinary.assert_not_called()
+    shell, arguments = elevated.call_args.args
+    assert shell == "cmd.exe"
+    assert arguments[:2] == ["/d", "/c"]
+    Path(arguments[2]).unlink(missing_ok=True)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell")
-def test_windows_update_helpers_really_parse():
-    powershell = updater._find_windows_powershell()
-    updater._validate_windows_helper(powershell, updater._PORTABLE_HELPER)
-    updater._validate_windows_helper(powershell, updater._INSTALLED_HELPER)
+def test_the_helper_outlives_the_blinddl_that_started_it(tmp_path):
+    # The helper is started as blindDL is closing and does its work after
+    # blindDL has gone. A job object that kills its processes on close would
+    # take a plain child down with the parent, which is an update that does
+    # nothing at all and leaves nothing to say why.
+    helper = tmp_path / "helper.bat"
+    helper.write_text("@echo off\n", encoding="ascii")
+
+    with mock.patch.object(updater.os, "name", "nt"), \
+            mock.patch.object(updater.subprocess, "Popen") as popen:
+        updater._start_windows_helper(["cmd.exe", "/d", "/c", str(helper)])
+
+    flags = popen.call_args.kwargs["creationflags"]
+    assert flags & updater.CREATE_BREAKAWAY_FROM_JOB
+    assert flags & updater.CREATE_NEW_PROCESS_GROUP
+    assert flags & updater.CREATE_NO_WINDOW
+
+
+def test_a_job_that_forbids_breakaway_still_gets_a_helper(tmp_path):
+    helper = tmp_path / "helper.bat"
+    helper.write_text("@echo off\n", encoding="ascii")
+    refused = [OSError("breakaway not allowed"), mock.DEFAULT]
+
+    with mock.patch.object(updater.os, "name", "nt"), \
+            mock.patch.object(updater.subprocess, "Popen",
+                              side_effect=refused) as popen:
+        updater._start_windows_helper(["cmd.exe", "/d", "/c", str(helper)])
+
+    assert popen.call_count == 2
+    assert not (popen.call_args.kwargs["creationflags"]
+                & updater.CREATE_BREAKAWAY_FROM_JOB)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows filesystem semantics")
 def test_portable_helper_replaces_a_real_windows_folder(tmp_path):
     """Execute the boundary that text-only updater tests used to miss."""
     powershell = updater._find_windows_powershell()
+    shell = updater._find_windows_shell()
     system_exe = Path(os.environ["SystemRoot"]) / "System32" / "where.exe"
     assert system_exe.is_file()
     version = subprocess.run(
@@ -337,7 +401,7 @@ def test_portable_helper_replaces_a_real_windows_folder(tmp_path):
         ],
         input=str(system_exe),
         check=True, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=30,
+        errors="replace", timeout=60,
     ).stdout.strip()
     assert version
 
@@ -354,38 +418,88 @@ def test_portable_helper_replaces_a_real_windows_folder(tmp_path):
     unrelated.mkdir()
     (unrelated / "not-an-update.txt").write_text("leave me alone", encoding="utf-8")
 
-    helper = tmp_path / "finish-portable-update.ps1"
+    helper = updater._stage_windows_helper()
     result_path = tmp_path / "result.json"
-    updater._write_helper(helper, updater._PORTABLE_HELPER)
+    log_path = tmp_path / "helper.log"
     completed = subprocess.run(
         [
-            powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
-            "Bypass", "-File", str(helper), "-BlindDLPid", "2147483647",
-            "-Source", str(source), "-Target", str(target),
-            "-Result", str(result_path), "-Version", version,
+            shell, "/d", "/c", str(helper), "portable", "2147483647",
+            str(target), str(source), str(result_path), version,
+            str(log_path), powershell,
         ],
         cwd=updater._helper_cwd(), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=30,
+        encoding="utf-8", errors="replace", timeout=300,
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
     result = json.loads(result_path.read_text(encoding="utf-8-sig"))
     assert result["ok"] is True
     assert (target / "_internal" / "new-runtime.dll").read_bytes() == b"new"
+    # The swap is a swap: the file the new release does not ship is gone,
+    # rather than left behind beside its replacement.
     assert not (target / "_internal" / "old-runtime.dll").exists()
     assert (target / "my portable note.txt").read_text(encoding="utf-8") == "keep me"
     assert (unrelated / "not-an-update.txt").read_text(encoding="utf-8") == (
         "leave me alone"
     )
     assert not list(tmp_path.glob("*.blinddl-update-backup-*"))
+    # A helper that finished has nothing left to explain, so it takes its log
+    # and itself away.
+    assert not log_path.exists()
+    assert not helper.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows filesystem semantics")
+def test_the_portable_helper_puts_the_old_version_back_when_it_cannot_finish(tmp_path):
+    # The half-replaced folder is the one outcome worse than no update: it is
+    # a blindDL that will not start, on a machine whose owner asked only for
+    # a newer one.
+    powershell = updater._find_windows_powershell()
+    shell = updater._find_windows_shell()
+    system_exe = Path(os.environ["SystemRoot"]) / "System32" / "where.exe"
+    target = tmp_path / "app"
+    source = tmp_path / "stage" / "blindDL"
+    (target / "_internal").mkdir(parents=True)
+    (source / "_internal").mkdir(parents=True)
+    shutil.copy2(system_exe, target / "blindDL.exe")
+    shutil.copy2(system_exe, source / "blindDL.exe")
+    (target / "_internal" / "old-runtime.dll").write_bytes(b"old")
+
+    helper = updater._stage_windows_helper()
+    result_path = tmp_path / "result.json"
+    log_path = tmp_path / "helper.log"
+    completed = subprocess.run(
+        [
+            shell, "/d", "/c", str(helper), "portable", "2147483647",
+            str(target), str(source), str(result_path),
+            # A version the staged blindDL.exe cannot possibly be.
+            "9999.0.0", str(log_path), powershell,
+        ],
+        cwd=updater._helper_cwd(), capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=300,
+    )
+
+    assert completed.returncode == 1
+    result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    assert result["ok"] is False
+    assert "9999.0.0" in result["detail"]
+    # Everything that was there is there again.
+    assert (target / "blindDL.exe").is_file()
+    assert (target / "_internal" / "old-runtime.dll").read_bytes() == b"old"
+    # And the log is kept, because this time there is something in it.
+    assert log_path.is_file()
+    assert log_path.read_text(encoding="utf-8", errors="replace").strip()
+    helper.unlink(missing_ok=True)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell")
 def test_installed_helper_executes_and_verifies_the_target(tmp_path):
     powershell = updater._find_windows_powershell()
+    shell = updater._find_windows_shell()
     system_exe = Path(os.environ["SystemRoot"]) / "System32" / "where.exe"
-    target = tmp_path / "Installed BlindDL" / "blindDL.exe"
-    target.parent.mkdir()
+    install_dir = tmp_path / "Installed BlindDL"
+    install_dir.mkdir()
+    target = install_dir / "blindDL.exe"
     shutil.copy2(system_exe, target)
     version = subprocess.run(
         [
@@ -394,34 +508,34 @@ def test_installed_helper_executes_and_verifies_the_target(tmp_path):
             "(Get-Item -LiteralPath $path).VersionInfo.FileVersion",
         ],
         input=str(target), check=True, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=30,
+        encoding="utf-8", errors="replace", timeout=60,
     ).stdout.strip()
     installer = tmp_path / "successful installer.cmd"
     installer.write_text("@echo off\nexit /b 0\n", encoding="ascii")
-    helper = tmp_path / "finish-installed-update.ps1"
+    helper = updater._stage_windows_helper()
     result_path = tmp_path / "installed-result.json"
-    updater._write_helper(helper, updater._INSTALLED_HELPER)
+    log_path = tmp_path / "installed.log"
 
     completed = subprocess.run(
         [
-            powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
-            "Bypass", "-File", str(helper), "-BlindDLPid", "2147483647",
-            "-Installer", str(installer), "-Target", str(target),
-            "-Result", str(result_path), "-Version", version,
+            shell, "/d", "/c", str(helper), "installed", "2147483647",
+            str(install_dir), str(installer), str(result_path), version,
+            str(log_path), powershell,
         ],
         cwd=updater._helper_cwd(), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=30,
+        encoding="utf-8", errors="replace", timeout=300,
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
     result = json.loads(result_path.read_text(encoding="utf-8-sig"))
     assert result["ok"] is True
     assert result["version"] == version
+    helper.unlink(missing_ok=True)
 
 
 def test_the_update_helper_does_not_stand_in_its_own_way(tmp_path):
     # A child process inherits blindDL's working directory, and a portable
-    # blindDL runs from the folder an update has to rename. Windows holds a
+    # blindDL runs from the folder an update has to empty. Windows holds a
     # directory open for whichever process has it as its current one, so the
     # helper used to arrive already blocking the only thing it was there to
     # do -- on every machine, every time, with nothing else wrong.
@@ -435,9 +549,8 @@ def test_the_update_helper_does_not_stand_in_its_own_way(tmp_path):
             mock.patch.object(updater.sys, "executable",
                               str(installed / "blindDL.exe")), \
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
             mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
@@ -445,10 +558,16 @@ def test_the_update_helper_does_not_stand_in_its_own_way(tmp_path):
     assert started_in != installed.resolve()
     assert installed.resolve() not in started_in.parents
     assert started_in.is_dir()
+    helper = _staged_helper(popen)
+    try:
+        script = helper.read_text(encoding="ascii")
+    finally:
+        helper.unlink(missing_ok=True)
     # And again from inside, for a helper that was started some other way.
-    script = (tmp_path / "finish-portable-update.ps1").read_text(
-        encoding="utf-8-sig")
-    assert "[System.IO.Directory]::SetCurrentDirectory($Elsewhere)" in script
+    assert 'pushd "%TEMP%"' in script
+    # The helper is not in the folder it empties either: a batch file cannot
+    # be deleted out from under itself.
+    assert installed.resolve() not in helper.resolve().parents
 
 
 def test_the_installed_helper_also_runs_clear_of_the_install(tmp_path):
@@ -462,14 +581,14 @@ def test_the_installed_helper_also_runs_clear_of_the_install(tmp_path):
             mock.patch.object(updater.sys, "executable",
                               str(installed / "blindDL.exe")), \
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
             mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
     started_in = Path(popen.call_args.kwargs["cwd"]).resolve()
     assert installed.resolve() not in (started_in, *started_in.parents)
+    _staged_helper(popen).unlink(missing_ok=True)
 
 
 def test_a_read_only_install_folder_is_not_mistaken_for_a_running_blinddl(tmp_path):
@@ -478,21 +597,8 @@ def test_a_read_only_install_folder_is_not_mistaken_for_a_running_blinddl(tmp_pa
     # unelevated helper may not open anything that way -- and the answer
     # "access denied" is not the answer "still running", which is what it was
     # taken for: five minutes of waiting and then a failure, every time.
-    package = tmp_path / "blindDL-Setup-v9.9.9-windows-x64.exe"
-    package.write_bytes(b"installer")
-    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
-
-    with mock.patch.object(updater.sys, "platform", "win32"), \
-            mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
-            mock.patch.object(updater.subprocess, "Popen"):
-        assert updater.install_app_update(update, package)
-
-    script = (tmp_path / "finish-installed-update.ps1").read_text(
-        encoding="utf-8-sig")
-    assert "catch [System.UnauthorizedAccessException]" in script
+    assert "catch [System.UnauthorizedAccessException] { $ok=$true }" in (
+        updater._WINDOWS_HELPER)
 
 
 def test_a_local_deb_is_installed_by_a_path_pkexec_cannot_lose(tmp_path):
@@ -582,21 +688,20 @@ def test_automatic_checks_keep_a_failure_until_a_manual_retry(tmp_path):
 
 
 def test_a_helper_that_cannot_start_leaves_a_specific_failure(tmp_path):
-    helper = tmp_path / "finish-portable-update.ps1"
-    helper.write_text("param()\n", encoding="utf-8")
     with mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
-            mock.patch.object(updater, "_find_windows_powershell",
-                              return_value="powershell.exe"), \
-            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
             mock.patch.object(updater.subprocess, "Popen",
                               side_effect=OSError("blocked by policy")):
         with pytest.raises(updater.UpdateError, match="could not start"):
             updater._launch_windows_helper(
-                helper, "param()\n", [], "9.9.9"
-            )
+                "portable", tmp_path / "app", tmp_path / "stage", "9.9.9")
         spoken = updater.last_update_failure()
 
     assert "blocked by policy" in spoken
+    for leftover in Path(tempfile.gettempdir()).glob(
+            "blindDL-update-helper-*.bat"):
+        leftover.unlink(missing_ok=True)
 
 
 def test_an_update_that_worked_says_nothing(tmp_path):

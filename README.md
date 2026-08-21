@@ -73,10 +73,18 @@ prompt; a read-only location must be copied somewhere writable first. Windows
 on ARM uses the published x64 build through Windows compatibility support.
 
 The portable ZIP uses the same automatic background setup as the installer.
-If a post-exit update fails, BlindDL reports the reason on the next start and
-keeps the verified download for Help, Check for updates to retry. Technical
-helper output, when Windows produced any, is in
-`%APPDATA%\blindDL\updates\vX.Y.Z\windows-update-helper.log`.
+The update itself is applied by a small helper that outlives BlindDL: it waits
+for BlindDL and anything it started to close, moves the old files out of the
+folder, moves the new ones in, puts back anything of yours the release does not
+ship, and starts BlindDL again. It moves the folder's contents and never renames
+the folder -- a sync client, an open Explorer window, or the search indexer
+holds a folder open without holding any file inside it, and a rename then fails
+for as long as they are watching.
+If a post-exit update fails, the old version is put back, BlindDL reports the
+reason on the next start, and the verified download is kept for Help, Check for
+updates to retry. Technical helper output, when there was any, is in
+`%APPDATA%\blindDL\updates\windows-update-helper.log`; a successful
+update leaves no log behind.
 
 For a one-time manual recovery from an older updater, close BlindDL, extract
 the new ZIP into a **new empty folder**, and run its `blindDL.exe`. Do not merge

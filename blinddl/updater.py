@@ -33,6 +33,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -131,6 +132,12 @@ _external_tools_lock = threading.Lock()
 _install_attempted: set[str] = set()
 
 CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+# Without this the helper is a child of blindDL for as long as it runs,
+# and a job object that kills its processes on close takes the helper
+# down with the blindDL that started it -- an update that does nothing
+# at all, with nothing to show for it.
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
 # Written by the Windows helper scripts once they have finished, win or lose,
 # and read on the next start. An update that dies between two processes has
@@ -164,7 +171,7 @@ class AppUpdate:
     checksum_url: str
 
 
-def _subprocess_options():
+def _subprocess_options() -> dict[str, Any]:
     """Return subprocess flags that exist on the current operating system."""
     if os.name == "nt":
         return {"creationflags": CREATE_NO_WINDOW}
@@ -460,264 +467,261 @@ def _safe_extract_zip(archive, destination):
                 shutil.copyfileobj(source, output)
 
 
-# Both Windows helpers outlive blindDL itself: they wait for it to close,
-# change the files it was running from, and start it again. Everything they
-# share lives here -- above all Save, which records the outcome whether the
-# update took or not. A helper that wrote a log only on failure left a failed
-# update indistinguishable from one that never ran, which is exactly what a
-# self-update that "does nothing, with no error" is.
-_HELPER_COMMON = r"""
-$ErrorActionPreference = 'Stop'
-$Steps = New-Object System.Collections.ArrayList
+# The Windows update helper, which outlives blindDL itself: it waits for
+# blindDL to close, replaces the files it was running from, and starts it
+# again. It is the helper BlindRSS uses, and it is a batch file for the
+# reason BlindRSS made it one -- the work is done by robocopy, which moves a
+# folder's *contents* and so never has to rename the folder.
+#
+# That distinction is the whole fix. A sync client, an open Explorer window,
+# or a search indexer holds a *directory* open without holding any file
+# inside it, and a rename of that directory then fails for as long as they
+# are watching it -- which, for the folder blindDL lives in, is always.
+# Three releases running tried to make the rename work: wait longer for
+# blindDL to let go, retry the rename for a minute, start the helper from
+# somewhere else. The folder was never the thing that had to move.
+#
+# blindDL is still what reports the outcome, so the helper writes the same
+# last-update-result.json the PowerShell helpers wrote, and keeps its log
+# only when there is something in it worth reading.
+_WINDOWS_HELPER = r"""@echo off
+rem blindDL writes this file as it starts an update and then exits. It runs
+rem from %TEMP%, never from the folder it replaces: Windows holds a directory
+rem open for whichever process has it as its current one, so a helper started
+rem in place arrives already blocking the only job it came to do.
+setlocal enabledelayedexpansion
 
-# A process holds its own working directory open, and a portable blindDL
-# starts in the folder it lives in -- the folder this script has to rename.
-# The helper inherits that directory when blindDL starts it, so the rename
-# used to fail against nothing but the script performing it: "the process
-# cannot access the file because it is being used by another process", every
-# time, on a machine where nothing else was wrong. blindDL starts the helper
-# elsewhere now; this is the same move made from inside, for a helper that
-# was started some other way.
-$Elsewhere = if ($env:SystemRoot) { $env:SystemRoot }
-             else { [System.IO.Path]::GetTempPath() }
-Set-Location -LiteralPath $Elsewhere
-[System.IO.Directory]::SetCurrentDirectory($Elsewhere)
+set "MODE=%~1"
+set "BLINDDL_PID=%~2"
+set "INSTALL_DIR=%~3"
+set "SOURCE=%~4"
+set "BLINDDL_RESULT=%~5"
+set "BLINDDL_VERSION=%~6"
+set "BLINDDL_LOG=%~7"
+set "PS=%~8"
 
-function Note([string]$Text) { [void]$Steps.Add($Text) }
+if "%PS%"=="" set "PS=powershell.exe"
+set "EXE_NAME=blindDL.exe"
+set "EXE=%INSTALL_DIR%\%EXE_NAME%"
+set "BACKUP_DIR="
+set "DETAIL="
 
-function Save([bool]$Ok, [string]$Detail) {
-  try {
-    $folder = Split-Path -Parent $Result
-    if (-not (Test-Path -LiteralPath $folder)) {
-      New-Item -ItemType Directory -Path $folder -Force | Out-Null
-    }
-    [ordered]@{
-      status = 'complete'
-      ok = $Ok
-      version = $Version
-      detail = $Detail
-      steps = @($Steps)
-      log = $Log
-    } |
-      ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Result -Encoding UTF8
-  } catch { }
-}
+call :main >> "%BLINDDL_LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+rem The log is kept only when it has something to explain. blindDL names it
+rem to the user when an update fails, so one left behind by an update that
+rem worked would send them off to read about a failure that never happened.
+if "%RC%"=="0" del /f /q "%BLINDDL_LOG%" >nul 2>nul
+rem blindDL is started out here rather than inside :main, and after that
+rem delete rather than before it: a process started while the log is being
+rem written to inherits the handle it is written through, and blindDL runs
+rem for hours. The log of a perfectly good update would have been undeletable
+rem for as long as the blindDL it produced was running.
+call :restart
+if not "%RC%"=="0" exit /b %RC%
+rem End the batch context before deleting this copy of the helper, so cmd
+rem does not go looking for its next line in a file that is gone. It costs
+rem the exit code, which is why it happens only once there is nothing left
+rem to report: a helper that failed keeps both its log and itself.
+(goto) 2>nul & del /f /q "%~f0" >nul 2>nul
+exit /b 0
 
-function Get-Reason($Record) {
-  $problem = $Record.Exception
-  while ($problem.InnerException) { $problem = $problem.InnerException }
-  return $problem.Message
-}
+:main
+echo [blindDL update] mode %MODE%, version %BLINDDL_VERSION%
+echo [blindDL update] install "%INSTALL_DIR%"
+echo [blindDL update] source "%SOURCE%"
+if exist "%TEMP%\." (
+    pushd "%TEMP%" >nul 2>nul
+) else (
+    if exist "%SystemRoot%\." pushd "%SystemRoot%" >nul 2>nul
+)
 
-function Get-VersionKey([string]$Text) {
-  $found = @([regex]::Matches($Text, '\d+') | ForEach-Object { [int]$_.Value })
-  $key = @(0, 0, 0)
-  for ($i = 0; $i -lt 3 -and $i -lt $found.Count; $i++) { $key[$i] = $found[$i] }
-  return ($key -join '.')
-}
+if "%MODE%"=="" goto :arguments_missing
+if "%INSTALL_DIR%"=="" goto :arguments_missing
+if "%SOURCE%"=="" goto :arguments_missing
+if "%BLINDDL_RESULT%"=="" goto :arguments_missing
 
-function Read-InstalledVersion([string]$Path) {
-  try { return [string](Get-Item -LiteralPath $Path).VersionInfo.FileVersion }
-  catch { return '' }
-}
+call :wait_for_exit
+if errorlevel 1 (
+    set "DETAIL=blindDL was still running when the update tried to start"
+    goto :fail
+)
 
-# Waiting on the process id alone is not enough. Windows keeps blindDL.exe
-# mapped for a moment after it exits, and an antivirus scan of a freshly
-# closed executable holds it for longer than that, so the first write could
-# fail against a program that had already gone. The file is what has to be
-# free, so the file is what gets asked.
-function Wait-ForRelease([string]$Path) {
-  $deadline = (Get-Date).AddMinutes(5)
-  while ((Get-Date) -lt $deadline) {
-    if (-not (Get-Process -Id $BlindDLPid -ErrorAction SilentlyContinue)) {
-      try {
-        $handle = [System.IO.File]::Open($Path, 'Open', 'ReadWrite', 'None')
-        $handle.Close()
-        return $true
-      } catch [System.UnauthorizedAccessException] {
-        # An installed blindDL lives under Program Files, where this script
-        # runs without the rights to open anything for writing. The question
-        # cannot be answered there, and asking it forever meant an installed
-        # blindDL waited out the full five minutes and then reported itself
-        # still running. The process is gone; the elevated installer that
-        # follows is the one equipped to deal with a file still in use.
-        return $true
-      } catch { }
-    }
-    Start-Sleep -Milliseconds 250
-  }
-  return $false
-}
+if /I "%MODE%"=="installed" goto :installed_update
+
+:portable_update
+if not exist "%SOURCE%\%EXE_NAME%" (
+    set "DETAIL=the staged update does not contain blindDL.exe"
+    goto :fail
+)
+call :wait_for_unlock
+if errorlevel 1 (
+    set "DETAIL=the files in the blindDL folder were still in use"
+    goto :fail
+)
+
+set "BACKUP_DIR=%INSTALL_DIR%.blinddl-update-backup-%RANDOM%%RANDOM%"
+if exist "%BACKUP_DIR%\." rmdir /s /q "%BACKUP_DIR%" >nul 2>nul
+
+rem A blindDL that has just closed can leave one of its own DLLs held for a
+rem second or two by a virus scanner or the search indexer, and robocopy
+rem /MOVE will copy such a file but fail to delete the original. /R retries
+rem the copy, not the delete, so the whole move is repeated a few times
+rem before a file left behind is taken for a failure.
+set "ATTEMPT=0"
+:drain_attempt
+set /a ATTEMPT+=1
+echo [blindDL update] Moving the old blindDL files aside, attempt !ATTEMPT!
+robocopy "%INSTALL_DIR%" "%BACKUP_DIR%" /E /MOVE /R:10 /W:2 /NFL /NDL /NJH /NJS /NP
+if errorlevel 8 (
+    set "DETAIL=the old blindDL files could not be moved aside"
+    goto :rollback
+)
+call :verify_drained
+if not errorlevel 1 goto :drained
+if !ATTEMPT! geq 5 (
+    set "DETAIL=some of the old blindDL files stayed in use and could not be replaced"
+    goto :rollback
+)
+"%PS%" -NoProfile -InputFormat None -Command "Start-Sleep -Seconds 2" >nul 2>nul
+goto :drain_attempt
+:drained
+
+echo [blindDL update] Putting the new blindDL files in place
+robocopy "%SOURCE%" "%INSTALL_DIR%" /E /MOVE /R:10 /W:2 /NFL /NDL /NJH /NJS /NP
+if errorlevel 8 (
+    set "DETAIL=the new blindDL files could not be put in place"
+    goto :rollback
+)
+if not exist "%EXE%" (
+    set "DETAIL=the new blindDL folder arrived without blindDL.exe"
+    goto :rollback
+)
+
+call :restore_extras
+call :verify_version
+if errorlevel 1 (
+    set "DETAIL=the folder does not hold blindDL %BLINDDL_VERSION% after the update"
+    goto :rollback
+)
+
+rmdir /s /q "%BACKUP_DIR%" >nul 2>nul
+if exist "%BACKUP_DIR%\." echo [blindDL update] The previous version is still on disk at "%BACKUP_DIR%"
+call :save 1 ""
+exit /b 0
+
+:installed_update
+if not exist "%SOURCE%" (
+    set "DETAIL=the downloaded blindDL installer is missing"
+    goto :fail
+)
+call :wait_for_unlock
+echo [blindDL update] Running the blindDL installer
+rem Called, not started. "start /wait" hands the program to a second cmd, and
+rem a second cmd given a script rather than a program opens a window that
+rem stays open -- an update that waits on a console nobody can see. call
+rem waits for either kind and hands back its exit code.
+call "%SOURCE%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="%INSTALL_DIR%"
+if errorlevel 1 (
+    set "DETAIL=the blindDL installer did not finish successfully"
+    goto :fail
+)
+if not exist "%EXE%" (
+    set "DETAIL=the installer finished but blindDL.exe is gone"
+    goto :fail
+)
+call :verify_version
+if errorlevel 1 (
+    set "DETAIL=blindDL %BLINDDL_VERSION% is not the version that is now installed"
+    goto :fail
+)
+call :save 1 ""
+exit /b 0
+
+:rollback
+echo [blindDL update] Putting the previous blindDL back
+if not "%BACKUP_DIR%"=="" if exist "%BACKUP_DIR%\." (
+    rem Copied back, not moved. Whatever refused the move in the first place
+    rem must not be given the chance to consume the only copy of the version
+    rem that was working.
+    robocopy "%BACKUP_DIR%" "%INSTALL_DIR%" /E /R:5 /W:2 /NFL /NDL /NJH /NJS /NP
+    if errorlevel 8 echo [blindDL update] The previous blindDL could not be put back. It is at "%BACKUP_DIR%"
+)
+goto :fail
+
+:arguments_missing
+set "DETAIL=the update helper was started without the information it needs"
+goto :fail
+
+:fail
+if "%DETAIL%"=="" set "DETAIL=the update did not finish"
+echo [blindDL update] %DETAIL%
+call :save 0 "%DETAIL%"
+exit /b 1
+
+rem Waiting on blindDL's own process id is not enough. blindDL starts helpers
+rem of its own out of the same folder, and any one of them still running
+rem holds files this update has to replace, so everything running from the
+rem install folder is waited for, asked to close, and finally stopped.
+:wait_for_exit
+echo [blindDL update] Waiting for blindDL to close
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $install=([IO.Path]::GetFullPath([string]$env:INSTALL_DIR)).TrimEnd('\')+'\'; function Owned { $items=@(Get-Process | Where-Object { try { ([IO.Path]::GetFullPath([string]$_.Path)).StartsWith($install,[StringComparison]::OrdinalIgnoreCase) } catch { $false } }); $id=0; if ([int]::TryParse([string]$env:BLINDDL_PID,[ref]$id)) { $known=Get-Process -Id $id -ErrorAction SilentlyContinue; if ($known) { $items+=$known } }; @($items | Sort-Object Id -Unique) };function Gone([int]$s) { $end=(Get-Date).AddSeconds($s); while ((Get-Date) -lt $end) { if (@(Owned).Count -eq 0) { return $true }; Start-Sleep -Milliseconds 400 }; return (@(Owned).Count -eq 0) }; if (-not (Gone 30)) { foreach ($p in Owned) { try { $null=$p.CloseMainWindow() } catch { } } }; if (-not (Gone 15)) { foreach ($p in Owned) { Write-Host ('Stopping ' + $p.ProcessName + ' ' + $p.Id); Stop-Process -Id $p.Id -Force } }; if (-not (Gone 15)) { Write-Host ('Still running from the blindDL folder: ' + ((Owned | ForEach-Object { $_.ProcessName + ' ' + $_.Id }) -join ', ')); exit 1 }; Start-Sleep -Milliseconds 1500; exit 0"
+exit /b %ERRORLEVEL%
+
+rem Windows keeps an executable mapped for a moment after the process that
+rem ran it exits, and a virus scanner reading a freshly closed program holds
+rem it for longer than that. The files are what have to be free, so the files
+rem are what get asked.
+:wait_for_unlock
+echo [blindDL update] Waiting for the blindDL files to be released
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $install=[string]$env:INSTALL_DIR; $paths=@(Join-Path $install ([string]$env:EXE_NAME)); $inner=Join-Path $install '_internal'; if (Test-Path -LiteralPath $inner) { $paths += @(Get-ChildItem -LiteralPath $inner -File -Filter *.dll | ForEach-Object FullName) }; $held=@(); foreach ($path in $paths) { if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }; $ok=$false; for ($i=0; $i -lt 20 -and -not $ok; $i++) { try { $handle=[IO.File]::Open($path,'Open','ReadWrite','None'); $handle.Close(); $ok=$true } catch [System.UnauthorizedAccessException] { $ok=$true } catch { Start-Sleep -Milliseconds 500 } }; if (-not $ok) { $held += $path } }; if ($held.Count -gt 0) { Write-Host 'Still held:'; $held | ForEach-Object { Write-Host $_ }; exit 1 }; exit 0"
+exit /b %ERRORLEVEL%
+
+:verify_drained
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $install=[string]$env:INSTALL_DIR; $left=@(Get-ChildItem -LiteralPath $install -File -Recurse -Force | Select-Object -First 5); if ($left.Count -gt 0) { Write-Host 'Files left in the blindDL folder:'; $left | ForEach-Object { Write-Host $_.FullName }; exit 1 }; exit 0"
+exit /b %ERRORLEVEL%
+
+rem Anything the folder held that the release does not ship is the user's own
+rem -- a tool dropped in beside blindDL, a file saved there -- and comes back.
+rem Only what sat at the top level: _internal belongs to the release, and
+rem merging the old one into the new is how a blindDL that was replaced still
+rem starts as the version it was.
+:restore_extras
+if not exist "%BACKUP_DIR%\." exit /b 0
+for /f "delims=" %%I in ('dir /b /a "%BACKUP_DIR%" 2^>nul') do (
+    if not exist "%INSTALL_DIR%\%%I" (
+        if exist "%BACKUP_DIR%\%%I\" (
+            robocopy "%BACKUP_DIR%\%%I" "%INSTALL_DIR%\%%I" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+        ) else (
+            copy /y "%BACKUP_DIR%\%%I" "%INSTALL_DIR%\%%I" >nul
+        )
+        echo [blindDL update] Kept %%I from the old folder
+    )
+)
+exit /b 0
+
+:verify_version
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $exe=Join-Path ([string]$env:INSTALL_DIR) ([string]$env:EXE_NAME); $found=''; try { $found=[string](Get-Item -LiteralPath $exe).VersionInfo.FileVersion } catch { }; if (-not $found) { Write-Host 'The new blindDL.exe has no readable version information.'; exit 1 }; function Key([string]$t) { $n=@([regex]::Matches($t,'\d+') | ForEach-Object { [int]$_.Value }); $k=@(0,0,0); for ($i=0; $i -lt 3 -and $i -lt $n.Count; $i++) { $k[$i]=$n[$i] }; return ($k -join '.') }; if ((Key $found) -ne (Key ([string]$env:BLINDDL_VERSION))) { Write-Host ('The folder holds blindDL ' + $found + ', not ' + [string]$env:BLINDDL_VERSION); exit 1 }; exit 0"
+exit /b %ERRORLEVEL%
+
+:save
+set "BLINDDL_OK=%~1"
+set "BLINDDL_DETAIL=%~2"
+"%PS%" -NoProfile -InputFormat None -Command "$path=[string]$env:BLINDDL_RESULT; $folder=Split-Path -Parent $path; if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }; [ordered]@{ status='complete'; ok=($env:BLINDDL_OK -eq '1'); version=[string]$env:BLINDDL_VERSION; detail=[string]$env:BLINDDL_DETAIL; log=[string]$env:BLINDDL_LOG } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $path -Encoding UTF8"
+exit /b 0
+
+rem Reached from the epilogue, after the log has been closed and possibly
+rem deleted, so the one line this can have to say goes to the log by name.
+rem It writes the log back into existence when it has to, which is right:
+rem there is something to read in it again.
+:restart
+if not exist "%EXE%" (
+    echo [blindDL update] blindDL.exe is missing, so blindDL could not be started again >> "%BLINDDL_LOG%"
+    exit /b 1
+)
+start "" /d "%INSTALL_DIR%" "%EXE%"
+exit /b 0
 """
-
-
-# The portable update swaps whole folders instead of copying the new files
-# over the old ones. Copy-Item merges, and a merge keeps every file the new
-# release dropped: after a Python upgrade the folder holds both runtimes and
-# the extension modules of both, which is how a portable blindDL can be
-# replaced and still start as the version it was.
-_PORTABLE_HELPER = (
-    "param([int]$BlindDLPid, [string]$Source, [string]$Target,\n"
-    "      [string]$Result, [string]$Version, [string]$Log)\n"
-    + _HELPER_COMMON
-    + r"""
-$Exe = Join-Path $Target 'blindDL.exe'
-$Backup = $Target + '.blinddl-update-backup-' + [guid]::NewGuid().ToString('N')
-
-function Restart-BlindDL {
-  if (-not (Test-Path -LiteralPath $Exe)) {
-    throw 'blindDL.exe is missing, so BlindDL could not be restarted.'
-  }
-  Start-Process -FilePath $Exe -WorkingDirectory $Target
-}
-
-function Move-Folder([string]$From, [string]$To) {
-  [System.IO.Directory]::Move($From, $To)
-}
-
-# A virus scanner reading the executable blindDL just closed, or an Explorer
-# window left sitting in the folder, holds it for a few seconds. Giving up on
-# the first refusal turns a moment's contention into an update that never
-# happens, so the folder is asked for repeatedly before the answer is taken
-# as final. Only used where both ends are on the same volume: a cross-volume
-# move fails the same way every time, and has a copy waiting for it instead.
-function Move-FolderSoon([string]$From, [string]$To) {
-  $deadline = (Get-Date).AddSeconds(60)
-  while ($true) {
-    try { Move-Folder $From $To; return }
-    catch [System.UnauthorizedAccessException] { throw }
-    catch {
-      if ((Get-Date) -ge $deadline) { throw }
-      Start-Sleep -Milliseconds 500
-    }
-  }
-}
-
-function Undo-Swap {
-  try {
-    if (Test-Path -LiteralPath $Target) {
-      Remove-Item -LiteralPath $Target -Recurse -Force
-    }
-    if (Test-Path -LiteralPath $Backup) {
-      Move-FolderSoon $Backup $Target
-      Note 'Put the previous blindDL back.'
-    }
-  } catch {
-    Note ('The previous blindDL could not be put back: ' + (Get-Reason $_))
-  }
-}
-
-if (-not (Wait-ForRelease $Exe)) {
-  Save $false 'blindDL was still holding its own files five minutes after it closed.'
-  Restart-BlindDL
-  exit 1
-}
-
-try {
-  Move-FolderSoon $Target $Backup
-  Note 'Moved the old blindDL folder aside.'
-} catch {
-  Save $false ('The old blindDL folder is in use and could not be replaced: ' +
-    (Get-Reason $_))
-  Restart-BlindDL
-  exit 1
-}
-
-try {
-  try {
-    # A rename when the staged folder shares a volume with the install,
-    # a copy when it does not.
-    Move-Folder $Source $Target
-  } catch {
-    New-Item -ItemType Directory -Path $Target -Force | Out-Null
-    Get-ChildItem -LiteralPath $Source -Force | Copy-Item `
-      -Destination $Target -Recurse -Force
-  }
-  if (-not (Test-Path -LiteralPath $Exe)) {
-    throw 'The new blindDL folder arrived without blindDL.exe.'
-  }
-  Note 'Put the new blindDL folder in place.'
-  # Anything the folder held that the release does not ship is the user's own
-  # -- a tool dropped in beside blindDL, a file saved there -- and comes back.
-  Get-ChildItem -LiteralPath $Backup -Force | ForEach-Object {
-    $kept = Join-Path $Target $_.Name
-    if (-not (Test-Path -LiteralPath $kept)) {
-      Copy-Item -LiteralPath $_.FullName -Destination $kept -Recurse -Force
-      Note ('Kept ' + $_.Name + ' from the old folder.')
-    }
-  }
-  $installed = Read-InstalledVersion $Exe
-  if (-not $installed) {
-    throw 'The new blindDL.exe has no readable version information.'
-  }
-  if ((Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
-    throw ('The folder now holds blindDL ' + $installed + ', not ' + $Version + '.')
-  }
-} catch {
-  $why = Get-Reason $_
-  Undo-Swap
-  Save $false $why
-  Restart-BlindDL
-  exit 1
-}
-
-try {
-  Remove-Item -LiteralPath $Backup -Recurse -Force
-} catch {
-  Note 'The previous version is still on disk beside the new one.'
-}
-Save $true ''
-try {
-  Restart-BlindDL
-} catch {
-  Save $false ('blindDL was updated but could not be restarted: ' + (Get-Reason $_))
-  exit 1
-}
-""")
-
-
-# The installed build hands the work to Inno Setup, so what is left to get
-# right is waiting for the old blindDL to let go, noticing a non-zero exit
-# code, and confirming that the version on disk actually moved.
-_INSTALLED_HELPER = (
-    "param([int]$BlindDLPid, [string]$Installer, [string]$Target,\n"
-    "      [string]$Result, [string]$Version, [string]$Log)\n"
-    + _HELPER_COMMON
-    + r"""
-if (-not (Wait-ForRelease $Target)) {
-  Save $false 'blindDL was still running five minutes after it closed.'
-  if (Test-Path -LiteralPath $Target) { Start-Process -FilePath $Target }
-  exit 1
-}
-
-try {
-  $Run = Start-Process -FilePath $Installer -ArgumentList '/VERYSILENT',
-    '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
-  if ($Run.ExitCode -ne 0) {
-    throw ('The blindDL installer stopped with exit code ' + $Run.ExitCode + '.')
-  }
-  if (-not (Test-Path -LiteralPath $Target)) {
-    throw 'The installer finished but blindDL.exe is gone.'
-  }
-  $installed = Read-InstalledVersion $Target
-  if (-not $installed) {
-    throw 'The installed blindDL.exe has no readable version information.'
-  }
-  if ((Get-VersionKey $installed) -ne (Get-VersionKey $Version)) {
-    throw ('blindDL ' + $installed + ' is still installed, not ' + $Version + '.')
-  }
-  Save $true ''
-} catch {
-  Save $false (Get-Reason $_)
-}
-try {
-  Start-Process -FilePath $Target
-} catch {
-  Save $false ('The update finished but blindDL could not be restarted: ' +
-    (Get-Reason $_))
-  exit 1
-}
-""")
 
 
 def _update_result_path():
@@ -847,9 +851,47 @@ def _helper_cwd():
 
 
 def _write_helper(path, script):
-    # Windows PowerShell reads a .ps1 in the active code page unless the file
-    # says otherwise, so the BOM is what keeps the script's own text intact.
-    path.write_text(script, encoding="utf-8-sig")
+    # cmd.exe reads a .bat byte by byte in the console code page and takes a
+    # UTF-8 BOM for part of the first command, so the file is plain ASCII with
+    # Windows line endings. Every path it works on reaches it as an argument,
+    # never as text inside the file, so nothing is lost by that.
+    path.write_text(script, encoding="ascii", newline="\r\n")
+
+
+def _stage_windows_helper():
+    """Write the helper somewhere nothing it deletes can contain it.
+
+    Not beside the staged update: the helper's last act is to hand blindDL a
+    folder it can delete, and a batch file cannot delete the folder it is
+    running from. A uniquely named copy in the temp folder can delete itself
+    on the way out, which is what the last line of it does.
+    """
+    handle, name = tempfile.mkstemp(
+        prefix="blindDL-update-helper-", suffix=".bat")
+    os.close(handle)
+    helper = Path(name)
+    _write_helper(helper, _WINDOWS_HELPER)
+    return helper
+
+
+def _find_windows_shell():
+    """Return the command processor that runs the post-exit helper."""
+    candidates = [os.environ.get("COMSPEC") or ""]
+    windows = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or ""
+    if windows:
+        candidates.append(str(Path(windows) / "System32" / "cmd.exe"))
+    candidates.append(shutil.which("cmd.exe") or "")
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    # Unit tests exercise Windows selection on non-Windows builders with the
+    # process launch mocked. A real Windows run must resolve an actual shell.
+    if os.name != "nt":
+        return "cmd.exe"
+    raise UpdateError(
+        "The Windows command processor is unavailable, so BlindDL cannot "
+        "finish the update."
+    )
 
 
 def _find_windows_powershell():
@@ -878,24 +920,13 @@ def _find_windows_powershell():
     )
 
 
-def _validate_windows_helper(powershell, script):
-    """Prove the selected host starts and parses *script* before BlindDL exits."""
-    if os.name != "nt":
-        return
-    command = [
-        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-Command", "[void][ScriptBlock]::Create([Console]::In.ReadToEnd())",
-    ]
-    try:
-        completed = subprocess.run(
-            command, input=script, capture_output=True, text=True, timeout=30,
-            encoding="utf-8", errors="replace", **_subprocess_options(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise UpdateError(f"Windows PowerShell could not start: {exc}") from exc
-    if completed.returncode:
-        detail = (completed.stderr or completed.stdout or "unknown parse error").strip()
-        raise UpdateError(f"The Windows update helper is invalid: {detail}")
+def _windows_update_hosts():
+    """The two programs the helper needs, resolved while BlindDL is still up.
+
+    Whichever of them is missing, the answer has to arrive before BlindDL
+    closes: afterwards there is nothing left to say it to.
+    """
+    return _find_windows_shell(), _find_windows_powershell()
 
 
 def _portable_update_needs_elevation(target):
@@ -927,14 +958,14 @@ def _portable_update_needs_elevation(target):
                 shutil.rmtree(leftover, ignore_errors=True)
 
 
-def _start_elevated_windows_helper(powershell, arguments):
-    """Start *powershell* with UAC and fail without closing on cancellation."""
+def _start_elevated_windows_helper(shell, arguments):
+    """Start *shell* with UAC and fail without closing on cancellation."""
     import ctypes  # noqa: PLC0415 - Windows-only standard library
 
     shell_execute = ctypes.windll.shell32.ShellExecuteW
     shell_execute.restype = ctypes.c_void_p
     result = shell_execute(
-        None, "runas", powershell, subprocess.list2cmdline(arguments),
+        None, "runas", shell, subprocess.list2cmdline(arguments),
         _helper_cwd(), 0,
     )
     code = int(result or 0)
@@ -945,11 +976,50 @@ def _start_elevated_windows_helper(powershell, arguments):
         )
 
 
-def _launch_windows_helper(helper, script, arguments, version, *, elevated=False):
-    """Validate and launch a helper, leaving a diagnostic if it disappears."""
-    powershell = _find_windows_powershell()
-    _validate_windows_helper(powershell, script)
-    log_path = helper.parent / WINDOWS_UPDATE_LOG_NAME
+def _start_windows_helper(command):
+    """Start the helper so BlindDL's own exit cannot take it down with it."""
+    options = {
+        "cwd": _helper_cwd(),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name != "nt":
+        subprocess.Popen(command, **options)
+        return
+    flags = (CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+             | CREATE_BREAKAWAY_FROM_JOB)
+    try:
+        subprocess.Popen(command, creationflags=flags, **options)
+    except OSError:
+        # A job object can forbid breakaway outright, and asking for it there
+        # fails the launch rather than the flag. Better a helper that shares
+        # BlindDL's fate than no helper at all.
+        subprocess.Popen(
+            command, creationflags=flags & ~CREATE_BREAKAWAY_FROM_JOB,
+            **options,
+        )
+
+
+def _launch_windows_helper(mode, install_dir, source, version, *,
+                           elevated=False):
+    """Write the helper, start it, and leave a note if it never reports back.
+
+    The helper's arguments are positional and in this order: mode, BlindDL's
+    process id, the folder BlindDL runs from, the staged folder or installer,
+    the result file, the version being installed, the log, and the PowerShell
+    to use for the few things a batch file cannot do itself.
+    """
+    shell, powershell = _windows_update_hosts()
+    log_path = Path(app_data_dir()) / "updates" / WINDOWS_UPDATE_LOG_NAME
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    helper = _stage_windows_helper()
+    arguments = [
+        mode, str(os.getpid()), str(install_dir), str(source),
+        str(_update_result_path()), str(version), str(log_path),
+        str(powershell),
+    ]
     _write_update_result({
         "status": "pending",
         "ok": False,
@@ -957,21 +1027,13 @@ def _launch_windows_helper(helper, script, arguments, version, *, elevated=False
         "detail": "",
         "log": str(log_path),
     })
-    command_arguments = [
-        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-File", str(helper), *arguments, "-Log", str(log_path),
-    ]
+    command = [shell, "/d", "/c", str(helper), *arguments]
     try:
         if elevated:
-            _start_elevated_windows_helper(powershell, command_arguments)
+            _start_elevated_windows_helper(
+                shell, ["/d", "/c", str(helper), *arguments])
         else:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "wb") as output:
-                subprocess.Popen(
-                    [powershell, *command_arguments], cwd=_helper_cwd(),
-                    stdout=output, stderr=subprocess.STDOUT,
-                    **_subprocess_options(),
-                )
+            _start_windows_helper(command)
     except (OSError, UpdateError) as exc:
         _write_update_result({
             "status": "complete",
@@ -983,6 +1045,7 @@ def _launch_windows_helper(helper, script, arguments, version, *, elevated=False
         if isinstance(exc, UpdateError):
             raise
         raise UpdateError(f"The Windows update helper could not start: {exc}") from exc
+    return helper
 
 
 def _portable_windows_update(package_path, version):
@@ -998,16 +1061,8 @@ def _portable_windows_update(package_path, version):
     source = update_root / "blindDL"
     if not (source / "blindDL.exe").is_file():
         raise UpdateError("The portable update does not contain blindDL.exe.")
-    helper = package_path.parent / "finish-portable-update.ps1"
-    _write_helper(helper, _PORTABLE_HELPER)
-    arguments = [
-        "-BlindDLPid", str(os.getpid()),
-        "-Source", str(source), "-Target", str(target),
-        "-Result", str(_update_result_path()), "-Version", str(version),
-    ]
     _launch_windows_helper(
-        helper, _PORTABLE_HELPER, arguments, version, elevated=elevated
-    )
+        "portable", target, source, version, elevated=elevated)
     return True
 
 
@@ -1026,18 +1081,9 @@ def install_app_update(update, package_path, log=lambda _line: None):
                 f"Cannot install this Windows update package: {package_path.name}"
             )
         log("Staging the silent BlindDL installer; BlindDL will restart itself.")
-        helper = package_path.parent / "finish-installed-update.ps1"
-        target = Path(sys.executable).resolve()
-        _write_helper(helper, _INSTALLED_HELPER)
-        arguments = [
-            "-BlindDLPid", str(os.getpid()),
-            "-Installer", str(package_path), "-Target", str(target),
-            "-Result", str(_update_result_path()),
-            "-Version", str(update.version),
-        ]
+        target = Path(sys.executable).resolve().parent
         _launch_windows_helper(
-            helper, _INSTALLED_HELPER, arguments, update.version
-        )
+            "installed", target, package_path, update.version)
         return True
     if sys.platform == "darwin":
         log("Opening the update disk image. Replace BlindDL in Applications.")
