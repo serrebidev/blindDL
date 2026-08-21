@@ -228,6 +228,8 @@ def test_installed_windows_update_uses_a_silent_restart_helper(tmp_path):
 
     with mock.patch.object(updater.sys, "platform", "win32"), \
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_find_windows_powershell",
+                              return_value="powershell.exe"), \
             mock.patch.object(updater, "_validate_windows_helper"), \
             mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
@@ -264,8 +266,14 @@ def test_the_portable_update_swaps_folders_rather_than_merging_them(tmp_path):
     (installed / "blindDL.exe").write_bytes(b"the old blindDL")
     update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
 
-    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.sys, "executable",
-                              str(installed / "blindDL.exe")),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater, "_validate_windows_helper"),             mock.patch.object(updater.subprocess, "Popen") as popen:
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")), \
+            mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_find_windows_powershell",
+                              return_value="powershell.exe"), \
+            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
     script = (tmp_path / "finish-portable-update.ps1").read_text(
@@ -297,6 +305,8 @@ def test_a_protected_portable_folder_uses_a_uac_helper(tmp_path):
             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
             mock.patch.object(updater, "_portable_update_needs_elevation",
                               return_value=True), \
+            mock.patch.object(updater, "_find_windows_powershell",
+                              return_value="powershell.exe"), \
             mock.patch.object(updater, "_validate_windows_helper"), \
             mock.patch.object(updater, "_start_elevated_windows_helper") as elevated, \
             mock.patch.object(updater.subprocess, "Popen") as ordinary:
@@ -421,8 +431,14 @@ def test_the_update_helper_does_not_stand_in_its_own_way(tmp_path):
     (installed / "blindDL.exe").write_bytes(b"the old blindDL")
     update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
 
-    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.sys, "executable",
-                              str(installed / "blindDL.exe")),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater, "_validate_windows_helper"),             mock.patch.object(updater.subprocess, "Popen") as popen:
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")), \
+            mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_find_windows_powershell",
+                              return_value="powershell.exe"), \
+            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
     started_in = Path(popen.call_args.kwargs["cwd"]).resolve()
@@ -442,8 +458,14 @@ def test_the_installed_helper_also_runs_clear_of_the_install(tmp_path):
     installed = tmp_path / "Program Files" / "blindDL"
     installed.mkdir(parents=True)
 
-    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater.sys, "executable",
-                              str(installed / "blindDL.exe")),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater, "_validate_windows_helper"),             mock.patch.object(updater.subprocess, "Popen") as popen:
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")), \
+            mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_find_windows_powershell",
+                              return_value="powershell.exe"), \
+            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater.subprocess, "Popen") as popen:
         assert updater.install_app_update(update, package)
 
     started_in = Path(popen.call_args.kwargs["cwd"]).resolve()
@@ -460,7 +482,12 @@ def test_a_read_only_install_folder_is_not_mistaken_for_a_running_blinddl(tmp_pa
     package.write_bytes(b"installer")
     update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
 
-    with mock.patch.object(updater.sys, "platform", "win32"),             mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)),             mock.patch.object(updater, "_validate_windows_helper"),             mock.patch.object(updater.subprocess, "Popen"):
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater, "app_data_dir", return_value=str(tmp_path)), \
+            mock.patch.object(updater, "_find_windows_powershell",
+                              return_value="powershell.exe"), \
+            mock.patch.object(updater, "_validate_windows_helper"), \
+            mock.patch.object(updater.subprocess, "Popen"):
         assert updater.install_app_update(update, package)
 
     script = (tmp_path / "finish-installed-update.ps1").read_text(
