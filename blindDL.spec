@@ -16,6 +16,26 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 
 ROOT = Path(SPECPATH)
+
+# python-vlc contains literal macOS library names for its runtime platform
+# switch.  PyInstaller's ctypes scanner sees those strings on Linux as well
+# and warns about libraries that must not exist there.  Keep the ordinary
+# PyInstaller exclusions and add only these two cross-platform false matches.
+if sys.platform.startswith("linux"):
+    from PyInstaller.depend import dylib as pyinstaller_dylib
+
+    default_library_excludes = pyinstaller_dylib.exclude_list
+
+    class LinuxLibraryExcludes:
+        @staticmethod
+        def check_library(libname):
+            return Path(libname).name in {
+                "libvlc.dylib",
+                "libvlccore.dylib",
+            } or default_library_excludes.check_library(libname)
+
+    pyinstaller_dylib.exclude_list = LinuxLibraryExcludes()
+
 # Side B is vendored in the repo rather than installed, so the collectors
 # below have to be able to find it the way an ordinary import would.
 if str(ROOT) not in sys.path:
