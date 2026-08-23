@@ -81,6 +81,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         ENGINE_LABELS,
         ENGINE_MIXCLOUD,
         ENGINE_MUSIC,
+        ENGINE_PODCASTS,
         ENGINE_SOULSEEK_AUDIO,
         ENGINE_SOULSEEK_BOOKS,
         ENGINE_SOULSEEK_TORRENTS,
@@ -831,6 +832,94 @@ class GuiInteractionTests(unittest.TestCase):
             panel._apply_engine_controls(ENGINE_MIXCLOUD)
             self.assertTrue(panel.preview_btn.IsEnabled())
             self.assertTrue(panel.play_full_btn.IsEnabled())
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_podcasts_is_an_accessible_search_source(self):
+        panel = SearchPanel(self.host, self.frame)
+        try:
+            labels = [
+                panel.engine_choice.GetString(index)
+                for index in range(panel.engine_choice.GetCount())
+            ]
+            self.assertIn("Podcasts", labels)
+            self.assertIn(ENGINE_PODCASTS, panel.visible_engines)
+
+            panel._apply_engine_controls(ENGINE_PODCASTS)
+            self.assertFalse(panel.kind_choice.IsEnabled())
+            self.assertFalse(panel.preview_btn.IsEnabled())
+            self.assertFalse(panel.play_full_btn.IsEnabled())
+            self.assertFalse(panel.save_btn.IsEnabled())
+            panel._apply_engine_columns(ENGINE_PODCASTS)
+            self.assertEqual(
+                panel.results_list.GetColumn(0).GetText(), "Podcast"
+            )
+            self.assertEqual(
+                panel.results_list.GetColumn(3).GetText(), "Directories"
+            )
+        finally:
+            panel.shutdown()
+            panel.Destroy()
+
+    def test_podcast_search_uses_the_combined_directories(self):
+        panel = SearchPanel(self.host, self.frame)
+        stop = threading.Event()
+        token = panel.token = object()
+        result = {
+            "kind": "podcast",
+            "title": "Double Tap",
+            "artist": "AM Accessible Media",
+            "feed_url": "https://feeds.simplecast.com/MhX_XZQZ",
+            "url": "https://feeds.simplecast.com/MhX_XZQZ",
+            "source": "Apple Podcasts, fyyd, Podverse",
+            "track_count": 1300,
+        }
+
+        with (
+            mock.patch.object(
+                podcast_archiver, "search_podcasts", return_value=[result]
+            ) as search,
+            mock.patch("blinddl.gui.search_panel.wx.CallAfter") as call_after,
+        ):
+            panel._search("Double Tap", ENGINE_PODCASTS, token, stop, [])
+
+        search.assert_called_once_with(
+            "Double Tap", timeout=self.frame.config["search_timeout_s"]
+        )
+        call_after.assert_called_once_with(
+            panel._search_done, token, [result], ENGINE_PODCASTS, []
+        )
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_enter_on_podcast_result_opens_its_archive(self):
+        panel = SearchPanel(self.host, self.frame)
+        podcast = {
+            "kind": "podcast",
+            "title": "Double Tap",
+            "artist": "AM Accessible Media",
+            "feed_url": "https://feeds.simplecast.com/MhX_XZQZ",
+            "source": "Apple Podcasts, fyyd",
+            "track_count": 1300,
+        }
+        self._show(panel, ENGINE_PODCASTS, [podcast])
+        dialog = mock.Mock()
+        try:
+            with mock.patch(
+                "blinddl.gui.search_panel.PodcastArchiverDialog",
+                return_value=dialog,
+            ) as dialog_class:
+                panel.on_download_selected(None)
+
+            dialog_class.assert_called_once_with(
+                self.frame,
+                initial_value="https://feeds.simplecast.com/MhX_XZQZ",
+                auto_start=True,
+            )
+            dialog.ShowModal.assert_called_once_with()
+            dialog.Destroy.assert_called_once_with()
+            self.assertIn("Opening podcast archive", self.frame.messages[-1])
         finally:
             panel.shutdown()
             panel.Destroy()

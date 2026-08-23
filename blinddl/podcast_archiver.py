@@ -39,6 +39,9 @@ APPLE_LOOKUP_URL = "https://itunes.apple.com/lookup"
 GPODDER_SEARCH_URL = "https://gpodder.net/search.json"
 FYYD_SEARCH_URL = "https://api.fyyd.de/0.2/search/podcast"
 PODVERSE_SEARCH_URL = "https://api.podverse.fm/api/v1/podcast"
+PODCAST_DIRECTORY_NAMES = (
+    "Apple Podcasts", "gPodder", "fyyd", "Podverse",
+)
 WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_REPLAY_PREFIX = "https://web.archive.org/web/"
 DEFAULT_TIMEOUT_S = 30
@@ -420,6 +423,7 @@ def search_apple_podcasts(query, country="US", limit=50, *, get=requests.get,
         seen.add(identity)
         results.append({
             "id": "apple-podcast:" + identity,
+            "kind": "podcast",
             "title": str(item.get("collectionName") or "Untitled podcast"),
             "artist": str(item.get("artistName") or ""),
             "feed_url": feed_url,
@@ -452,6 +456,7 @@ def search_gpodder(query, limit=50, *, get=requests.get,
             continue
         results.append({
             "id": "gpodder:" + feed_url,
+            "kind": "podcast",
             "title": str(item.get("title") or feed_url),
             "artist": str(item.get("author") or ""),
             "feed_url": feed_url,
@@ -488,6 +493,7 @@ def search_fyyd(query, limit=50, *, get=requests.get,
             continue
         results.append({
             "id": "fyyd:" + str(item.get("id") or feed_url),
+            "kind": "podcast",
             "title": str(item.get("title") or feed_url),
             "artist": str(item.get("author") or item.get("subtitle") or ""),
             "feed_url": feed_url,
@@ -526,6 +532,7 @@ def search_podverse(query, limit=50, *, get=requests.get,
             continue
         results.append({
             "id": "podverse:" + str(item.get("id") or feed_url),
+            "kind": "podcast",
             "title": str(item.get("title") or feed_url),
             "artist": str(item.get("author") or item.get("subtitle") or ""),
             "feed_url": feed_url,
@@ -551,13 +558,13 @@ def search_podcasts(query, country="US", limit=50, *, get=requests.get,
     if not query:
         raise RuntimeError("Enter a podcast name to search for.")
     searches = (
-        ("Apple Podcasts", lambda: search_apple_podcasts(
+        (PODCAST_DIRECTORY_NAMES[0], lambda: search_apple_podcasts(
             query, country, limit, get=get, timeout=timeout)),
-        ("gPodder", lambda: search_gpodder(
+        (PODCAST_DIRECTORY_NAMES[1], lambda: search_gpodder(
             query, limit, get=get, timeout=timeout)),
-        ("fyyd", lambda: search_fyyd(
+        (PODCAST_DIRECTORY_NAMES[2], lambda: search_fyyd(
             query, limit, get=get, timeout=timeout)),
-        ("Podverse", lambda: search_podverse(
+        (PODCAST_DIRECTORY_NAMES[3], lambda: search_podverse(
             query, limit, get=get, timeout=timeout)),
     )
     completed = [None] * len(searches)

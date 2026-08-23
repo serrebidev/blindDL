@@ -24,6 +24,7 @@ from .. import (
     mixcloud_backend,
     music_match,
     musicdl_backend,
+    podcast_archiver,
     preview,
     search_order,
     sideb_backend,
@@ -39,6 +40,7 @@ from ..search_order import ORDER_RECENT, ORDER_RELEVANCE
 from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
+from .podcast_archiver_dialog import PodcastArchiverDialog
 
 ENGINE_MUSIC = 0
 ENGINE_YOUTUBE = 1
@@ -61,6 +63,7 @@ ENGINE_SOULSEEK_BOOKS = 17
 ENGINE_SOULSEEK_TORRENTS = 18
 ENGINE_DEEZER = 19
 ENGINE_MIXCLOUD = 20
+ENGINE_PODCASTS = 21
 # Kept as an import-compatible name for callers that treated adult search as
 # the first adult choice before content categories were separated.
 ENGINE_ADULT = ENGINE_STRAIGHT
@@ -86,6 +89,7 @@ ENGINE_LABELS = [
     "Soulseek torrent files",
     "Deezer",
     "Mixcloud",
+    "Podcasts",
 ]
 # The engines shown before the adult categories (and the Soulseek file-type
 # sections), in display order. Deezer sits straight after "Music sites" as
@@ -101,6 +105,7 @@ GENERAL_ENGINES = (
     ENGINE_APPLE_MUSIC,
     ENGINE_BOOKS,
     ENGINE_AUDIOBOOKS,
+    ENGINE_PODCASTS,
     ENGINE_ARCHIVE_AUDIO,
     ENGINE_ARCHIVE_VIDEO,
     ENGINE_TORRENTS,
@@ -203,6 +208,14 @@ TORRENT_SORT_LABELS = [
     "Oldest first",
     "Newest first",
 ]
+PODCAST_SORT_LABELS = [
+    "Relevance",
+    "Podcast",
+    "Directory",
+    "Publisher",
+    "Fewest listed episodes",
+    "Most listed episodes",
+]
 SOULSEEK_SORT_LABELS = [
     "Relevance",
     "Name",
@@ -236,6 +249,9 @@ SOULSEEK_COLUMN_HEADINGS = (
     "Availability",
     "Size",
 )
+PODCAST_COLUMN_HEADINGS = (
+    "Podcast", "Type", "Publisher", "Directories", "Episodes", "Feed URL",
+)
 
 
 def _is_adult_engine(engine):
@@ -264,6 +280,7 @@ def _plays(engine):
         _is_book_engine(engine)
         or _is_torrent_engine(engine)
         or _is_soulseek_engine(engine)
+        or engine == ENGINE_PODCASTS
     )
 
 
@@ -287,6 +304,8 @@ def _sort_labels(engine):
         return TORRENT_SORT_LABELS
     if _is_archive_engine(engine):
         return ARCHIVE_SORT_LABELS
+    if engine == ENGINE_PODCASTS:
+        return PODCAST_SORT_LABELS
     return SORT_LABELS
 
 
@@ -662,6 +681,8 @@ def _column_headings(engine):
         return TORRENT_COLUMN_HEADINGS
     if _is_archive_engine(engine):
         return ARCHIVE_COLUMN_HEADINGS
+    if engine == ENGINE_PODCASTS:
+        return PODCAST_COLUMN_HEADINGS
     return COLUMN_HEADINGS
 
 
@@ -779,6 +800,22 @@ def _sorted_results(items, mode, engine=None, order=None):
             )
 
         return [item for _index, item in sorted(indexed, key=torrent_seed_key)]
+
+    if engine == ENGINE_PODCASTS and mode in (SORT_SHORTEST, SORT_LONGEST):
+        most = mode == SORT_LONGEST
+
+        def podcast_episode_key(pair):
+            count = int(pair[1].get("track_count") or 0)
+            return (
+                count == 0,
+                -count if most else count,
+                str(pair[1].get("title") or "").casefold(),
+                pair[0],
+            )
+
+        return [
+            item for _index, item in sorted(indexed, key=podcast_episode_key)
+        ]
 
     if _is_torrent_engine(engine) and mode in (SORT_OLDEST, SORT_NEWEST):
         # Every indexer states a posting date except the two that scrape a
@@ -1280,6 +1317,21 @@ class SearchPanel(wx.Panel):
             )
         self.preview_btn.Enable(_plays(engine))
         self.play_full_btn.Enable(_plays(engine))
+        self.save_btn.Enable(engine != ENGINE_PODCASTS)
+        if engine == ENGINE_PODCASTS:
+            self.results_list.SetHelpText(
+                "Choose one podcast and press Enter to reconstruct its "
+                "current and archived episodes. Control C copies its RSS "
+                "URL; Context Menu opens more actions."
+            )
+        else:
+            self.results_list.SetHelpText(
+                "Select one or more results: Shift with the arrow keys for "
+                "a run, Control Space to add or drop the row you are on, "
+                "Control A for all of them. Enter downloads every selection; "
+                "Control Shift Q keeps it for later on the Download queue "
+                "tab; Control C copies URLs; Context Menu opens actions."
+            )
         self._apply_artist_scope_visibility()
 
     def _apply_artist_scope_visibility(self):
@@ -1562,6 +1614,8 @@ class SearchPanel(wx.Panel):
             order_sources = ["Apple Music"]
         elif engine == ENGINE_DEEZER:
             order_sources = [deezer_backend._SEARCH_SOURCE]
+        elif engine == ENGINE_PODCASTS:
+            order_sources = list(podcast_archiver.PODCAST_DIRECTORY_NAMES)
         elif _is_soulseek_engine(engine):
             order_sources = [soulseek_backend.SOURCE]
         else:
@@ -1648,6 +1702,12 @@ class SearchPanel(wx.Panel):
             site_word = "site" if count == 1 else "sites"
             self.frame.announce(
                 f"Searching {count} audiobook {site_word} "
+                f"({self.frame.config['search_timeout_s']:g} seconds each)..."
+            )
+        elif engine == ENGINE_PODCASTS:
+            count = len(podcast_archiver.PODCAST_DIRECTORY_NAMES)
+            self.frame.announce(
+                f"Searching {count} podcast directories "
                 f"({self.frame.config['search_timeout_s']:g} seconds each)..."
             )
         elif engine == ENGINE_TORRENTS:
@@ -1853,6 +1913,11 @@ class SearchPanel(wx.Panel):
                 items = deezer_backend.search(
                     query, self.frame.config, order=order, kind=kind,
                     artist_scope=artist_scope,
+                )
+            elif engine == ENGINE_PODCASTS:
+                items = podcast_archiver.search_podcasts(
+                    query,
+                    timeout=self.frame.config["search_timeout_s"],
                 )
             elif _is_adult_engine(engine):
 
@@ -2069,6 +2134,11 @@ class SearchPanel(wx.Panel):
                 str(item.get("remote_path") or "").casefold(),
             )
         kind = str(item.get("kind") or "")
+        if kind == "podcast":
+            feed_url = str(
+                item.get("feed_url") or item.get("url") or ""
+            ).strip().casefold().rstrip("/")
+            return f"podcast\x00{feed_url}"
         # An album or playlist is a different thing from a track that shares
         # its name, so collection kinds carry themselves into the key. Plain
         # tracks keep the artist+title key, which is what merges the same
@@ -2215,6 +2285,13 @@ class SearchPanel(wx.Panel):
             if column == 4:
                 return str(item.get("year") or "")
             return _pick(column, item, "creator", "source", None, "file_size")
+        if engine == ENGINE_PODCASTS:
+            if column == 1:
+                return "Podcast"
+            if column == 4:
+                count = int(item.get("track_count") or 0)
+                return str(count) if count else ""
+            return _pick(column, item, "artist", "source", None, "feed_url")
         if engine != ENGINE_YOUTUBE:
             if column == 4:
                 return ytdlp_backend.format_duration(item.get("duration_s"))
@@ -2850,7 +2927,12 @@ class SearchPanel(wx.Panel):
         menu = wx.Menu()
         preview_item = menu.Append(wx.ID_ANY, "&Preview selected")
         play_full_item = menu.Append(wx.ID_ANY, "Play &full song")
-        download = menu.Append(wx.ID_ANY, "&Download selected")
+        download_label = (
+            "&Open podcast archive"
+            if self.result_engine == ENGINE_PODCASTS
+            else "&Download selected"
+        )
+        download = menu.Append(wx.ID_ANY, download_label)
         save = menu.Append(
             wx.ID_ANY, "Add to download &queue	Ctrl+Shift+Q")
         focused = self._focused_result_object()
@@ -2905,7 +2987,7 @@ class SearchPanel(wx.Panel):
         preview_item.Enable(has_selection and _plays(self.result_engine))
         play_full_item.Enable(has_selection and _plays(self.result_engine))
         download.Enable(has_selection)
-        save.Enable(has_selection)
+        save.Enable(has_selection and self.result_engine != ENGINE_PODCASTS)
         copy_url.Enable(has_selection and soulseek_item is None)
         open_browser.Enable(
             has_selection
@@ -2917,6 +2999,7 @@ class SearchPanel(wx.Panel):
                 ENGINE_SOUNDCLOUD,
                 ENGINE_MIXCLOUD,
                 ENGINE_TORRENTS,
+                ENGINE_PODCASTS,
             )
         )
         clear.Enable(has_selection)
@@ -3334,6 +3417,12 @@ class SearchPanel(wx.Panel):
         for, which is what lets a whole discography be shelved in one press
         without reading a hundred track lists first.
         """
+        if self.result_engine == ENGINE_PODCASTS:
+            self.frame.announce(
+                "Podcast feeds are opened as episode archives. Press Enter "
+                "on one podcast instead."
+            )
+            return
         indices = [i for i in self._selected_indices() if i < len(self.results)]
         if not indices:
             self.frame.announce("Select a result first.")
@@ -3363,6 +3452,27 @@ class SearchPanel(wx.Panel):
             self.frame.announce("Select a result first.")
             return
         engine = self.result_engine
+        if engine == ENGINE_PODCASTS:
+            if len(indices) != 1:
+                self.frame.announce(
+                    "Select one podcast to open its episode archive."
+                )
+                return
+            podcast = self.results[indices[0]]
+            feed_url = podcast.get("feed_url") or podcast.get("url")
+            if not feed_url:
+                self.frame.announce("That podcast has no RSS feed address.")
+                return
+            self.frame.announce(
+                f"Opening podcast archive: {podcast['title']}"
+            )
+            dialog = PodcastArchiverDialog(
+                self.frame, initial_value=feed_url, auto_start=True)
+            try:
+                dialog.ShowModal()
+            finally:
+                dialog.Destroy()
+            return
         if (
             _is_archive_engine(engine)
             and len(indices) == 1
