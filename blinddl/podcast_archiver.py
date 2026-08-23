@@ -36,6 +36,9 @@ from .config import app_data_dir
 
 APPLE_SEARCH_URL = "https://itunes.apple.com/search"
 APPLE_LOOKUP_URL = "https://itunes.apple.com/lookup"
+GPODDER_SEARCH_URL = "https://gpodder.net/search.json"
+FYYD_SEARCH_URL = "https://api.fyyd.de/0.2/search/podcast"
+PODVERSE_SEARCH_URL = "https://api.podverse.fm/api/v1/podcast"
 WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_REPLAY_PREFIX = "https://web.archive.org/web/"
 DEFAULT_TIMEOUT_S = 30
@@ -50,6 +53,9 @@ _TRACKING_QUERY_NAMES = {
     "utm_campaign", "utm_content", "utm_medium", "utm_source", "utm_term",
     "fbclid", "gclid", "si",
 }
+
+_PODCAST_FEED_HOST_LABELS = {"feed", "feeds", "podcast", "podcasts", "rss"}
+_PODCAST_FEED_PATH_PARTS = {"feed", "feeds", "podcast", "podcasts", "rss"}
 
 
 class PodcastArchiveCancelled(RuntimeError):
@@ -138,6 +144,45 @@ def _normalized_media_url(value):
     ]
     return urlunparse((parsed.scheme.casefold(), parsed.netloc.casefold(),
                        parsed.path, "", urlencode(sorted(query)), ""))
+
+
+def is_apple_podcast_url(value):
+    """Return whether *value* is an Apple Podcasts page, not Apple Music."""
+    parsed = urlparse(str(value or "").strip())
+    host = (parsed.hostname or "").casefold()
+    apple_host = (
+        host == "podcasts.apple.com" or host.endswith(".podcasts.apple.com")
+        or host == "itunes.apple.com" or host.endswith(".itunes.apple.com")
+    )
+    return bool(apple_host and _APPLE_PODCAST_ID_RE.search(parsed.path))
+
+
+def looks_like_podcast_url(value):
+    """Recognize podcast pages and common RSS URL shapes without fetching."""
+    value = str(value or "").strip()
+    if is_apple_podcast_url(value):
+        return True
+    parsed = urlparse(value)
+    if parsed.scheme.casefold() not in ("http", "https") or not parsed.hostname:
+        return False
+    host = parsed.hostname.casefold()
+    path = parsed.path.casefold()
+    if host.endswith("youtube.com") and path == "/feeds/videos.xml":
+        return False
+    host_labels = set(host.split("."))
+    path_parts = {part for part in path.split("/") if part}
+    if host_labels & _PODCAST_FEED_HOST_LABELS:
+        return True
+    if path_parts & _PODCAST_FEED_PATH_PARTS:
+        return True
+    if path.endswith((".rss", "/podcast.xml", "/podcast-feed.xml")):
+        return True
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    return any(
+        name.casefold() in {"feed", "podcast", "rss"}
+        or str(item).casefold() in {"podcast", "rss"}
+        for name, item in query.items()
+    )
 
 
 def _parse_date(value):
@@ -386,17 +431,185 @@ def search_apple_podcasts(query, country="US", limit=50, *, get=requests.get,
     return results
 
 
+def search_gpodder(query, limit=50, *, get=requests.get,
+                    timeout=DEFAULT_TIMEOUT_S):
+    """Search gPodder's public podcast directory."""
+    query = str(query or "").strip()
+    if not query:
+        raise RuntimeError("Enter a podcast name to search for.")
+    response = _request(
+        get, GPODDER_SEARCH_URL, params={"q": query}, timeout=timeout)
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("gPodder returned an unreadable podcast search.") from exc
+    results = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict):
+            continue
+        feed_url = _http_url(item.get("url"))
+        if not feed_url:
+            continue
+        results.append({
+            "id": "gpodder:" + feed_url,
+            "title": str(item.get("title") or feed_url),
+            "artist": str(item.get("author") or ""),
+            "feed_url": feed_url,
+            "url": feed_url,
+            "webpage_url": "",
+            "track_count": 0,
+            "source": "gPodder",
+        })
+        if len(results) >= max(1, min(int(limit), 200)):
+            break
+    return results
+
+
+def search_fyyd(query, limit=50, *, get=requests.get,
+                timeout=DEFAULT_TIMEOUT_S):
+    """Search fyyd's public podcast directory."""
+    query = str(query or "").strip()
+    if not query:
+        raise RuntimeError("Enter a podcast name to search for.")
+    result_limit = max(1, min(int(limit), 100))
+    response = _request(get, FYYD_SEARCH_URL, params={
+        "term": query, "count": result_limit,
+    }, timeout=timeout)
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("fyyd returned an unreadable podcast search.") from exc
+    results = []
+    for item in payload.get("data") or [] if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        feed_url = _http_url(item.get("xmlURL"))
+        if not feed_url:
+            continue
+        results.append({
+            "id": "fyyd:" + str(item.get("id") or feed_url),
+            "title": str(item.get("title") or feed_url),
+            "artist": str(item.get("author") or item.get("subtitle") or ""),
+            "feed_url": feed_url,
+            "url": feed_url,
+            "webpage_url": str(item.get("htmlURL") or ""),
+            "track_count": 0,
+            "source": "fyyd",
+        })
+    return results
+
+
+def search_podverse(query, limit=50, *, get=requests.get,
+                    timeout=DEFAULT_TIMEOUT_S):
+    """Search Podverse's public podcast directory endpoint."""
+    query = str(query or "").strip()
+    if not query:
+        raise RuntimeError("Enter a podcast name to search for.")
+    response = _request(get, PODVERSE_SEARCH_URL, params={
+        "searchTitle": query,
+    }, timeout=timeout)
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Podverse returned an unreadable podcast search.") from exc
+    items = payload[0] if isinstance(payload, list) and payload else []
+    results = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        feed_url = next((
+            _http_url(feed.get("url"))
+            for feed in item.get("feedUrls") or []
+            if isinstance(feed, dict) and _http_url(feed.get("url"))
+        ), "")
+        if not feed_url:
+            continue
+        results.append({
+            "id": "podverse:" + str(item.get("id") or feed_url),
+            "title": str(item.get("title") or feed_url),
+            "artist": str(item.get("author") or item.get("subtitle") or ""),
+            "feed_url": feed_url,
+            "url": feed_url,
+            "webpage_url": str(item.get("website") or ""),
+            "track_count": 0,
+            "source": "Podverse",
+        })
+        if len(results) >= max(1, min(int(limit), 200)):
+            break
+    return results
+
+
+def _directory_identity(feed_url):
+    parsed = urlparse(_normalized_feed_url(feed_url))
+    return (parsed.netloc, parsed.path.rstrip("/") or "/", parsed.query)
+
+
+def search_podcasts(query, country="US", limit=50, *, get=requests.get,
+                    timeout=DEFAULT_TIMEOUT_S):
+    """Search public podcast directories in parallel and merge duplicates."""
+    query = str(query or "").strip()
+    if not query:
+        raise RuntimeError("Enter a podcast name to search for.")
+    searches = (
+        ("Apple Podcasts", lambda: search_apple_podcasts(
+            query, country, limit, get=get, timeout=timeout)),
+        ("gPodder", lambda: search_gpodder(
+            query, limit, get=get, timeout=timeout)),
+        ("fyyd", lambda: search_fyyd(
+            query, limit, get=get, timeout=timeout)),
+        ("Podverse", lambda: search_podverse(
+            query, limit, get=get, timeout=timeout)),
+    )
+    completed = [None] * len(searches)
+    errors = []
+    with ThreadPoolExecutor(max_workers=len(searches)) as executor:
+        futures = {
+            executor.submit(search): (index, name)
+            for index, (name, search) in enumerate(searches)
+        }
+        for future in as_completed(futures):
+            index, name = futures[future]
+            try:
+                completed[index] = future.result()
+            except Exception as exc:  # one unavailable directory is harmless
+                errors.append(f"{name}: {exc}")
+    if len(errors) == len(searches):
+        raise RuntimeError(
+            "No podcast directory could be reached. " + "; ".join(errors))
+
+    merged = []
+    by_feed = {}
+    for results in completed:
+        for item in results or []:
+            identity = _directory_identity(item.get("feed_url"))
+            if not identity[0]:
+                continue
+            existing = by_feed.get(identity)
+            if existing is None:
+                copy = dict(item)
+                copy["sources"] = [copy.get("source") or "Podcast directory"]
+                merged.append(copy)
+                by_feed[identity] = copy
+                continue
+            source = item.get("source")
+            if source and source not in existing["sources"]:
+                existing["sources"].append(source)
+                existing["source"] = ", ".join(existing["sources"])
+            if not existing.get("artist") and item.get("artist"):
+                existing["artist"] = item["artist"]
+            if not existing.get("track_count") and item.get("track_count"):
+                existing["track_count"] = item["track_count"]
+    return merged
+
+
 def resolve_podcast_url(value, *, get=requests.get,
                         timeout=DEFAULT_TIMEOUT_S):
     """Resolve a feed URL or Apple Podcasts page to its current RSS URL."""
     value = _http_url(value)
     if not value:
         raise RuntimeError("Enter a podcast RSS URL or search by name.")
-    host = (urlparse(value).hostname or "").casefold()
     match = _APPLE_PODCAST_ID_RE.search(urlparse(value).path)
-    apple_host = (host == "apple.com" or host.endswith(".apple.com")
-                  or host == "itunes.com" or host.endswith(".itunes.com"))
-    if match and apple_host:
+    if match and is_apple_podcast_url(value):
         response = _request(get, APPLE_LOOKUP_URL, params={
             "id": match.group(1), "entity": "podcast",
         }, timeout=timeout)

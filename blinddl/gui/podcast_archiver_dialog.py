@@ -30,7 +30,7 @@ def _archive_source(item):
 class PodcastArchiverDialog(wx.Dialog):
     """Find a podcast, reconstruct its feed history, then play or queue it."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, initial_value="", auto_start=False):
         super().__init__(
             parent, title="Podcast archiver",
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
@@ -49,8 +49,9 @@ class PodcastArchiverDialog(wx.Dialog):
         self.query = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
         self.query.SetName("Podcast name or feed URL")
         self.query.SetHelpText(
-            "Type a podcast name to search Apple Podcasts, or paste an RSS "
-            "or Apple Podcasts URL to open it directly. Enter starts.")
+            "Type a podcast name to search Apple Podcasts, gPodder, fyyd, "
+            "and Podverse, or paste an RSS or Apple Podcasts URL to open it "
+            "directly. Enter starts.")
         self.query.Bind(wx.EVT_TEXT_ENTER, self.on_find)
 
         self.find_btn = wx.Button(self, label="&Find or open")
@@ -80,11 +81,13 @@ class PodcastArchiverDialog(wx.Dialog):
         self.podcast_list.SetHelpText(
             "Choose a podcast and press Enter to reconstruct its episode "
             "history. The list is empty when a feed URL is opened directly.")
-        for column, heading in enumerate(("Podcast", "Publisher", "Episodes")):
+        for column, heading in enumerate(
+                ("Podcast", "Publisher", "Episodes", "Directory")):
             self.podcast_list.InsertColumn(column, heading)
-        self.podcast_list.SetColumnWidth(0, 330)
-        self.podcast_list.SetColumnWidth(1, 220)
+        self.podcast_list.SetColumnWidth(0, 280)
+        self.podcast_list.SetColumnWidth(1, 190)
         self.podcast_list.SetColumnWidth(2, 90)
+        self.podcast_list.SetColumnWidth(3, 150)
         self.podcast_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_archive)
         self.podcast_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_selected)
 
@@ -129,7 +132,12 @@ class PodcastArchiverDialog(wx.Dialog):
         self.SetSize((820, 520))
         self.SetMinSize((620, 400))
         self._update_controls()
+        initial_value = str(initial_value or "").strip()
+        if initial_value:
+            self.query.SetValue(initial_value)
         self.query.SetFocus()
+        if initial_value and auto_start:
+            wx.CallAfter(self._start_archive, initial_value)
 
     def _selected_podcast(self):
         row = self.podcast_list.GetFirstSelected()
@@ -179,12 +187,12 @@ class PodcastArchiverDialog(wx.Dialog):
         self.archive = None
         self.results = []
         self.podcast_list.DeleteAllItems()
-        self._set_status(f"Searching Apple Podcasts for {value}...")
+        self._set_status(f"Searching podcast directories for {value}...")
         self._start_work(self._search_worker, value)
 
     def _search_worker(self, generation, query):
         try:
-            results = podcast_archiver.search_apple_podcasts(query)
+            results = podcast_archiver.search_podcasts(query)
         except Exception as exc:  # noqa: BLE001 - shown in the dialog
             wx.CallAfter(self._work_failed, generation, str(exc))
             return
@@ -201,6 +209,7 @@ class PodcastArchiverDialog(wx.Dialog):
             self.podcast_list.SetItem(row, 1, podcast.get("artist") or "")
             count = podcast.get("track_count") or 0
             self.podcast_list.SetItem(row, 2, str(count) if count else "")
+            self.podcast_list.SetItem(row, 3, podcast.get("source") or "")
         if self.results:
             self.podcast_list.Select(0)
             self.podcast_list.Focus(0)
@@ -208,7 +217,7 @@ class PodcastArchiverDialog(wx.Dialog):
             self._set_status(
                 f"Found {len(self.results)} podcasts. Choose one and press Enter.")
         else:
-            self._set_status("Apple Podcasts found no matching podcasts.")
+            self._set_status("The podcast directories found no matches.")
             self.query.SetFocus()
         self._update_controls()
 

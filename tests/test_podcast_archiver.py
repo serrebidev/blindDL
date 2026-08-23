@@ -124,6 +124,18 @@ class PodcastParsingTests(unittest.TestCase):
 
 
 class PodcastDirectoryTests(unittest.TestCase):
+    def test_recognizes_common_podcast_urls_without_stealing_other_media(self):
+        self.assertTrue(podcast_archiver.looks_like_podcast_url(
+            "https://feeds.simplecast.com/MhX_XZQZ"))
+        self.assertTrue(podcast_archiver.looks_like_podcast_url(
+            "https://example.test/shows/name/rss"))
+        self.assertTrue(podcast_archiver.looks_like_podcast_url(
+            "https://podcasts.apple.com/ca/podcast/show/id12345"))
+        self.assertFalse(podcast_archiver.looks_like_podcast_url(
+            "https://music.apple.com/ca/album/show/12345"))
+        self.assertFalse(podcast_archiver.looks_like_podcast_url(
+            "https://www.youtube.com/feeds/videos.xml?channel_id=123"))
+
     def test_transient_timeout_is_retried(self):
         get = mock.Mock(side_effect=[
             requests.Timeout("slow"),
@@ -165,6 +177,65 @@ class PodcastDirectoryTests(unittest.TestCase):
 
         self.assertEqual(url, "https://show.example/rss")
         self.assertEqual(get.call_args.kwargs["params"]["id"], "12345")
+
+    def test_gpodder_search_normalizes_public_directory_results(self):
+        get = mock.Mock(return_value=Response(payload=[{
+            "url": "https://show.example/rss",
+            "title": "The Show",
+            "author": "A Publisher",
+        }]))
+
+        results = podcast_archiver.search_gpodder("Show", get=get)
+
+        self.assertEqual(results[0]["feed_url"], "https://show.example/rss")
+        self.assertEqual(results[0]["source"], "gPodder")
+
+    def test_fyyd_and_podverse_results_expose_feed_urls(self):
+        fyyd_get = mock.Mock(return_value=Response(payload={"data": [{
+            "id": 8, "title": "FY Show", "author": "FY Publisher",
+            "xmlURL": "https://fy.example/feed.xml",
+        }]}))
+        podverse_get = mock.Mock(return_value=Response(payload=[[{
+            "id": "pv", "title": "PV Show",
+            "feedUrls": [{"url": "https://pv.example/podcast.rss"}],
+        }], 1]))
+
+        fyyd = podcast_archiver.search_fyyd("Show", get=fyyd_get)
+        podverse = podcast_archiver.search_podverse(
+            "Show", get=podverse_get)
+
+        self.assertEqual(fyyd[0]["feed_url"], "https://fy.example/feed.xml")
+        self.assertEqual(podverse[0]["feed_url"],
+                         "https://pv.example/podcast.rss")
+
+    def test_combined_directory_search_deduplicates_feed_addresses(self):
+        apple = [{
+            "title": "The Show", "artist": "Publisher",
+            "feed_url": "https://show.example/rss",
+            "url": "https://show.example/rss", "track_count": 10,
+            "source": "Apple Podcasts",
+        }]
+        gpodder = [{
+            "title": "The Show", "artist": "",
+            "feed_url": "http://show.example/rss/",
+            "url": "http://show.example/rss/", "track_count": 0,
+            "source": "gPodder",
+        }]
+        with (
+            mock.patch.object(podcast_archiver, "search_apple_podcasts",
+                              return_value=apple),
+            mock.patch.object(podcast_archiver, "search_gpodder",
+                              return_value=gpodder),
+            mock.patch.object(podcast_archiver, "search_fyyd",
+                              side_effect=requests.Timeout("offline")),
+            mock.patch.object(podcast_archiver, "search_podverse",
+                              return_value=[]),
+        ):
+            results = podcast_archiver.search_podcasts("The Show")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["track_count"], 10)
+        self.assertEqual(results[0]["source"], "Apple Podcasts, gPodder")
 
 
 class PodcastArchiveTests(unittest.TestCase):

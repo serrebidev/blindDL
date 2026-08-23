@@ -423,11 +423,15 @@ class GuiInteractionTests(unittest.TestCase):
             dialog._search_ready(3, [{
                 "title": "Double Tap", "artist": "AM Accessible Media",
                 "feed_url": "https://example.test/feed", "track_count": 1300,
+                "source": "Apple Podcasts, fyyd",
             }])
 
             self.assertEqual(dialog.podcast_list.GetItemCount(), 1)
             self.assertEqual(dialog.podcast_list.GetItemText(0), "Double Tap")
             self.assertEqual(dialog.podcast_list.GetItemText(0, 2), "1300")
+            self.assertEqual(
+                dialog.podcast_list.GetItemText(0, 3),
+                "Apple Podcasts, fyyd")
             self.assertTrue(dialog.archive_btn.IsEnabled())
             self.assertIn("Choose one", dialog.status.GetLabel())
         finally:
@@ -904,6 +908,29 @@ class GuiInteractionTests(unittest.TestCase):
         with mock.patch("blinddl.gui.url_panel.threading.Thread") as thread:
             panel.on_download(None)
 
+        thread.assert_not_called()
+        panel.shutdown()
+        panel.Destroy()
+
+    def test_podcast_feed_in_url_tab_opens_archiver_automatically(self):
+        panel = UrlPanel(self.host, self.frame)
+        panel.url_text.SetValue("https://feeds.simplecast.com/MhX_XZQZ")
+        dialog = mock.Mock()
+
+        with (
+            mock.patch("blinddl.gui.url_panel.PodcastArchiverDialog",
+                       return_value=dialog) as dialog_class,
+            mock.patch("blinddl.gui.url_panel.threading.Thread") as thread,
+        ):
+            panel.on_download(None)
+
+        dialog_class.assert_called_once_with(
+            self.frame,
+            initial_value="https://feeds.simplecast.com/MhX_XZQZ",
+            auto_start=True,
+        )
+        dialog.ShowModal.assert_called_once_with()
+        dialog.Destroy.assert_called_once_with()
         thread.assert_not_called()
         panel.shutdown()
         panel.Destroy()

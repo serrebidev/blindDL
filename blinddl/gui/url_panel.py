@@ -2,19 +2,20 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Download-from-URL tab: paste any media/playlist/channel URL."""
+"""Download-from-URL tab: paste a media, collection, or podcast URL."""
 
 import threading
 
 import wx
 
 from .. import (
-    adult_backend, applemusic_backend, deezer_backend, preview, sideb_backend,
-    soulseek_backend, ytdlp_backend,
+    adult_backend, applemusic_backend, deezer_backend, podcast_archiver,
+    preview, sideb_backend, soulseek_backend, ytdlp_backend,
 )
 from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
+from .podcast_archiver_dialog import PodcastArchiverDialog
 
 
 class UrlPanel(wx.Panel):
@@ -28,7 +29,7 @@ class UrlPanel(wx.Panel):
 
         label = wx.StaticText(self, label="&URL:")
         self.url_text = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
-        self.url_text.SetName("Media URL")
+        self.url_text.SetName("Media or podcast URL")
         self.url_text.Bind(wx.EVT_TEXT_ENTER, self.on_download)
 
         self.format_radio = wx.RadioBox(
@@ -77,6 +78,9 @@ class UrlPanel(wx.Panel):
                 "Choose Download to add this link to the queue."
             )
             return
+        if podcast_archiver.looks_like_podcast_url(url):
+            self._open_podcast_archiver(url)
+            return
         audio_only = self.format_radio.GetSelection() == 0
         token = self.play_token = object()
         self.play_btn.Disable()
@@ -120,11 +124,23 @@ class UrlPanel(wx.Panel):
         if not url:
             self.frame.announce("Enter a URL.")
             return
+        if podcast_archiver.looks_like_podcast_url(url):
+            self._open_podcast_archiver(url)
+            return
         audio_only = self.format_radio.GetSelection() == 0
         self.download_btn.Disable()
         self.frame.announce("Reading URL...")
         threading.Thread(target=self._inspect, args=(url, audio_only),
                          daemon=True).start()
+
+    def _open_podcast_archiver(self, url):
+        self.frame.announce("Opening podcast archive...")
+        dialog = PodcastArchiverDialog(
+            self.frame, initial_value=url, auto_start=True)
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
 
     def _inspect(self, url, audio_only):
         if soulseek_backend.is_soulseek_uri(url):

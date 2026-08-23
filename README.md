@@ -150,7 +150,7 @@ Ctrl+Shift+S chooses which sites each source searches, and newly supported sites
 
 ## Podcast archiver
 
-Tools, **Podcast archiver** (Ctrl+Shift+P) reconstructs a podcast's complete feed history. Paste an RSS or Apple Podcasts URL to open it directly, or type a name to search Apple's public podcast directory and choose the show from the accessible results list. The current feed is always read first. **Include Wayback Machine feed history** then finds up to 5,000 unique old copies of every discovered feed URL, reads them concurrently, and merges their playable episodes into one newest-first list.
+Tools, **Podcast archiver** (Ctrl+Shift+P) reconstructs a podcast's complete feed history. Paste a podcast RSS or Apple Podcasts link into the ordinary URL tab and BlindDL opens the archiver automatically; the Download and Play URL buttons both recognize it. You can also open the tool directly and type a name. BlindDL searches Apple Podcasts, gPodder, fyyd, and Podverse in parallel, merges duplicate feed addresses, and identifies the matching directories in the accessible results list. The current feed is always read first. **Include Wayback Machine feed history** then finds up to 5,000 unique old copies of every discovered feed URL, reads them concurrently, and merges their playable episodes into one newest-first list.
 
 Long-running shows often move between podcast hosts. The archiver follows the live HTTP redirect, `itunes:new-feed-url`, and Atom self and next links as a bounded graph, checking the history of each newly discovered feed address. Copies are deduplicated by GUID and media URL, with title plus publication date bridging the case where a host move changed both. The live enclosure is preferred when it still exists. Readable snapshots are cached locally, so a later scan reuses them instead of asking archive.org again; a failed or unavailable snapshot is reported without losing the episodes recovered from the other versions, and **Stop** cancels a long scan.
 
@@ -162,7 +162,7 @@ Source checkouts also expose the reconstruction as a script:
 python -m blinddl.podcast_archiver RSS_OR_APPLE_URL -o podcast-archive.xml
 ```
 
-Add `--current-only` to skip archive.org or `--max-snapshots N` for a shorter initial scan. The directory search uses Apple's credential-free Search API; the archive scan talks directly to the Internet Archive, so no Backfeed, Podcast Index, or Podchaser account is required.
+Add `--current-only` to skip archive.org or `--max-snapshots N` for a shorter initial scan. The four default directories are credential-free, and the archive scan talks directly to the Internet Archive, so no Backfeed, Podcast Index, or Podchaser account is required.
 
 ## Soulseek
 
