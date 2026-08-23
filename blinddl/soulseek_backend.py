@@ -19,6 +19,7 @@ import json
 import logging
 import ntpath
 import os
+import re
 import shutil
 import socket
 import sys
@@ -66,8 +67,11 @@ try:
         Settings,
         SharedDirectorySettingEntry,
     )
+    from aioslsk.search.model import SearchQuery
     from aioslsk.shares.cache import SharesShelveCache
+    from aioslsk.shares.manager import SharesManager
     from aioslsk.shares.model import SharedDirectory
+    from aioslsk.shares.utils import create_term_pattern
     from aioslsk.transfer.cache import TransferShelveCache
     from aioslsk.transfer.manager import TransferManager
     from aioslsk.transfer.model import FailReason, TransferDirection
@@ -126,6 +130,118 @@ def _install_aioslsk_cross_drive_fix() -> None:
     SharedDirectory.is_parent_of = _shared_directory_is_parent_of
     SharedDirectory.is_child_of = _shared_directory_is_child_of
     SharedDirectory.get_items_for_directory = _shared_directory_items_for
+
+
+# aioslsk 1.6.3 calls SearchQuery.matchers_iter() once for every candidate
+# file. That recompiles every regular expression for every incoming Soulseek
+# search. It also copies the first term's complete posting set twice. A large
+# library therefore spends a measurable part of one core answering ordinary
+# network searches even while blindDL itself is idle.
+_QUERY_CLEAN_PATTERN = re.compile(r"[\W_]")
+
+
+def _optimized_share_query(
+    self,
+    query,
+    username=None,
+    excluded_search_phrases=None,
+):
+    """aioslsk's share query with reusable matchers and lean intersections.
+
+    The result rules are intentionally the same as the upstream method. Only
+    temporary work changes: compile the matchers once, avoid redundant posting
+    copies, and calculate each candidate's query path once. Sharing and
+    replying to every incoming search remain enabled.
+    """
+    search_query = query if isinstance(query, SearchQuery) else SearchQuery.parse(query)
+    if not search_query.has_inclusion_terms():
+        return [], []
+
+    posting_terms = []
+    for term in search_query.include_terms:
+        for subterm in re.split(_QUERY_CLEAN_PATTERN, term):
+            if not subterm:
+                continue
+            if subterm not in self._term_map:
+                return [], []
+            posting_terms.append(subterm)
+
+    for term in search_query.wildcard_terms:
+        for index, subterm in enumerate(re.split(_QUERY_CLEAN_PATTERN, term)):
+            if not subterm:
+                continue
+            if index == 0:
+                matches = [
+                    mapped for mapped in self._term_map if mapped.endswith(subterm)
+                ]
+                if not matches:
+                    return [], []
+                posting_terms.extend(matches)
+            else:
+                if subterm not in self._term_map:
+                    return [], []
+                posting_terms.append(subterm)
+
+    # has_inclusion_terms() can be true for a term made solely of separators.
+    if not posting_terms:
+        return [], []
+
+    # Repeated terms add no constraint and only repeat membership work.
+    posting_terms = list(dict.fromkeys(posting_terms))
+    first = posting_terms[0]
+    if len(posting_terms) == 1:
+        # The result cap is normally reached near the start of a common
+        # one-word posting. Do not copy tens of thousands of entries merely to
+        # inspect the first hundred.
+        found_items = self._term_map[first]
+    else:
+        found_items = set(self._term_map[first])
+        for term in posting_terms[1:]:
+            found_items.intersection_update(self._term_map[term])
+            if not found_items:
+                return [], []
+
+    # The upstream generator compiles its regular expressions as it yields and
+    # its lambdas intentionally share one local pattern. Build equivalent
+    # matchers with bound defaults so they can safely be reused.
+    matchers = []
+    for term in search_query.include_terms:
+        pattern = create_term_pattern(term, wildcard=False)
+        matchers.append(lambda path, pattern=pattern: bool(pattern.search(path)))
+    for term in search_query.wildcard_terms:
+        pattern = create_term_pattern(term, wildcard=True)
+        matchers.append(lambda path, pattern=pattern: bool(pattern.search(path)))
+    for term in search_query.exclude_terms:
+        pattern = create_term_pattern(term, wildcard=False)
+        matchers.append(lambda path, pattern=pattern: not pattern.search(path))
+    excluded = tuple(excluded_search_phrases or ())
+    kept = set()
+    for item in found_items:
+        query_path = item.get_query_path()
+        if not all(matcher(query_path) for matcher in matchers):
+            continue
+        lowered_path = query_path.lower() if excluded else ""
+        if any(phrase in lowered_path for phrase in excluded):
+            continue
+        kept.add(item)
+        if len(kept) >= self._settings.searches.receive.max_results:
+            break
+
+    if not username:
+        return list(kept), []
+    visible = []
+    locked = []
+    for item in kept:
+        (locked if self.is_item_locked(item, username) else visible).append(item)
+    return visible, locked
+
+
+def _install_aioslsk_query_fix() -> None:
+    """Replace the allocation-heavy aioslsk share query once per process."""
+    if not available() or getattr(SharesManager.query, "_blinddl_optimized", False):
+        return
+    _optimized_share_query._blinddl_optimized = True
+    SharesManager.query = _optimized_share_query
 
 
 # -- refusing uploads to users who share nothing ------------------------------
@@ -367,6 +483,7 @@ def available() -> bool:
 
 
 _install_aioslsk_cross_drive_fix()
+_install_aioslsk_query_fix()
 _install_leecher_guard()
 
 

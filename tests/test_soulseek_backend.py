@@ -22,6 +22,7 @@ from aioslsk.protocol.primitives import (
 )
 from aioslsk.search.model import SearchResult
 from aioslsk.shares.manager import SharesManager
+from aioslsk.shares.model import DirectoryShareMode, SharedDirectory, SharedItem
 from aioslsk.transfer.model import FailReason, TransferDirection
 
 from blinddl.config import DEFAULTS
@@ -136,6 +137,68 @@ class SoulseekBackendTests(unittest.TestCase):
             [entry.absolute_path for entry in manager.shared_directories],
             [r"C:\Music", r"D:\Downloads"],
         )
+
+    def test_incoming_share_query_compiles_matchers_once_for_every_candidate(self):
+        settings = soulseek_backend.Settings(
+            credentials=soulseek_backend.CredentialsSettings(
+                username="listener", password="secret"
+            )
+        )
+        settings.searches.receive.max_results = 100
+        manager = SharesManager(settings, mock.Mock(), mock.Mock())
+        shared = SharedDirectory("C:\\Music", "C:\\Music", "music")
+        shared.items = {
+            SharedItem(shared, "Artist", f"ambient track {number}.flac", 0)
+            for number in range(40)
+        }
+        manager._shared_directories = [shared]
+        manager.rebuild_term_map()
+        with mock.patch.object(
+            soulseek_backend,
+            "create_term_pattern",
+            wraps=soulseek_backend.create_term_pattern,
+        ) as compile_pattern:
+            visible, locked = manager.query("ambient track", username="peer")
+
+        self.assertEqual(len(visible), 40)
+        self.assertEqual(locked, [])
+        self.assertEqual(compile_pattern.call_count, 2)
+
+    def test_optimized_share_query_keeps_wildcards_exclusions_and_locks(self):
+        settings = soulseek_backend.Settings(
+            credentials=soulseek_backend.CredentialsSettings(
+                username="listener", password="secret"
+            )
+        )
+        manager = SharesManager(settings, mock.Mock(), mock.Mock())
+        public = SharedDirectory("C:\\Music", "C:\\Music", "public")
+        private = SharedDirectory(
+            "D:\\Rare",
+            "D:\\Rare",
+            "private",
+            share_mode=DirectoryShareMode.FRIENDS,
+        )
+        public.items = {
+            SharedItem(public, "Artist", "Ambient.flac", 0),
+            SharedItem(public, "Artist", "Ambient live.flac", 0),
+        }
+        private.items = {
+            SharedItem(private, "Artist", "Ambient demo.flac", 0),
+        }
+        manager._shared_directories = [public, private]
+        manager.rebuild_term_map()
+
+        visible, locked = manager.query(
+            "*ient -live", username="stranger", excluded_search_phrases=[]
+        )
+
+        self.assertEqual([item.filename for item in visible], ["Ambient.flac"])
+        self.assertEqual([item.filename for item in locked], ["Ambient demo.flac"])
+
+        visible, locked = manager.query(
+            "ambient", username="stranger", excluded_search_phrases=["artist"]
+        )
+        self.assertEqual((visible, locked), ([], []))
 
     def test_free_slot_priority_is_separate_but_reaches_aioslsk_uploader(self):
         with tempfile.TemporaryDirectory() as folder:
