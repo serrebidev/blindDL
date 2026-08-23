@@ -27,6 +27,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote, unquote
 
 from .config import app_data_dir
 
@@ -89,6 +90,39 @@ logging.getLogger("aioslsk").setLevel(logging.ERROR)
 
 SOURCE = "Soulseek"
 SETTINGS_CHANGED_MESSAGE = "Soulseek settings changed during this transfer."
+
+
+def is_soulseek_uri(value) -> bool:
+    """Return whether *value* is a direct Soulseek file or folder link."""
+    return str(value or "").strip().lower().startswith("slsk://")
+
+
+def parse_soulseek_uri(value) -> tuple[str, str, bool]:
+    """Return ``(username, remote_path, is_folder)`` for a ``slsk://`` URI."""
+    uri = str(value or "").strip()
+    if not is_soulseek_uri(uri):
+        raise SoulseekError("That is not a Soulseek link.")
+    body = uri[len("slsk://"):]
+    encoded_username, separator, encoded_path = body.partition("/")
+    username = unquote(encoded_username).strip()
+    folder = bool(separator and encoded_path.endswith("/"))
+    remote_path = unquote(encoded_path).replace("/", "\\").rstrip("\\")
+    if not username:
+        raise SoulseekError("Invalid Soulseek link: the username is missing.")
+    if not separator or not remote_path.strip("\\"):
+        raise SoulseekError("Invalid Soulseek link: the shared path is missing.")
+    return username, remote_path, folder
+
+
+def soulseek_uri(username, remote_path, *, folder=False) -> str | None:
+    """Build a portable ``slsk://`` URI for one peer's shared path."""
+    username = str(username or "").strip()
+    remote_path = str(remote_path or "").strip().replace("\\", "/").strip("/")
+    if not username or not remote_path:
+        return None
+    encoded_path = "/".join(quote(part, safe="") for part in remote_path.split("/"))
+    suffix = "/" if folder else ""
+    return f"slsk://{quote(username, safe='')}/{encoded_path}{suffix}"
 
 
 def _path_is_within(parent: str, candidate: str) -> bool:
@@ -710,6 +744,9 @@ def _config_snapshot(config) -> dict[str, Any]:
         "upload_kib": _as_int(config.get("soulseek_max_upload_kib"), 0),
         "download_kib": _as_int(config.get("soulseek_max_download_kib"), 0),
         "max_results": _as_int(config.get("soulseek_max_results"), 500),
+        "stale_timeout_s": max(
+            0, _as_int(config.get("soulseek_stale_timeout_s"), 30)
+        ),
         "block_leechers": bool(config.get("soulseek_block_leechers", True)),
         "rooms": rooms,
         "private_rooms": private_rooms,
@@ -731,6 +768,7 @@ def _signature(snapshot: dict[str, Any]) -> tuple:
             "rooms",
             "private_rooms",
             "block_leechers",
+            "stale_timeout_s",
         }
     )
 
@@ -1748,6 +1786,9 @@ class _Service:
         transfer = await client.transfers.download(
             str(item["username"]), str(item["remote_path"])
         )
+        loop = asyncio.get_running_loop()
+        last_activity = loop.time()
+        last_progress = None
         target_relative = str(item.get("target_relative_path") or "").strip()
         if target_relative and transfer.local_path is None:
             safe_parts = []
@@ -1781,6 +1822,11 @@ class _Service:
             total = int(transfer.filesize or item.get("size_bytes") or 0)
             done = int(snapshot_now.bytes_transfered or 0)
             speed = float(snapshot_now.speed or 0)
+            progress = (state, done, transfer.place_in_queue)
+            now = loop.time()
+            if progress != last_progress:
+                last_progress = progress
+                last_activity = now
             eta = (max(total - done, 0) / speed) if total and speed else None
             if progress_cb is not None:
                 progress_cb(
@@ -1813,6 +1859,15 @@ class _Service:
                     or "Transfer aborted"
                 )
                 raise _transfer_failure(reason)
+            stale_timeout = float(snapshot.get("stale_timeout_s", 0) or 0)
+            if stale_timeout and now - last_activity >= stale_timeout:
+                try:
+                    await client.transfers.abort(transfer)
+                finally:
+                    raise SoulseekTransientError(
+                        "No Soulseek transfer progress for "
+                        f"{stale_timeout:g} seconds"
+                    )
             await asyncio.sleep(0.25)
 
     def download(self, item, config, progress_cb=None, cancel_event=None):
@@ -1881,6 +1936,50 @@ def search(query, config, media_kind, timeout_s, stop_event=None, on_batch=None)
 
 def download(item, config, progress_cb: Callable | None = None, cancel_event=None):
     return _SERVICE.download(item, config, progress_cb, cancel_event)
+
+
+def resolve_uri(uri, config):
+    """Resolve a direct Soulseek URI to queue-ready files and a title."""
+    if not _config_snapshot(config)["enabled"]:
+        raise SoulseekError("Soulseek is disabled in Settings.")
+    username, remote_path, folder = parse_soulseek_uri(uri)
+    title = ntpath.basename(remote_path) or remote_path
+    if not folder:
+        extension = ntpath.splitext(remote_path)[1].lstrip(".").lower()
+        item = {
+            "title": title,
+            "kind": "soulseek",
+            "source": SOURCE,
+            "username": username,
+            "artist": username,
+            "remote_path": remote_path,
+            "folder": ntpath.dirname(remote_path),
+            "format": extension.upper(),
+            "extension": extension,
+            "size_bytes": 0,
+            "file_size": "",
+            "locked": False,
+        }
+        return [item], title
+
+    directories = browse_user(username, config)
+    prefix = remote_path.rstrip("\\") + "\\"
+    files = []
+    for directory in directories:
+        directory_name = str(directory.get("name") or "")
+        if not (
+            directory_name.casefold() == remote_path.casefold()
+            or directory_name.casefold().startswith(prefix.casefold())
+        ):
+            continue
+        for original in directory.get("files", []):
+            if original.get("locked"):
+                continue
+            item = dict(original)
+            relative = ntpath.relpath(item["remote_path"], remote_path)
+            item["target_relative_path"] = ntpath.join(title, relative)
+            files.append(item)
+    return files, title
 
 
 def schedule_rescan():

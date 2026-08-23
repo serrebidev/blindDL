@@ -24,6 +24,7 @@ from aioslsk.search.model import SearchResult
 from aioslsk.shares.manager import SharesManager
 from aioslsk.shares.model import DirectoryShareMode, SharedDirectory, SharedItem
 from aioslsk.transfer.model import FailReason, TransferDirection
+from aioslsk.transfer.state import TransferState
 
 from blinddl.config import DEFAULTS
 from blinddl.downloader import DownloadItem, DownloadQueue
@@ -70,6 +71,53 @@ class SoulseekBackendTests(unittest.TestCase):
         self.assertNotIsInstance(
             not_shared, soulseek_backend.SoulseekTransientError
         )
+
+    def test_soulseek_file_uri_round_trips_spaces_and_backslashes(self):
+        uri = soulseek_backend.soulseek_uri(
+            "some user", r"Music\Artist & Guest\Track 01.flac"
+        )
+        self.assertEqual(
+            uri,
+            "slsk://some%20user/Music/Artist%20%26%20Guest/Track%2001.flac",
+        )
+        self.assertEqual(
+            soulseek_backend.parse_soulseek_uri(uri),
+            ("some user", r"Music\Artist & Guest\Track 01.flac", False),
+        )
+
+    def test_soulseek_folder_uri_resolves_recursively_and_skips_locked_files(self):
+        rows = [
+            {"name": r"Music\Album", "files": [
+                {"title": "01.flac", "remote_path": r"Music\Album\01.flac",
+                 "locked": False},
+            ]},
+            {"name": r"Music\Album\Disc 2", "files": [
+                {"title": "02.flac",
+                 "remote_path": r"Music\Album\Disc 2\02.flac", "locked": False},
+                {"title": "secret.flac",
+                 "remote_path": r"Music\Album\secret.flac", "locked": True},
+            ]},
+            {"name": r"Music\Other", "files": [
+                {"title": "other.flac", "remote_path": r"Music\Other\other.flac",
+                 "locked": False},
+            ]},
+        ]
+        with mock.patch.object(soulseek_backend, "browse_user", return_value=rows):
+            items, title = soulseek_backend.resolve_uri(
+                "slsk://peer/Music/Album/", self.config("downloads")
+            )
+
+        self.assertEqual(title, "Album")
+        self.assertEqual([item["title"] for item in items], ["01.flac", "02.flac"])
+        self.assertEqual(
+            items[1]["target_relative_path"], r"Album\Disc 2\02.flac"
+        )
+
+    def test_malformed_soulseek_uri_reports_the_missing_part(self):
+        with self.assertRaisesRegex(soulseek_backend.SoulseekError, "username"):
+            soulseek_backend.parse_soulseek_uri("slsk:///Music/Track.flac")
+        with self.assertRaisesRegex(soulseek_backend.SoulseekError, "path"):
+            soulseek_backend.parse_soulseek_uri("slsk://peer")
 
     def test_settings_use_default_download_dir_and_public_extra_shares(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -544,6 +592,52 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
                 None,
                 threading.Event(),
             )
+
+    async def test_stalled_transfer_is_aborted_and_made_retryable(self):
+        snapshot = SimpleNamespace(
+            state=TransferState.DOWNLOADING,
+            bytes_transfered=0,
+            speed=0,
+            fail_reason=None,
+            abort_reason=None,
+        )
+        transfer = SimpleNamespace(
+            local_path=None,
+            filesize=1024,
+            place_in_queue=None,
+            fail_reason=None,
+            abort_reason=None,
+            take_progress_snapshot=lambda: snapshot,
+        )
+        transfers = SimpleNamespace(
+            download=mock.AsyncMock(return_value=transfer),
+            abort=mock.AsyncMock(),
+        )
+        client = SimpleNamespace(transfers=transfers)
+        service = soulseek_backend._Service()
+        service._configure = mock.AsyncMock(return_value=client)
+        service._client = client
+        clock = SimpleNamespace(time=mock.Mock(side_effect=[0.0, 0.0, 1.0]))
+
+        with (
+            mock.patch.object(
+                soulseek_backend.asyncio, "get_running_loop", return_value=clock
+            ),
+            mock.patch.object(
+                soulseek_backend.asyncio, "sleep", new=mock.AsyncMock()
+            ),
+            self.assertRaisesRegex(
+                soulseek_backend.SoulseekTransientError, "No Soulseek transfer progress"
+            ),
+        ):
+            await service._download(
+                {"stale_timeout_s": 0.5},
+                {"username": "peer", "remote_path": "Track.flac"},
+                None,
+                threading.Event(),
+            )
+
+        transfers.abort.assert_awaited_once_with(transfer)
 
     async def test_browse_user_normalizes_public_and_locked_folder_files(self):
         public = [

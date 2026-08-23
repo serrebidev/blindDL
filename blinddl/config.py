@@ -171,6 +171,9 @@ DEFAULTS = {
     # One network search can contain many thousands of individual files. This
     # cap keeps the accessible results list responsive.
     "soulseek_max_results": 500,
+    # Retry a peer transfer that makes no progress for this many seconds.
+    # Zero disables stalled-transfer detection.
+    "soulseek_stale_timeout_s": 30,
     # Rooms joined from the Chat tab are restored by aioslsk after reconnects.
     "soulseek_rooms": [],
     # Names in this subset were joined/created as private rooms. Keeping the

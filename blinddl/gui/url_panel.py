@@ -8,7 +8,10 @@ import threading
 
 import wx
 
-from .. import adult_backend, applemusic_backend, deezer_backend, preview, sideb_backend, ytdlp_backend
+from .. import (
+    adult_backend, applemusic_backend, deezer_backend, preview, sideb_backend,
+    soulseek_backend, ytdlp_backend,
+)
 from ..downloader import addition_summary
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
@@ -68,6 +71,12 @@ class UrlPanel(wx.Panel):
         if not url:
             self.frame.announce("Enter a URL.")
             return
+        if soulseek_backend.is_soulseek_uri(url):
+            self.frame.announce(
+                "Soulseek files cannot be played before downloading. "
+                "Choose Download to add this link to the queue."
+            )
+            return
         audio_only = self.format_radio.GetSelection() == 0
         token = self.play_token = object()
         self.play_btn.Disable()
@@ -118,6 +127,16 @@ class UrlPanel(wx.Panel):
                          daemon=True).start()
 
     def _inspect(self, url, audio_only):
+        if soulseek_backend.is_soulseek_uri(url):
+            try:
+                items, title = soulseek_backend.resolve_uri(
+                    url, self.frame.config
+                )
+            except Exception as exc:  # noqa: BLE001 - shown to the user
+                wx.CallAfter(self._inspect_failed, str(exc))
+                return
+            wx.CallAfter(self._inspect_done, items, title, True, "soulseek")
+            return
         adult_error = None
         if adult_backend.is_supported_url(url):
             if not self.frame.config["adult_sites_enabled"]:
@@ -219,6 +238,10 @@ class UrlPanel(wx.Panel):
                     added.append(self.frame.queue.add_applemusic(
                         item["url"], item["title"], folder=folder
                     ))
+                elif engine == "soulseek":
+                    added.append(
+                        self.frame.queue.add_soulseek(item, item["title"])
+                    )
                 elif engine in ("sideb", "deezer"):
                     added.append(
                         self.frame.queue.add_sideb(item["url"], item["title"],

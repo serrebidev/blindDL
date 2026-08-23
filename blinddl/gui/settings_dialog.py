@@ -705,6 +705,21 @@ class SettingsDialog(wx.Dialog):
             "Lower values make large Soulseek searches faster to sort and lighter on memory and CPU."
         )
 
+        stale_label = wx.StaticText(
+            page, label="Stalled transfer &timeout, seconds (0 = disabled):"
+        )
+        self.soulseek_stale_spin = wx.SpinCtrl(
+            page, min=0, max=86400,
+            initial=int(config["soulseek_stale_timeout_s"]),
+        )
+        self.soulseek_stale_spin.SetName(
+            "Soulseek stalled transfer timeout in seconds, 0 is disabled"
+        )
+        self.soulseek_stale_spin.SetHelpText(
+            "Automatically retries a peer when its transfer state, byte count, "
+            "and queue position stop changing for this long."
+        )
+
         down_label = wx.StaticText(
             page, label="Download limit, &KiB per second (0 = unlimited):"
         )
@@ -764,6 +779,8 @@ class SettingsDialog(wx.Dialog):
         limits.Add(self.soulseek_slots_spin, 0)
         limits.Add(results_label, 0, wx.ALIGN_CENTER_VERTICAL)
         limits.Add(self.soulseek_results_spin, 0)
+        limits.Add(stale_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        limits.Add(self.soulseek_stale_spin, 0)
         sizer.Add(limits, 0, wx.EXPAND | wx.ALL, 8)
         _row(sizer, down_label, self.soulseek_down_spin)
         _row(sizer, up_label, self.soulseek_up_spin)
@@ -786,6 +803,7 @@ class SettingsDialog(wx.Dialog):
             self.soulseek_obfuscate_check,
             self.soulseek_slots_spin,
             self.soulseek_results_spin,
+            self.soulseek_stale_spin,
             self.soulseek_down_spin,
             self.soulseek_up_spin,
         )
@@ -1439,6 +1457,9 @@ class SettingsDialog(wx.Dialog):
         self.config["soulseek_obfuscate"] = self.soulseek_obfuscate_check.GetValue()
         self.config["soulseek_upload_slots"] = self.soulseek_slots_spin.GetValue()
         self.config["soulseek_max_results"] = self.soulseek_results_spin.GetValue()
+        self.config["soulseek_stale_timeout_s"] = (
+            self.soulseek_stale_spin.GetValue()
+        )
         self.config["soulseek_max_download_kib"] = self.soulseek_down_spin.GetValue()
         self.config["soulseek_max_upload_kib"] = self.soulseek_up_spin.GetValue()
 

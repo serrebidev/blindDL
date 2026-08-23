@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from . import (
     adult_backend, archive_backend, audiobook_backend, deezer_backend,
-    sideb_backend, torrent_backend, ytdlp_backend,
+    sideb_backend, soulseek_backend, torrent_backend, ytdlp_backend,
 )
 
 # A Deezer track id, wherever it is carried: a deezer.com link, or the
@@ -124,6 +124,10 @@ def result_url(item):
     than a short-lived CDN stream. Music results carry no page URL, so their
     download URL is the only thing worth copying.
     """
+    if item.get("kind") == "soulseek":
+        return soulseek_backend.soulseek_uri(
+            item.get("username"), item.get("remote_path")
+        )
     if item.get("kind") == "torrent":
         # The magnet is the useful thing to paste into a torrent client; the
         # indexer's own page is not what anyone copies a torrent for.

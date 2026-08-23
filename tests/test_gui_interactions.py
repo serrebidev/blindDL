@@ -827,6 +827,32 @@ class GuiInteractionTests(unittest.TestCase):
         panel.shutdown()
         panel.Destroy()
 
+    def test_soulseek_link_in_url_tab_uses_the_soulseek_queue(self):
+        panel = UrlPanel(self.host, self.frame)
+        item = {
+            "kind": "soulseek",
+            "username": "peer",
+            "remote_path": r"Music\Track.flac",
+            "title": "Track.flac",
+        }
+        with (
+            mock.patch.object(
+                soulseek_backend, "resolve_uri", return_value=([item], "Track.flac")
+            ) as resolve,
+            mock.patch(
+                "blinddl.gui.url_panel.wx.CallAfter",
+                side_effect=lambda callback, *args: callback(*args),
+            ),
+        ):
+            panel._inspect("slsk://peer/Music/Track.flac", True)
+
+        resolve.assert_called_once_with(
+            "slsk://peer/Music/Track.flac", self.frame.config
+        )
+        self.assertEqual(self.frame.queue.calls[-1], ("soulseek", item, "Track.flac"))
+        panel.shutdown()
+        panel.Destroy()
+
     def test_a_playlist_downloads_into_a_folder_of_its_own(self):
         panel = UrlPanel(self.host, self.frame)
         entries = [

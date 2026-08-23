@@ -10,6 +10,18 @@ from unittest import mock
 from blinddl import preview
 
 
+class SoulseekLinkTests(unittest.TestCase):
+    def test_soulseek_result_has_a_shareable_direct_link(self):
+        self.assertEqual(
+            preview.result_url({
+                "kind": "soulseek",
+                "username": "some user",
+                "remote_path": r"Music\Artist & Guest\Track 01.flac",
+            }),
+            "slsk://some%20user/Music/Artist%20%26%20Guest/Track%2001.flac",
+        )
+
+
 class AppleMusicPreviewTests(unittest.TestCase):
     def test_applemusic_row_uses_its_own_preview_url(self):
         item = {
