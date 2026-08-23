@@ -148,6 +148,22 @@ Books prefer EPUB and plain text over scanned PDFs, land in a `Books` subfolder,
 
 Ctrl+Shift+S chooses which sites each source searches, and newly supported sites are enabled automatically. Anna's Archive results resolve through the public LibGen mirrors; if you have a membership, put its key in Settings to use the fast partner servers instead.
 
+## Podcast archiver
+
+Tools, **Podcast archiver** (Ctrl+Shift+P) reconstructs a podcast's complete feed history. Paste an RSS or Apple Podcasts URL to open it directly, or type a name to search Apple's public podcast directory and choose the show from the accessible results list. The current feed is always read first. **Include Wayback Machine feed history** then finds up to 5,000 unique old copies of every discovered feed URL, reads them concurrently, and merges their playable episodes into one newest-first list.
+
+Long-running shows often move between podcast hosts. The archiver follows the live HTTP redirect, `itunes:new-feed-url`, and Atom self and next links as a bounded graph, checking the history of each newly discovered feed address. Copies are deduplicated by GUID and media URL, with title plus publication date bridging the case where a host move changed both. The live enclosure is preferred when it still exists. Readable snapshots are cached locally, so a later scan reuses them instead of asking archive.org again; a failed or unavailable snapshot is reported without losing the episodes recovered from the other versions, and **Stop** cancels a long scan.
+
+The episode window uses the same keyboard-accessible checked list and player as albums: move to any episode to preview or play it, press Space to tick it, play the ticked episodes in the order chosen, or use **Select all**. **Download selected** queues the ticks together in a folder named after the podcast. Back in the archiver, **Save combined RSS** writes the deduplicated history as a standard RSS file for a podcatcher. Turn Wayback history off when only the current feed is wanted.
+
+Source checkouts also expose the reconstruction as a script:
+
+```
+python -m blinddl.podcast_archiver RSS_OR_APPLE_URL -o podcast-archive.xml
+```
+
+Add `--current-only` to skip archive.org or `--max-snapshots N` for a shorter initial scan. The directory search uses Apple's credential-free Search API; the archive scan talks directly to the Internet Archive, so no Backfeed, Podcast Index, or Podchaser account is required.
+
 ## Soulseek
 
 Soulseek is an optional peer-to-peer backend. Enable it and enter an account on the **Soulseek** Settings page, or use **Sign in or sign up** there: Soulseek registers an unused username during its first successful login. Once connected, Search gains four Soulseek-only choices for music and audio, movies and video, books and documents, and `.torrent` files. The ordinary Music, Internet Archive, book, torrent, YouTube, and adult choices continue to search only their named sites, avoiding duplicate and unrelated peer results. Each Soulseek result identifies the peer, shows its remote folder, and reports its free-slot, queue, and average-speed information. Its context menu can download the file or its whole containing folder, browse the peer, send a message, add the peer as a friend, grant upload priority, view the peer's profile, or follow them so anything they share next is downloaded on its own. **Copy URL** produces a reusable `slsk://user/shared/path` link. Paste a file link into the URL tab to queue it directly; a folder link ending in `/` reads that folder and its children, lets you choose the files, and keeps their folder structure. Downloads use Soulseek's remote queue and report progress, speed, ETA, errors, and cancellation in BlindDL's Downloads tab.

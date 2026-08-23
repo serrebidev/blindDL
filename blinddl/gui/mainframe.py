@@ -31,6 +31,7 @@ from .downloads_panel import DownloadsPanel
 from .feeds_dialog import FeedsDialog
 from .library_panel import LibraryPanel
 from .messages_panel import MessagesPanel
+from .podcast_archiver_dialog import PodcastArchiverDialog
 from .queue_panel import QueuePanel
 from .search_panel import SearchPanel
 from .settings_dialog import SettingsDialog
@@ -266,6 +267,10 @@ class MainFrame(wx.Frame):
         tools_menu.Append(self.ID_ADD_SUB, "&Add subscription...")
         self.ID_CHECK_SUBS = wx.NewIdRef()
         tools_menu.Append(self.ID_CHECK_SUBS, "Check &subscriptions\tCtrl+Shift+C")
+        tools_menu.AppendSeparator()
+        self.ID_PODCAST_ARCHIVER = wx.NewIdRef()
+        tools_menu.Append(
+            self.ID_PODCAST_ARCHIVER, "Podcast &archiver...\tCtrl+Shift+P")
 
         # Checking for updates is about blindDL itself rather than about the
         # media it fetches, which is what everything left in Tools is, so it
@@ -290,6 +295,9 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_add_subscription, id=self.ID_ADD_SUB)
         self.Bind(wx.EVT_MENU, self.on_check_updates, id=self.ID_UPDATE)
         self.Bind(wx.EVT_MENU, self.on_check_subs, id=self.ID_CHECK_SUBS)
+        self.Bind(
+            wx.EVT_MENU, self.on_podcast_archiver,
+            id=self.ID_PODCAST_ARCHIVER)
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
 
     def _bind_shortcuts(self):
@@ -819,6 +827,13 @@ class MainFrame(wx.Frame):
     def on_add_subscription(self, event):
         self.show_tab(TAB_SUBS)
         self.subs_panel.on_add(event)
+
+    def on_podcast_archiver(self, event=None):
+        dialog = PodcastArchiverDialog(self)
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
 
     def _check_subs_worker(self):
         self.subs.check_all()

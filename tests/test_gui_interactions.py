@@ -27,6 +27,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         browser_cookies,
         deezer_backend,
         musicdl_backend,
+        podcast_archiver,
         preview,
         search_kind,
         search_order,
@@ -59,6 +60,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui import mainframe as mainframe_module
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
     from blinddl.gui.messages_panel import MessagesPanel
+    from blinddl.gui.podcast_archiver_dialog import PodcastArchiverDialog
     from blinddl.gui.queue_panel import QueuePanel
     from blinddl.gui import media_player
     from blinddl.gui.search_panel import (
@@ -384,6 +386,85 @@ class GuiInteractionTests(unittest.TestCase):
         self.app.Yield()
         self.assertEqual(dialog.selected_items(), [items[1]])
         dialog.Destroy()
+
+    def test_item_picker_accepts_podcast_specific_columns(self):
+        item = {
+            "title": "An old episode", "published_date": "2015-04-03",
+            "archived_at": "20150607080910",
+        }
+        columns = (
+            ("Title", 300, lambda row: row["title"]),
+            ("Published", 120, lambda row: row["published_date"]),
+        )
+
+        dialog = ItemPickerDialog(
+            self.host, [item], "Show", columns=columns,
+            dialog_title="Podcast archive episodes")
+        try:
+            self.assertEqual(dialog.GetTitle(), "Podcast archive episodes")
+            self.assertEqual(dialog.item_list.GetColumnCount(), 2)
+            self.assertEqual(dialog.item_list.GetColumn(1).GetText(), "Published")
+            self.assertEqual(dialog.item_list.GetItemText(0, 1), "2015-04-03")
+        finally:
+            dialog.Destroy()
+
+    def test_podcast_archiver_search_results_are_keyboard_browsable(self):
+        self.host.queue = self.frame.queue
+        self.host.config = self.frame.config
+        self.host.announce = self.frame.announce
+        self.host.register_player = self.frame.register_player
+        self.host.unregister_player = self.frame.unregister_player
+        self.host.play_media = self.frame.play_media
+        self.host.show_downloads_tab = self.frame.show_downloads_tab
+        dialog = PodcastArchiverDialog(self.host)
+        try:
+            dialog._working = True
+            dialog._generation = 3
+            dialog._search_ready(3, [{
+                "title": "Double Tap", "artist": "AM Accessible Media",
+                "feed_url": "https://example.test/feed", "track_count": 1300,
+            }])
+
+            self.assertEqual(dialog.podcast_list.GetItemCount(), 1)
+            self.assertEqual(dialog.podcast_list.GetItemText(0), "Double Tap")
+            self.assertEqual(dialog.podcast_list.GetItemText(0, 2), "1300")
+            self.assertTrue(dialog.archive_btn.IsEnabled())
+            self.assertIn("Choose one", dialog.status.GetLabel())
+        finally:
+            dialog.Destroy()
+
+    def test_podcast_picker_queues_selected_episodes_in_show_folder(self):
+        self.host.queue = self.frame.queue
+        self.host.config = self.frame.config
+        self.host.announce = self.frame.announce
+        self.host.register_player = self.frame.register_player
+        self.host.unregister_player = self.frame.unregister_player
+        self.host.play_media = self.frame.play_media
+        self.host.show_downloads_tab = mock.Mock()
+        dialog = PodcastArchiverDialog(self.host)
+        episode = {
+            "title": "Lost episode", "url": "https://example.test/lost.mp3",
+            "published_date": "2010-01-02", "archived_at": "20110102030405",
+        }
+        dialog.archive = podcast_archiver.PodcastArchive(
+            "The Show", "https://example.test/feed", [episode],
+            ["https://example.test/feed"])
+        picker = mock.Mock()
+        picker.ShowModal.return_value = wx.ID_OK
+        picker.selected_items.return_value = [episode]
+        try:
+            with mock.patch(
+                    "blinddl.gui.podcast_archiver_dialog.ItemPickerDialog",
+                    return_value=picker):
+                dialog.on_browse()
+
+            self.assertEqual(self.frame.queue.calls, [(
+                "ytdlp", "https://example.test/lost.mp3", "Lost episode", True)])
+            self.assertEqual(self.frame.queue.folders, ["The Show"])
+            picker.Destroy.assert_called_once_with()
+            self.host.show_downloads_tab.assert_called_once_with()
+        finally:
+            dialog.Destroy()
 
     def test_the_picker_plays_the_row_you_are_on_without_ticking_it(self):
         # A tick means "download this". Having to tick a track to hear it

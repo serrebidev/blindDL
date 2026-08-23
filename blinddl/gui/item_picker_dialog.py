@@ -37,10 +37,11 @@ class ItemPickerDialog(wx.Dialog):
     your order, before you commit to the download.
     """
 
-    def __init__(self, parent, items, title):
+    def __init__(self, parent, items, title, columns=None,
+                 dialog_title="Choose downloads"):
         super().__init__(
             parent,
-            title="Choose downloads",
+            title=dialog_title,
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self.items = list(items)
@@ -76,21 +77,28 @@ class ItemPickerDialog(wx.Dialog):
             "ticked them. Nothing is ticked to start with."
         )
         self.item_list.EnableCheckBoxes()
-        for column, heading in enumerate(
-                ("Title", "Artist or channel", "Duration")):
+        if columns is None:
+            columns = (
+                ("Title", 380,
+                 lambda item: item.get("title") or "Unknown title"),
+                ("Artist or channel", 200,
+                 lambda item: item.get("artist") or item.get("uploader") or ""),
+                ("Duration", 90,
+                 lambda item: ytdlp_backend.format_duration(
+                     item.get("duration_s", item.get("duration")))),
+            )
+        for column, (heading, _width, _value) in enumerate(columns):
             self.item_list.InsertColumn(column, heading)
 
         for row, item in enumerate(self.items):
-            self.item_list.InsertItem(row, item.get("title") or "Unknown title")
-            self.item_list.SetItem(
-                row, 1, item.get("artist") or item.get("uploader") or "")
-            duration = item.get("duration_s", item.get("duration"))
-            self.item_list.SetItem(
-                row, 2, ytdlp_backend.format_duration(duration))
+            values = [str(value(item) or "")
+                      for _heading, _width, value in columns]
+            self.item_list.InsertItem(row, values[0])
+            for column, value in enumerate(values[1:], 1):
+                self.item_list.SetItem(row, column, value)
 
-        self.item_list.SetColumnWidth(0, 380)
-        self.item_list.SetColumnWidth(1, 200)
-        self.item_list.SetColumnWidth(2, 90)
+        for column, (_heading, width, _value) in enumerate(columns):
+            self.item_list.SetColumnWidth(column, width)
         self.item_list.Bind(wx.EVT_LIST_ITEM_CHECKED, self._on_checked)
         self.item_list.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self._on_unchecked)
         self.item_list.Bind(wx.EVT_CONTEXT_MENU, self._on_context_menu)
