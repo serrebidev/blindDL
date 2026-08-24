@@ -153,6 +153,7 @@ PROGRESS_PERCENT_STEP = 10
 # What a server that sends no Content-Length gets instead of percentages.
 PROGRESS_BYTES_STEP = 16 * 1024 * 1024
 WINDOWS_UPDATE_LOG_NAME = "windows-update-helper.log"
+WINDOWS_PORTABLE_STAGE_PREFIX = "blindDL-update-stage-"
 
 
 class UpdateError(RuntimeError):
@@ -499,6 +500,7 @@ set "BLINDDL_RESULT=%~5"
 set "BLINDDL_VERSION=%~6"
 set "BLINDDL_LOG=%~7"
 set "PS=%~8"
+set "BLINDDL_STAGE=%~9"
 
 if "%PS%"=="" set "PS=powershell.exe"
 set "EXE_NAME=blindDL.exe"
@@ -631,6 +633,7 @@ if errorlevel 1 (
 call :clear_leftovers
 rmdir /s /q "%BACKUP_DIR%" >nul 2>nul
 if exist "%BACKUP_DIR%\." echo [blindDL update] The previous version is still on disk at "%BACKUP_DIR%"
+call :cleanup_stage
 call :save 1 ""
 exit /b 0
 
@@ -685,6 +688,7 @@ rem left over from anything -- the note would only send blindDL deleting
 rem files of the version it is still running.
 if not "%LEFTOVERS%"=="" del /f /q "%LEFTOVERS%" >nul 2>nul
 call :save 0 "%DETAIL%"
+call :cleanup_stage
 exit /b 1
 
 rem Waiting on blindDL's own process id is not enough. blindDL starts helpers
@@ -752,6 +756,22 @@ exit /b %ERRORLEVEL%
 set "BLINDDL_OK=%~1"
 set "BLINDDL_DETAIL=%~2"
 "%PS%" -NoProfile -InputFormat None -Command "$path=[string]$env:BLINDDL_RESULT; $folder=Split-Path -Parent $path; if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }; [ordered]@{ status='complete'; ok=($env:BLINDDL_OK -eq '1'); version=[string]$env:BLINDDL_VERSION; detail=[string]$env:BLINDDL_DETAIL; log=[string]$env:BLINDDL_LOG } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $path -Encoding UTF8"
+exit /b 0
+
+rem The extracted build is deliberately outside INSTALL_DIR, so moving the
+rem old installation can never move the update source away from the helper.
+rem Remove only the uniquely named staging root Python created for this run.
+:cleanup_stage
+if "%BLINDDL_STAGE%"=="" exit /b 0
+for %%D in ("%BLINDDL_STAGE%") do set "STAGE_ROOT=%%~fD"
+if "%STAGE_ROOT%"=="" exit /b 0
+if /I "%STAGE_ROOT%"=="%INSTALL_DIR%" exit /b 0
+if /I "%STAGE_ROOT%"=="%SystemRoot%" exit /b 0
+if /I "%STAGE_ROOT%"=="%SystemDrive%\" exit /b 0
+echo(%STAGE_ROOT%| "%SystemRoot%\System32\find.exe" /I "blindDL-update-stage-" >nul
+if errorlevel 1 exit /b 0
+rmdir /s /q "%STAGE_ROOT%" >nul 2>nul
+if exist "%STAGE_ROOT%\." echo [blindDL update] The staging folder could not be removed: "%STAGE_ROOT%"
 exit /b 0
 
 rem Reached from the epilogue, after the log has been closed and possibly
@@ -1114,16 +1134,28 @@ def _start_windows_helper(command):
 
 
 def _launch_windows_helper(mode, install_dir, source, version, *,
-                           elevated=False):
+                           elevated=False, staging_root=None):
     """Write the helper, start it, and leave a note if it never reports back.
 
     The helper's arguments are positional and in this order: mode, BlindDL's
     process id, the folder BlindDL runs from, the staged folder or installer,
     the result file, the version being installed, the log, and the PowerShell
-    to use for the few things a batch file cannot do itself.
+    to use for the few things a batch file cannot do itself. Portable updates
+    add the external staging root as the final argument so the helper can
+    remove it when the swap is over.
     """
     shell, powershell = _windows_update_hosts()
+    install_root = Path(install_dir).resolve()
     log_path = Path(app_data_dir()) / "updates" / WINDOWS_UPDATE_LOG_NAME
+    # A portable-data override can put Updates inside INSTALL_DIR. The batch
+    # keeps its log open for the entire swap, so such a log cannot be moved
+    # into the backup and would leave the install folder partly drained. This
+    # is the same reason BlindRSS writes helper logs in the system temp folder.
+    if _within(install_root, log_path):
+        handle, name = tempfile.mkstemp(
+            prefix="blindDL-update-", suffix=".log")
+        os.close(handle)
+        log_path = Path(name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     helper = _stage_windows_helper()
     arguments = [
@@ -1131,6 +1163,8 @@ def _launch_windows_helper(mode, install_dir, source, version, *,
         str(_update_result_path()), str(version), str(log_path),
         str(powershell),
     ]
+    if staging_root is not None:
+        arguments.append(str(staging_root))
     _write_update_result({
         "status": "pending",
         "ok": False,
@@ -1159,21 +1193,62 @@ def _launch_windows_helper(mode, install_dir, source, version, *,
     return helper
 
 
+def _make_portable_staging_root(target):
+    """Create an update work tree that cannot be moved with *target*.
+
+    Prefer a sibling so robocopy stays on one volume, as BlindRSS does. A
+    protected or otherwise unwritable parent falls back to the user's temp
+    folder; the elevated helper can still write the new files into target.
+    """
+    target = Path(target).resolve()
+    candidates = (target.parent, Path(tempfile.gettempdir()))
+    seen = set()
+    errors = []
+    for base in candidates:
+        try:
+            base = base.resolve()
+        except (OSError, ValueError):
+            continue
+        key = os.path.normcase(str(base))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            root = Path(tempfile.mkdtemp(
+                prefix=WINDOWS_PORTABLE_STAGE_PREFIX, dir=base))
+        except OSError as exc:
+            errors.append(str(exc))
+            continue
+        if not _within(target, root):
+            return root
+        shutil.rmtree(root, ignore_errors=True)
+    detail = f": {errors[-1]}" if errors else ""
+    raise UpdateError(
+        "BlindDL could not create update staging outside its portable folder"
+        f"{detail}"
+    )
+
+
 def _portable_windows_update(package_path, version):
     target = Path(sys.executable).resolve().parent
     if not (target / "blindDL.exe").is_file():
         raise UpdateError("The current portable BlindDL folder is not valid.")
     elevated = _portable_update_needs_elevation(target)
-    update_root = package_path.parent / "portable"
-    if update_root.exists():
-        shutil.rmtree(update_root)
-    update_root.mkdir()
-    _safe_extract_zip(package_path, update_root)
-    source = update_root / "blindDL"
-    if not (source / "blindDL.exe").is_file():
-        raise UpdateError("The portable update does not contain blindDL.exe.")
-    _launch_windows_helper(
-        "portable", target, source, version, elevated=elevated)
+    update_root = _make_portable_staging_root(target)
+    try:
+        _safe_extract_zip(package_path, update_root)
+        source = update_root / "blindDL"
+        if not (source / "blindDL.exe").is_file():
+            raise UpdateError("The portable update does not contain blindDL.exe.")
+        _launch_windows_helper(
+            "portable", target, source, version, elevated=elevated,
+            staging_root=update_root,
+        )
+    except Exception:
+        # Once the helper starts it owns this tree. Before that, no later
+        # process knows its random name, so the launching process cleans it.
+        shutil.rmtree(update_root, ignore_errors=True)
+        raise
     return True
 
 

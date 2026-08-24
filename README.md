@@ -77,7 +77,9 @@ The portable ZIP uses the same automatic background setup as the installer.
 The update itself is applied by a small helper that outlives BlindDL: it waits
 for BlindDL and anything it started to close, moves the old files out of the
 folder, moves the new ones in, puts back anything of yours the release does not
-ship, and starts BlindDL again. It moves the folder's contents and never renames
+ship, and starts BlindDL again. The extracted replacement and the helper's open
+log are kept outside the folder being replaced, even when portable app data was
+redirected into that folder. It moves the folder's contents and never renames
 the folder -- a sync client, an open Explorer window, or the search indexer
 holds a folder open without holding any file inside it, and a rename then fails
 for as long as they are watching.

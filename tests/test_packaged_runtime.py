@@ -317,13 +317,64 @@ def test_the_portable_update_moves_the_files_and_not_the_folder(tmp_path):
     assert "Directory]::Move" not in script
     assert ":rollback" in script
 
-    mode, _pid, install_dir, source, result, version, _log, _ps = (
+    mode, _pid, install_dir, source, result, version, _log, _ps, stage_root = (
         _helper_arguments(popen)[1:])
     assert mode == "portable"
     assert Path(install_dir) == installed
-    assert Path(source) == package.parent / "portable" / "blindDL"
+    assert Path(source) == Path(stage_root) / "blindDL"
+    assert Path(stage_root).parent == installed.parent
+    assert not updater._within(installed.resolve(), source)
     assert version == "9.9.9"
     assert Path(result) == tmp_path / "updates" / updater.UPDATE_RESULT_NAME
+    shutil.rmtree(stage_root, ignore_errors=True)
+
+
+def test_portable_data_inside_install_does_not_move_the_staged_update(tmp_path):
+    """Regression: Updates under the portable folder used to contain SOURCE."""
+    installed = tmp_path / "blindDL"
+    update_dir = installed / "Updates" / "v9.9.9"
+    update_dir.mkdir(parents=True)
+    (installed / "blindDL.exe").write_bytes(b"the old blindDL")
+    package = _portable_update_zip(
+        update_dir / "blindDL-v9.9.9-windows-x64.zip")
+    update = updater.AppUpdate("9.9.9", "", package.name, "", "", "")
+
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+            mock.patch.object(updater.sys, "executable",
+                              str(installed / "blindDL.exe")), \
+            mock.patch.object(updater, "app_data_dir",
+                              return_value=str(installed)), \
+            mock.patch.object(updater, "_portable_update_needs_elevation",
+                              return_value=False), \
+            mock.patch.object(updater, "_windows_update_hosts",
+                              return_value=("cmd.exe", "powershell.exe")), \
+            mock.patch.object(updater.subprocess, "Popen") as popen:
+        assert updater.install_app_update(update, package)
+
+    arguments = _helper_arguments(popen)
+    helper = Path(arguments[0])
+    mode, _pid, install_dir, source, result, version, log, _ps, stage_root = (
+        arguments[1:])
+    try:
+        script = helper.read_text(encoding="ascii")
+        assert mode == "portable"
+        assert Path(install_dir) == installed
+        assert Path(source) == Path(stage_root) / "blindDL"
+        assert (Path(source) / "blindDL.exe").is_file()
+        assert not updater._within(installed.resolve(), source)
+        assert not updater._within(installed.resolve(), stage_root)
+        # The helper owns this handle for the whole swap, so its log must also
+        # be outside the folder robocopy drains into the backup.
+        assert not updater._within(installed.resolve(), log)
+        assert Path(result) == installed / "updates" / updater.UPDATE_RESULT_NAME
+        assert version == "9.9.9"
+        assert 'set "BLINDDL_STAGE=%~9"' in script
+        assert "call :cleanup_stage" in script
+        assert '"%SystemRoot%\\System32\\find.exe"' in script
+    finally:
+        helper.unlink(missing_ok=True)
+        Path(log).unlink(missing_ok=True)
+        shutil.rmtree(stage_root, ignore_errors=True)
 
 
 def test_a_protected_portable_folder_uses_a_uac_helper(tmp_path):
