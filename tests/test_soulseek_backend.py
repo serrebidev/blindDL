@@ -2,6 +2,7 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import copy
 import dbm
 import json
@@ -26,9 +27,9 @@ from aioslsk.shares.model import DirectoryShareMode, SharedDirectory, SharedItem
 from aioslsk.transfer.model import FailReason, TransferDirection
 from aioslsk.transfer.state import TransferState
 
+from blinddl import soulseek_backend
 from blinddl.config import DEFAULTS
 from blinddl.downloader import DownloadItem, DownloadQueue
-from blinddl import soulseek_backend
 
 
 def _guarded_handler(name, original):
@@ -574,6 +575,51 @@ class SoulseekLeecherGuardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_startup_can_retry_with_unchanged_settings(self):
+        for failing_step in ("start", "login"):
+            with self.subTest(failing_step=failing_step):
+                service = soulseek_backend._Service()
+                service._async_lock = asyncio.Lock()
+                snapshot = soulseek_backend._config_snapshot({
+                    "soulseek_enabled": True,
+                    "soulseek_username": "listener",
+                    "soulseek_password": "secret",
+                })
+                failed = SimpleNamespace(
+                    start=mock.AsyncMock(), login=mock.AsyncMock(),
+                    stop=mock.AsyncMock(),
+                )
+                getattr(failed, failing_step).side_effect = OSError("Network unavailable")
+                recovered = SimpleNamespace(
+                    start=mock.AsyncMock(), login=mock.AsyncMock(),
+                    stop=mock.AsyncMock(),
+                    settings=SimpleNamespace(
+                        users=SimpleNamespace(friends=set()),
+                        rooms=SimpleNamespace(favorites=set()),
+                    ),
+                )
+                with (
+                    mock.patch.object(soulseek_backend, "_build_settings"),
+                    mock.patch.object(soulseek_backend, "_cache_dir", return_value="unused"),
+                    mock.patch.object(soulseek_backend, "SoulSeekClient",
+                                      side_effect=[failed, recovered]) as constructor,
+                    mock.patch.object(service, "_register_events"),
+                    mock.patch.object(service, "_set_friends"),
+                    mock.patch.object(service, "_publish_uploads"),
+                ):
+                    with self.assertRaisesRegex(soulseek_backend.SoulseekError,
+                                                "Network unavailable"):
+                        await service._configure(snapshot)
+                    failed.stop.assert_awaited_once()
+                    self.assertIsNone(service._client)
+                    self.assertIsNone(service._active_signature)
+                    self.assertIs(await service._configure(snapshot), recovered)
+                    recovered.start.assert_awaited_once()
+                    recovered.login.assert_awaited_once()
+                    # Once connected, further operations reuse the live client.
+                    self.assertIs(await service._configure(snapshot), recovered)
+                    self.assertEqual(constructor.call_count, 2)
+
     async def test_client_restart_raises_requeueable_transfer_error(self):
         transfer = SimpleNamespace(local_path=None)
         client = SimpleNamespace(
@@ -1006,9 +1052,11 @@ class SoulseekCacheDirectoryTests(unittest.TestCase):
         self.assertRegex(result, r"\(dbm\.\w+\)$")
 
     def test_probe_rejects_a_build_with_no_usable_dbm_backend(self):
-        with mock.patch.object(soulseek_backend.dbm, "whichdb", return_value=""):
-            with self.assertRaises(soulseek_backend.SoulseekError) as caught:
-                soulseek_backend.runtime_probe()
+        with (
+            mock.patch.object(soulseek_backend.dbm, "whichdb", return_value=""),
+            self.assertRaises(soulseek_backend.SoulseekError) as caught,
+        ):
+            soulseek_backend.runtime_probe()
 
         self.assertIn("dbm backends are incomplete", str(caught.exception))
 
@@ -1016,9 +1064,8 @@ class SoulseekCacheDirectoryTests(unittest.TestCase):
         missing = dbm.error[0]("db type is dbm.sqlite3, but the module is not available")
         with mock.patch.object(
             soulseek_backend.SharesShelveCache, "read", side_effect=missing
-        ):
-            with self.assertRaises(soulseek_backend.SoulseekError) as caught:
-                soulseek_backend.runtime_probe()
+        ), self.assertRaises(soulseek_backend.SoulseekError) as caught:
+            soulseek_backend.runtime_probe()
 
         self.assertIn("dbm.sqlite3", str(caught.exception))
         self.assertIn("dbm backends are incomplete", str(caught.exception))

@@ -25,8 +25,9 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote, unquote
 
 from .config import app_data_dir
@@ -36,8 +37,8 @@ _IMPORT_ERROR: ImportError | None = None
 try:
     from aioslsk.client import SoulSeekClient
     from aioslsk.commands import (
-        GetUserStatsCommand,
         GetRoomListCommand,
+        GetUserStatsCommand,
         JoinRoomCommand,
         LeaveRoomCommand,
         PeerGetDirectoryContentCommand,
@@ -63,12 +64,12 @@ try:
         PeerTransferReply,
     )
     from aioslsk.protocol.primitives import AttributeKey
+    from aioslsk.search.model import SearchQuery
     from aioslsk.settings import (
         CredentialsSettings,
         Settings,
         SharedDirectorySettingEntry,
     )
-    from aioslsk.search.model import SearchQuery
     from aioslsk.shares.cache import SharesShelveCache
     from aioslsk.shares.manager import SharesManager
     from aioslsk.shares.model import SharedDirectory
@@ -314,7 +315,7 @@ async def _shared_file_count(username: str) -> int | None:
         stats = await asyncio.wait_for(
             client(GetUserStatsCommand(username), response=True), timeout=15
         )
-    except Exception:  # noqa: BLE001 - a lookup failure must not block uploads
+    except Exception:
         logger.debug("could not read Soulseek stats for %s", username, exc_info=True)
         return None
     raw = getattr(stats, "shared_file_count", None)
@@ -651,7 +652,7 @@ async def _verify_account_async(username: str, password: str, timeout: float):
     finally:
         try:
             await client.stop()
-        except Exception:  # noqa: BLE001 - preserve the useful login error
+        except Exception:
             logger.exception("failed to stop the Soulseek account check")
 
 
@@ -918,8 +919,6 @@ class _Service:
         self._async_lock = None
         self._client = None
         self._active_signature = None
-        self._failed_signature = None
-        self._failure: Exception | None = None
         self._rescan_task = None
         self._username = ""
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
@@ -1024,7 +1023,7 @@ class _Service:
         for listener in listeners:
             try:
                 listener(dict(event))
-            except Exception:  # noqa: BLE001 - one UI listener cannot stop chat
+            except Exception:
                 logger.exception("Soulseek event listener failed")
 
     @staticmethod
@@ -1101,10 +1100,7 @@ class _Service:
 
     @staticmethod
     def _transfer_key(transfer) -> str:
-        return "{}\0{}".format(
-            str(transfer.username).casefold(),
-            str(transfer.remote_path).casefold(),
-        )
+        return f"{str(transfer.username).casefold()}\0{str(transfer.remote_path).casefold()}"
 
     def _upload_data(self, transfer) -> dict[str, Any]:
         snapshot = transfer.take_progress_snapshot()
@@ -1290,8 +1286,6 @@ class _Service:
         async with self._async_lock:
             if not snapshot["enabled"]:
                 await self._stop_client()
-                self._failed_signature = None
-                self._failure = None
                 return None
             if self._client is not None and signature == self._active_signature:
                 self._client.settings.users.friends = set(snapshot["friends"]) | set(
@@ -1300,9 +1294,9 @@ class _Service:
                 self._client.settings.rooms.favorites = set(snapshot["rooms"])
                 self._set_friends(snapshot["friends"], self._client)
                 return self._client
-            if signature == self._failed_signature and self._failure is not None:
-                raise self._failure
-
+            # A failed startup leaves no client. Retry on the next operation,
+            # even with unchanged settings: connectivity and port availability
+            # can recover without the user changing their credentials.
             await self._stop_client()
             settings = _build_settings(snapshot)
             cache_dir = _cache_dir()
@@ -1318,11 +1312,9 @@ class _Service:
             except Exception as exc:
                 try:
                     await client.stop()
-                except Exception:  # noqa: BLE001 - preserve the login error
+                except Exception:
                     logger.exception("failed to stop an unsuccessful Soulseek client")
                 error = SoulseekError(str(exc) or exc.__class__.__name__)
-                self._failed_signature = signature
-                self._failure = error
                 raise error from exc
 
             self._client = client
@@ -1330,8 +1322,6 @@ class _Service:
             self._set_friends(snapshot["friends"], client)
             self._publish_uploads(client)
             self._active_signature = signature
-            self._failed_signature = None
-            self._failure = None
             return client
 
     def configure(self, config, timeout: float = 30.0):
@@ -1886,7 +1876,7 @@ class _Service:
                 await client.shares.scan()
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - background sharing is best effort
+        except Exception:
             logger.exception("Soulseek library rescan failed")
 
     def schedule_rescan(self):
