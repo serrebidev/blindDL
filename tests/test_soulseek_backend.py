@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from aioslsk.network.connection import ConnectionState
 from aioslsk.protocol.primitives import (
     Attribute,
     AttributeKey,
@@ -39,6 +40,34 @@ def _guarded_handler(name, original):
         "_on_peer_transfer_request": soulseek_backend._guarded_request_handler,
     }
     return factories[name](original)
+
+
+def _fake_client(*, logged_in=True, login=None):
+    """A stand-in client that knows whether it is still on the server."""
+    connection = SimpleNamespace(
+        state=ConnectionState.CONNECTED if logged_in else ConnectionState.CLOSED
+    )
+    client = SimpleNamespace(
+        start=mock.AsyncMock(),
+        login=login if login is not None else mock.AsyncMock(),
+        stop=mock.AsyncMock(),
+        session=object() if logged_in else None,
+        settings=SimpleNamespace(
+            users=SimpleNamespace(friends=set()),
+            rooms=SimpleNamespace(favorites=set()),
+        ),
+    )
+    client.network = SimpleNamespace(
+        server_connection=connection,
+        connect_server=mock.AsyncMock(),
+    )
+
+    def _sign_in():
+        client.session = object()
+        connection.state = ConnectionState.CONNECTED
+
+    client.sign_in = _sign_in
+    return client
 
 
 def _file(path, extension, size=1024, duration=0):
@@ -590,14 +619,7 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
                     stop=mock.AsyncMock(),
                 )
                 getattr(failed, failing_step).side_effect = OSError("Network unavailable")
-                recovered = SimpleNamespace(
-                    start=mock.AsyncMock(), login=mock.AsyncMock(),
-                    stop=mock.AsyncMock(),
-                    settings=SimpleNamespace(
-                        users=SimpleNamespace(friends=set()),
-                        rooms=SimpleNamespace(favorites=set()),
-                    ),
-                )
+                recovered = _fake_client()
                 with (
                     mock.patch.object(soulseek_backend, "_build_settings"),
                     mock.patch.object(soulseek_backend, "_cache_dir", return_value="unused"),
@@ -619,6 +641,68 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
                     # Once connected, further operations reuse the live client.
                     self.assertIs(await service._configure(snapshot), recovered)
                     self.assertEqual(constructor.call_count, 2)
+
+    async def test_a_dropped_session_is_signed_back_in_without_a_new_client(self):
+        """The server hangs up; the next search must not quietly return nothing."""
+        service = soulseek_backend._Service()
+        service._async_lock = asyncio.Lock()
+        snapshot = soulseek_backend._config_snapshot({
+            "soulseek_enabled": True,
+            "soulseek_username": "listener",
+            "soulseek_password": "secret",
+        })
+        client = _fake_client()
+        client.login.side_effect = lambda *a, **k: client.sign_in()
+        with (
+            mock.patch.object(soulseek_backend, "_build_settings"),
+            mock.patch.object(soulseek_backend, "_cache_dir", return_value="unused"),
+            mock.patch.object(soulseek_backend, "SoulSeekClient",
+                              side_effect=[client]) as constructor,
+            mock.patch.object(service, "_register_events"),
+            mock.patch.object(service, "_set_friends"),
+            mock.patch.object(service, "_publish_uploads"),
+        ):
+            self.assertIs(await service._configure(snapshot), client)
+
+            # What an EOF from the server leaves behind: a live client object
+            # with no session, which aioslsk will not reconnect on its own.
+            client.session = None
+            client.network.server_connection.state = ConnectionState.CLOSED
+
+            self.assertIs(await service._configure(snapshot), client)
+            client.network.connect_server.assert_awaited_once()
+            self.assertEqual(client.login.call_count, 2)
+            # Reconnecting reuses the client, so the share index survives.
+            self.assertEqual(constructor.call_count, 1)
+            client.stop.assert_not_awaited()
+
+    async def test_a_client_that_cannot_sign_back_in_is_replaced(self):
+        service = soulseek_backend._Service()
+        service._async_lock = asyncio.Lock()
+        snapshot = soulseek_backend._config_snapshot({
+            "soulseek_enabled": True,
+            "soulseek_username": "listener",
+            "soulseek_password": "secret",
+        })
+        stale = _fake_client()
+        replacement = _fake_client()
+        with (
+            mock.patch.object(soulseek_backend, "_build_settings"),
+            mock.patch.object(soulseek_backend, "_cache_dir", return_value="unused"),
+            mock.patch.object(soulseek_backend, "SoulSeekClient",
+                              side_effect=[stale, replacement]) as constructor,
+            mock.patch.object(service, "_register_events"),
+            mock.patch.object(service, "_set_friends"),
+            mock.patch.object(service, "_publish_uploads"),
+        ):
+            self.assertIs(await service._configure(snapshot), stale)
+            stale.session = None
+            stale.network.server_connection.state = ConnectionState.CLOSED
+            stale.network.connect_server.side_effect = OSError("Network unavailable")
+
+            self.assertIs(await service._configure(snapshot), replacement)
+            stale.stop.assert_awaited_once()
+            self.assertEqual(constructor.call_count, 2)
 
     async def test_client_restart_raises_requeueable_transfer_error(self):
         transfer = SimpleNamespace(local_path=None)

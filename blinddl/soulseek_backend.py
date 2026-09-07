@@ -63,6 +63,7 @@ try:
         PeerTransferQueueFailed,
         PeerTransferReply,
     )
+    from aioslsk.network.connection import ConnectionState
     from aioslsk.protocol.primitives import AttributeKey
     from aioslsk.search.model import SearchQuery
     from aioslsk.settings import (
@@ -834,6 +835,27 @@ def _build_settings(snapshot: dict[str, Any]):
     return settings
 
 
+def _session_is_live(client) -> bool:
+    """Whether this client is still signed in to the Soulseek server.
+
+    Having a client says nothing about being on the server. The server hangs
+    up with an EOF when the same account signs in somewhere else, and aioslsk
+    deliberately does not reconnect after one -- from the client's side an EOF
+    is indistinguishable from the temporary ban it applies for connecting too
+    often, which reconnecting would only prolong. So it stops its reconnect
+    watchdog and clears the session, while the client object lives on with its
+    listening ports still open. Anything sent on it afterwards goes nowhere:
+    searches simply return nothing, for as long as blindDL keeps the client.
+    """
+    if client is None or getattr(client, "session", None) is None:
+        return False
+    network = getattr(client, "network", None)
+    connection = getattr(network, "server_connection", None)
+    if connection is None:
+        return False
+    return getattr(connection, "state", None) is ConnectionState.CONNECTED
+
+
 def _format_size(size: int) -> str:
     value = float(size or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -1270,6 +1292,30 @@ class _Service:
         self._ensure_loop()
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
+    async def _resume_session(self, client, timeout: float = 30.0) -> bool:
+        """Return whether the client is on the server, signing it back in if not.
+
+        Reusing the existing client keeps the share index and the transfer
+        list, so this costs a connect and a login rather than a rescan.
+        Reconnecting also puts aioslsk's own watchdog back on duty, since that
+        starts whenever the server connection reaches CONNECTED.
+        """
+        if _session_is_live(client):
+            return True
+        try:
+            connection = client.network.server_connection
+            if getattr(connection, "state", None) is not ConnectionState.CONNECTED:
+                await asyncio.wait_for(client.network.connect_server(), timeout)
+            await asyncio.wait_for(client.login(), timeout)
+        except Exception:
+            logger.warning(
+                "Soulseek session could not be resumed; starting a new client",
+                exc_info=True,
+            )
+            return False
+        logger.info("Soulseek session resumed after the server closed it")
+        return True
+
     async def _stop_client(self):
         client, self._client = self._client, None
         self._active_signature = None
@@ -1287,16 +1333,22 @@ class _Service:
             if not snapshot["enabled"]:
                 await self._stop_client()
                 return None
-            if self._client is not None and signature == self._active_signature:
+            if (
+                self._client is not None
+                and signature == self._active_signature
+                and await self._resume_session(self._client)
+            ):
                 self._client.settings.users.friends = set(snapshot["friends"]) | set(
                     snapshot.get("priority_users", [])
                 )
                 self._client.settings.rooms.favorites = set(snapshot["rooms"])
                 self._set_friends(snapshot["friends"], self._client)
                 return self._client
-            # A failed startup leaves no client. Retry on the next operation,
-            # even with unchanged settings: connectivity and port availability
-            # can recover without the user changing their credentials.
+            # A failed startup leaves no client, and a client that could not be
+            # signed back in is no better than none. Retry on the next
+            # operation, even with unchanged settings: connectivity and port
+            # availability can recover without the user changing their
+            # credentials.
             await self._stop_client()
             settings = _build_settings(snapshot)
             cache_dir = _cache_dir()
