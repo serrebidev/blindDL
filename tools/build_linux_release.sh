@@ -39,6 +39,9 @@ fi
 "$VENV/bin/python" -m pip install --upgrade pip setuptools wheel
 "$VENV/bin/python" -m pip install "pyinstaller>=6.19" pytest -r "$ROOT/requirements.txt"
 "$VENV/bin/python" -m pip install --upgrade --pre yt-dlp
+# A reused virtual environment keeps branch-following packages at whatever
+# version string they last claimed, however much their code has moved on.
+"$VENV/bin/python" "$ROOT/tools/refresh_git_requirements.py"
 "$VENV/bin/python" -m pip check
 "$VENV/bin/python" "$ROOT/scripts/check_no_arl.py"
 cd "$ROOT"
