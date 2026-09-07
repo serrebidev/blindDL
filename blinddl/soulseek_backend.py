@@ -934,6 +934,18 @@ def _result_item(result, file_data) -> dict[str, Any]:
 
 
 class _Service:
+    # How often the keeper looks at the session, how long it waits before
+    # signing back in, and the ceiling repeated failures back off to.
+    # Staying signed in is the point: uploads can only be served, and queued
+    # downloads only move, while there is a session, so the first attempt
+    # comes quickly. Repeated failures still back off, because an EOF from
+    # the server can also mean "stop connecting for a while" -- but the
+    # ceiling stays minutes, not a quarter of an hour, so a user who shares
+    # is never left off the network for long.
+    _KEEPER_POLL_S = 5.0
+    _RESUME_DELAY_S = 10.0
+    _RESUME_MAX_DELAY_S = 300.0
+
     def __init__(self, history_path=None):
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -942,6 +954,8 @@ class _Service:
         self._client = None
         self._active_signature = None
         self._rescan_task = None
+        self._keeper_task = None
+        self._dropped_at = None
         self._username = ""
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self._listeners_lock = threading.Lock()
@@ -1292,6 +1306,60 @@ class _Service:
         self._ensure_loop()
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
+    async def _keep_session(self):
+        """Sign back in while nobody is asking Soulseek for anything.
+
+        Recovering on the next search is enough to make searching work, but a
+        signed-out client is also invisible: friends see the user as offline
+        and nothing of theirs can be downloaded, however long the app is left
+        open. This closes that gap without a user having to touch anything.
+        """
+        delay = self._RESUME_DELAY_S
+        while True:
+            await asyncio.sleep(self._KEEPER_POLL_S)
+            client = self._client
+            if client is None:
+                continue
+            if _session_is_live(client):
+                delay = self._RESUME_DELAY_S
+                self._dropped_at = None
+                continue
+            now = asyncio.get_running_loop().time()
+            if self._dropped_at is None:
+                self._dropped_at = now
+                continue
+            if now - self._dropped_at < delay:
+                continue
+            async with self._async_lock:
+                client = self._client
+                resumed = (
+                    client is not None
+                    and not _session_is_live(client)
+                    and await self._resume_session(client)
+                )
+            if resumed:
+                delay = self._RESUME_DELAY_S
+                self._dropped_at = None
+            else:
+                # Each failure waits longer, so an address the server is
+                # holding at arm's length is not knocking every minute.
+                delay = min(delay * 2, self._RESUME_MAX_DELAY_S)
+                self._dropped_at = asyncio.get_running_loop().time()
+
+    def _start_keeper(self):
+        if self._keeper_task is not None and not self._keeper_task.done():
+            return
+        self._keeper_task = asyncio.get_running_loop().create_task(
+            self._keep_session()
+        )
+
+    async def _stop_keeper(self):
+        task, self._keeper_task = self._keeper_task, None
+        self._dropped_at = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _resume_session(self, client, timeout: float = 30.0) -> bool:
         """Return whether the client is on the server, signing it back in if not.
 
@@ -1317,6 +1385,7 @@ class _Service:
         return True
 
     async def _stop_client(self):
+        await self._stop_keeper()
         client, self._client = self._client, None
         self._active_signature = None
         self._username = ""
@@ -1370,6 +1439,7 @@ class _Service:
                 raise error from exc
 
             self._client = client
+            self._start_keeper()
             self._username = snapshot["username"]
             self._set_friends(snapshot["friends"], client)
             self._publish_uploads(client)

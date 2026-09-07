@@ -676,6 +676,42 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(constructor.call_count, 1)
             client.stop.assert_not_awaited()
 
+    async def test_the_keeper_signs_back_in_while_nobody_is_searching(self):
+        """Uploads and queued downloads need a session, not a user at the keyboard."""
+        service = soulseek_backend._Service()
+        service._async_lock = asyncio.Lock()
+        service._KEEPER_POLL_S = 0.01
+        service._RESUME_DELAY_S = 0.01
+        snapshot = soulseek_backend._config_snapshot({
+            "soulseek_enabled": True,
+            "soulseek_username": "listener",
+            "soulseek_password": "secret",
+        })
+        client = _fake_client()
+        client.login.side_effect = lambda *a, **k: client.sign_in()
+        with (
+            mock.patch.object(soulseek_backend, "_build_settings"),
+            mock.patch.object(soulseek_backend, "_cache_dir", return_value="unused"),
+            mock.patch.object(soulseek_backend, "SoulSeekClient", side_effect=[client]),
+            mock.patch.object(service, "_register_events"),
+            mock.patch.object(service, "_set_friends"),
+            mock.patch.object(service, "_publish_uploads"),
+        ):
+            await service._configure(snapshot)
+            client.session = None
+            client.network.server_connection.state = ConnectionState.CLOSED
+
+            for _ in range(500):
+                await asyncio.sleep(0.01)
+                if client.session is not None:
+                    break
+
+            self.assertIsNotNone(client.session)
+            client.network.connect_server.assert_awaited()
+            self.assertEqual(client.login.call_count, 2)
+            await service._stop_client()
+            self.assertIsNone(service._keeper_task)
+
     async def test_a_client_that_cannot_sign_back_in_is_replaced(self):
         service = soulseek_backend._Service()
         service._async_lock = asyncio.Lock()
