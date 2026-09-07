@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.24.46"
+version = "0.24.47"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -137,4 +137,4 @@ exclude = ["musicdl", "sideb"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-p no:cacheprovider --basetemp=.pytest-tmp"
+addopts = "-p no:cacheprovider --basetemp=.pytest-tmp-blinddl"

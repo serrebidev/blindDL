@@ -34,7 +34,7 @@ class AdultProviderTests(unittest.TestCase):
                 "machotube", "missav", "mymusclevideo", "onlyfans",
                 "porngo", "pornhub", "porntrex", "redtube", "sex",
                 "spankbang", "thumbzilla", "thisvid", "tube8", "xfreehd",
-                "xhamster", "xnxx", "xvideos", "youporn",
+                "thegay", "xhamster", "xnxx", "xvideos", "youporn",
             },
         )
         self.assertTrue(adult_backend.is_supported_url(
@@ -57,6 +57,8 @@ class AdultProviderTests(unittest.TestCase):
             "https://www.machotube.tv/movies/123/example"))
         self.assertTrue(adult_backend.is_supported_url(
             "https://homo.xxx/videos/123/"))
+        self.assertTrue(adult_backend.is_supported_url(
+            "https://thegay.com/videos/72759/example/"))
         self.assertEqual(
             adult_backend.provider_for_url(
                 "https://subdomain.xvideos.com/video.test").key,
@@ -67,6 +69,54 @@ class AdultProviderTests(unittest.TestCase):
                 "https://xvideos2.com/video.test").key,
             "xvideos",
         )
+
+    def test_thegay_direct_url_uses_first_party_player_endpoint(self):
+        encoded = (
+            "L2dldF9maWxlLz\u0415vYjdkNThlODJhNmIwZjk2\u041cmI1YWJiZG\u041cx"
+            "ZTdiZTNlOTllZG\u041c1NTVh\u041cD\u0410yLzcy\u041cD\u0410wLzcyNzU5Lzcy"
+            "NzU5Lm1wN\u04218,ZD05\u041cTQmYnI9NDYmdGk9\u041cTc4ODgxNz\u0415wNg~~"
+        )
+        response = _Response("", [{"video_url": encoded}])
+        with mock.patch.object(adult_backend.requests, "get", return_value=response) as get:
+            items, title = adult_backend.inspect_url(
+                "https://thegay.com/videos/72759/leather-cigar-smoking-cop-and-bear/")
+
+        self.assertEqual(title, "Leather Cigar Smoking Cop And Bear")
+        self.assertEqual(items[0]["provider"], "thegay")
+        self.assertTrue(items[0]["direct_url"].startswith(
+            "https://thegay.com/get_file/"))
+        self.assertEqual(get.call_args.kwargs["params"]["video_id"], "72759")
+
+    def test_thegay_rejects_non_video_page(self):
+        with self.assertRaisesRegex(ValueError, "requires a /videos"):
+            adult_backend._thegay_video_id("https://thegay.com/categories/bear/")
+
+    def test_thegay_search_uses_json_catalog_and_skips_private_entries(self):
+        response = _Response("", {"videos": [
+            {
+                "video_id": "72759",
+                "dir": "leather-cigar-smoking-cop-and-bear",
+                "title": "Leather Cigar smoking Cop and bear",
+                "duration": "15:14",
+                "username": "LKN4DAD",
+                "tags": "Leather,Smoking",
+                "categories": "Fetish,Bear",
+                "is_private": "0",
+            },
+            {
+                "video_id": "72760", "dir": "private-video",
+                "title": "Private", "is_private": "1",
+            },
+        ]})
+        with mock.patch.object(adult_backend.requests, "get", return_value=response) as get:
+            items = adult_backend._search_thegay(
+                "leather cigar", adult_backend.CONTENT_GAY)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["duration_s"], 914)
+        self.assertEqual(items[0]["url"],
+                         "https://thegay.com/videos/72759/leather-cigar-smoking-cop-and-bear/")
+        self.assertEqual(get.call_args.kwargs["params"]["s"], "leather cigar")
 
     def test_eporner_uses_native_filters_where_query_compatible(self):
         provider = adult_backend.PROVIDERS["eporner"]
@@ -204,6 +254,36 @@ class AdultProviderTests(unittest.TestCase):
                 categorized, _kwargs = adult_backend._search_parameters(
                     provider, query, adult_backend.CONTENT_STRAIGHT)
                 self.assertEqual(categorized, query)
+
+    def test_best_match_favors_title_over_spammy_tag_matches(self):
+        title_match = {
+            "title": "Professional massage appointment",
+            "artist": "",
+            "content_tags": "amateur, studio",
+        }
+        tag_match = {
+            "title": "Free sign up and live cam links",
+            "artist": "",
+            "content_tags": "massage, relaxation",
+        }
+
+        title_score = adult_backend._adult_relevance_score(
+            "massage", title_match)
+        tag_score = adult_backend._adult_relevance_score("massage", tag_match)
+
+        self.assertGreater(title_score, tag_score)
+        ranked = adult_backend._rank_search_results(
+            [tag_match, title_match], "massage", search_order.ORDER_RELEVANCE)
+        self.assertGreater(ranked[1]["score"], ranked[0]["score"])
+
+    def test_adult_spam_ranking_only_applies_to_best_match(self):
+        item = {"title": "Massage", "artist": "", "content_tags": ""}
+
+        ranked = adult_backend._rank_search_results(
+            [item], "massage", search_order.ORDER_POPULAR)
+
+        self.assertIs(ranked[0], item)
+        self.assertNotIn("score", item)
 
     def test_gay_catalog_search_passes_query_through_unchanged(self):
         for key in adult_backend._GAY_CATALOG_SEARCH:

@@ -146,7 +146,7 @@ def _self_test(output_path: str) -> int:
         for provider in PROVIDERS.values():
             if provider.download_style == "aebn":
                 _import_aebn()
-            elif provider.download_style not in ("creator", "ytdlp"):
+            elif provider.download_style not in ("creator", "thegay", "ytdlp"):
                 _import_provider(provider)
         return len(PROVIDERS)
 

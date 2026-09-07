@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from html.parser import HTMLParser
-from urllib.parse import quote, urlencode, urljoin, urlparse
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
 
 import requests
 
@@ -136,6 +136,7 @@ _GAY_MALE_RESULT_PATTERN = re.compile(
 _TRUSTED_GAY_CATALOGS = {
     "mymusclevideo", "thisvid", "xhamster", "xnxx",
     "gay0day", "gayporno", "gayfuckporn", "icegay", "machotube", "homo",
+    "thegay",
 }
 
 # Gay-only catalogs blindDL parses directly.  Their own search is already the
@@ -144,8 +145,17 @@ _TRUSTED_GAY_CATALOGS = {
 # kink label.
 _GAY_ONLY_CATALOGS = {
     "mymusclevideo", "gay0day", "gayporno", "gayfuckporn",
-    "icegay", "machotube", "homo",
+    "icegay", "machotube", "homo", "thegay",
 }
+
+# TheGay's search listings are rendered client-side, but each public video
+# page has a stable ID and a first-party JSON endpoint the site's own player
+# uses to obtain a short-lived media URL.  It is therefore supported as a
+# direct-link provider rather than pretending its HTML search is reliable.
+_THEGAY_VIDEO_PATH = re.compile(r"^/videos/(\d+)/[^/]+/?$")
+_THEGAY_URL_ALPHABET = (
+    "АВСDЕFGHIJKLМNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,~"
+)
 
 # Search URL template (receives the quoted query) and the video-page URL
 # pattern for each directly-parsed gay catalog.
@@ -286,6 +296,11 @@ PROVIDERS = {
         Provider(
             "thisvid", "ThisVid", "yt_dlp", ("thisvid.com",),
             "search", download_style="ytdlp",
+        ),
+        Provider(
+            "thegay", "TheGay", "requests", ("thegay.com",),
+            "search", download_style="thegay",
+            search_categories=(CONTENT_GAY,),
         ),
         Provider(
             "tube8", "Tube8", "tube8_api", ("tube8.com",),
@@ -901,6 +916,54 @@ def _search_gay_catalog(key, query, category):
     ]
 
 
+def _search_thegay(query, category):
+    """Search TheGay's public JSON catalog, excluding private entries."""
+    response = requests.get(
+        "https://thegay.com/api/videos.php",
+        params={
+            "params": (
+                f"259200/str/relevance/{MAX_RESULTS_PER_SITE}/"
+                "search..1.all.."
+            ),
+            "s": query,
+        },
+        headers={"User-Agent": _UA},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    videos = payload.get("videos", ()) if isinstance(payload, dict) else ()
+    items = []
+    for video in videos:
+        if not isinstance(video, dict) or str(video.get("is_private")) == "1":
+            continue
+        video_id = str(video.get("video_id") or "").strip()
+        directory = str(video.get("dir") or "").strip("/")
+        title = html.unescape(str(video.get("title") or "")).strip()
+        if not (video_id.isdigit() and directory and title):
+            continue
+        tags = html.unescape(str(video.get("tags") or "")).strip()
+        categories = html.unescape(str(video.get("categories") or "")).strip()
+        items.append({
+            "id": f"adult:thegay:{video_id}",
+            "kind": "adult",
+            "provider": "thegay",
+            "title": title,
+            "artist": html.unescape(
+                str(video.get("display_name") or video.get("username") or "")
+            ).strip(),
+            "source": "TheGay",
+            "duration_s": _duration_seconds(video.get("duration")),
+            "file_size": "",
+            "url": f"https://thegay.com/videos/{video_id}/{directory}/",
+            "tags": ", ".join(part for part in (tags, categories) if part),
+            "adult_category": category,
+        })
+        if len(items) >= MAX_RESULTS_PER_SITE:
+            break
+    return items
+
+
 def _is_mymusclevideo_playlist_url(url):
     parsed = urlparse(url)
     return (
@@ -1144,6 +1207,82 @@ def _inspect_aebn(url):
     return [item], item["title"]
 
 
+def _thegay_video_id(url):
+    """Return the public TheGay video ID, rejecting non-video site pages."""
+    parsed = urlparse(url)
+    if not _host_matches(parsed.hostname, ("thegay.com",)):
+        raise ValueError("TheGay URL must use thegay.com.")
+    match = _THEGAY_VIDEO_PATH.fullmatch(parsed.path)
+    if match is None:
+        raise ValueError("TheGay support requires a /videos/<id>/<title>/ URL.")
+    return match.group(1)
+
+
+def _decode_thegay_video_url(value):
+    """Decode the custom base-64-style URL returned by TheGay's player API."""
+    if not isinstance(value, str) or not value:
+        raise RuntimeError("TheGay did not return a media URL.")
+    if len(value) % 4:
+        raise RuntimeError("TheGay returned a malformed media URL.")
+    try:
+        decoded = bytearray()
+        for index in range(0, len(value), 4):
+            first, second, third, fourth = (
+                _THEGAY_URL_ALPHABET.index(character)
+                for character in value[index:index + 4]
+            )
+            decoded.append((first << 2) | (second >> 4))
+            if third != 64:
+                decoded.append(((second & 15) << 4) | (third >> 2))
+            if fourth != 64:
+                decoded.append(((third & 3) << 6) | fourth)
+    except ValueError as exc:
+        raise RuntimeError("TheGay returned an invalid media URL.") from exc
+    return unquote(decoded.decode("latin-1"))
+
+
+def _inspect_thegay(url):
+    """Resolve a public TheGay page through its documented player endpoint."""
+    video_id = _thegay_video_id(url)
+    response = requests.get(
+        "https://thegay.com/api/videofile.php",
+        params={"video_id": video_id, "lifetime": 86400},
+        headers={"Referer": url, "User-Agent": _UA},
+        timeout=30,
+    )
+    response.raise_for_status()
+    streams = response.json()
+    if not isinstance(streams, list) or not streams:
+        raise RuntimeError("TheGay returned no downloadable media.")
+    encoded_url = next(
+        (stream.get("video_url") for stream in streams
+         if isinstance(stream, dict) and stream.get("video_url")),
+        None,
+    )
+    direct_url = _decode_thegay_video_url(encoded_url)
+    direct_url = urljoin("https://thegay.com/", direct_url)
+    if urlparse(direct_url).scheme != "https":
+        raise RuntimeError("TheGay returned an unsafe media URL.")
+
+    title = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+    title = html.unescape(title.replace("-", " ")).strip().title()
+    item = {
+        "id": f"adult:thegay:{video_id}",
+        "kind": "adult",
+        "provider": "thegay",
+        "title": title or f"TheGay video {video_id}",
+        "artist": "",
+        "source": "TheGay",
+        "duration_s": None,
+        "file_size": "",
+        "url": url,
+        "direct_url": direct_url,
+        "referer": url,
+        "adult_category": CONTENT_GAY,
+    }
+    return [item], item["title"]
+
+
 def _import_provider(provider):
     if importlib.util.find_spec(provider.module) is None:
         raise RuntimeError(
@@ -1324,6 +1463,71 @@ def _normalize(provider, media):
         "url": str(url),
         "content_tags": str(content_tags),
     }
+
+
+_RANK_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+_PROMOTION_PATTERN = re.compile(
+    r"(?ix)\b(?:telegram|whats?app|onlyfans|link\s+in\s+bio|"
+    r"subscribe|follow\s+me|live\s+cam(?:s)?|free\s+sign\s*up|"
+    r"download\s+now)\b"
+)
+
+
+def _adult_relevance_score(query, item):
+    """Return a conservative best-match score for an adult search row.
+
+    Provider relevance is useful within one catalogue but not comparable
+    between sites.  The user-facing Best match order consequently favours the
+    requested words in a title or verified performer name.  Tags are only a
+    weak signal: spam pages commonly stuff them with unrelated search terms.
+    Obvious off-site promotion and very long keyword titles are demoted, never
+    hidden, so a result remains available if that is what the user wanted.
+    """
+    words = tuple(dict.fromkeys(
+        word.casefold() for word in _RANK_WORD.findall(str(query))
+        if len(word) > 1
+    ))
+    if not words:
+        return 0.0
+    title = str(item.get("title") or "").casefold()
+    artist = str(item.get("artist") or "").casefold()
+    tags = str(item.get("content_tags") or "").casefold()
+    title_words = set(_RANK_WORD.findall(title))
+    artist_words = set(_RANK_WORD.findall(artist))
+    tag_words = set(_RANK_WORD.findall(tags))
+
+    score = 0.0
+    if " ".join(words) in title:
+        score += 50.0
+    for word in words:
+        if word in title_words:
+            score += 25.0
+        elif word in artist_words:
+            score += 12.0
+        elif word in tag_words:
+            # Tags are deliberately much weaker than title/performer text.
+            score += 2.0
+
+    # Results with a long title are often scraped keyword lists.  Promotion
+    # markers identify the particularly unhelpful subset without making any
+    # claim about the site's legitimacy.
+    score -= min(30.0, max(0, len(title_words) - 18) * 1.5)
+    if _PROMOTION_PATTERN.search(title):
+        score -= 30.0
+    if title and sum(char.isupper() for char in title) > 12:
+        letters = sum(char.isalpha() for char in title)
+        if letters and sum(char.isupper() for char in title) / letters > 0.8:
+            score -= 10.0
+    return score
+
+
+def _rank_search_results(items, query, order):
+    """Attach cross-provider Best match scores without changing other orders."""
+    if search_order.normalize(order) != ORDER_RELEVANCE:
+        return items
+    for item in items:
+        item["score"] = _adult_relevance_score(query, item)
+    return items
 
 
 # Every field name :func:`_normalize` reads.  The 4.x provider models load
@@ -1555,6 +1759,8 @@ async def _collect_search(provider, query, stop, category=CONTENT_STRAIGHT,
             _search_eporner, query, category, order)
     if provider.key == "thisvid":
         return await asyncio.to_thread(_search_thisvid, query, category)
+    if provider.key == "thegay":
+        return await asyncio.to_thread(_search_thegay, query, category)
     if provider.key in _GAY_CATALOG_SEARCH:
         return await asyncio.to_thread(
             _search_gay_catalog, provider.key, query, category)
@@ -1638,6 +1844,7 @@ def search(query, timeout_s=30.0, on_site=None, stop=None, sources=None,
                 item for item in items
                 if _matches_content_category(item, category)
             ]
+            items = _rank_search_results(items, query, order)
         except Exception:  # noqa: BLE001 - one provider cannot kill the rest
             items = []
         with found_lock:
@@ -1685,6 +1892,8 @@ def inspect_url(url, config=None):
         return creator_backend.inspect_url(url, config=config)
     if provider.download_style == "aebn":
         return _inspect_aebn(url)
+    if provider.download_style == "thegay":
+        return _inspect_thegay(url)
     if provider.download_style == "ytdlp":
         browser = config["cookies_from_browser"] if config is not None else ""
         cookies_file = config.get("cookies_file") if config is not None else ""
@@ -1947,6 +2156,13 @@ def download(payload, out_dir, progress_cb=None, cancel_event=None,
         )
         return
     provider = PROVIDERS[provider_key]
+    if provider.download_style == "thegay":
+        return ytdlp_backend.download(
+            payload["direct_url"], out_dir, audio_only=False,
+            video_format=video_format, progress_cb=progress_cb,
+            cancel_event=cancel_event,
+            http_headers={"Referer": payload["referer"], "User-Agent": _UA},
+        )
     if provider.download_style == "creator":
         return creator_backend.download(
             payload, out_dir, progress_cb=progress_cb,

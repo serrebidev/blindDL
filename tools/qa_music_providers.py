@@ -44,6 +44,7 @@ from blinddl import (  # noqa: E402
     musicdl_backend,
     preview,
     sideb_backend,
+    soulseek_backend,
     ytdlp_backend,
 )
 
@@ -336,6 +337,28 @@ def _exercise_ytdlp(item, out_dir, config, skip_download):
     return _download_row(row, state, path, note)
 
 
+def _exercise_soulseek(item, out_dir, config, skip_download):
+    """Exercise Soulseek as the file-transfer source it is, not a stream.
+
+    Soulseek search rows intentionally have no preview URL.  Sending one to
+    the yt-dlp exercise path used to make this QA tool report a meaningless
+    preview failure and test the wrong downloader.  Give its download a
+    private temporary destination just like every other provider instead.
+    """
+    row = {
+        "preview": "N/A",
+        "preview_note": "Soulseek files cannot be previewed before transfer",
+    }
+    if skip_download:
+        return row
+    out = os.path.join(out_dir, "soulseek")
+    download_config = dict(config)
+    download_config["download_dir"] = out
+    state, path, note = _download_state(
+        lambda: soulseek_backend.download(item, download_config), out)
+    return _download_row(row, state, path, note)
+
+
 def _run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("query", nargs="?", default=DEFAULT_QUERY)
@@ -464,6 +487,8 @@ def _run():
                     fn = _exercise_sideb
                 elif kind == "applemusic":
                     fn = _exercise_applemusic
+                elif kind == "soulseek":
+                    fn = _exercise_soulseek
                 else:
                     fn = _exercise_ytdlp
                 futures[pool.submit(fn, item, temp_root, config,
