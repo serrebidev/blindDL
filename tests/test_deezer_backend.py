@@ -833,6 +833,133 @@ class DeezerBackendTests(unittest.TestCase):
     def test_missing_setting_defaults_to_flac(self):
         self.assertEqual(self._requested_formats(None), ["FLAC"])
 
+    def test_a_free_account_walks_down_to_the_best_quality_it_can_get(self):
+        # A valid ARL on a free plan gets TRACK_TOKENs but no FLAC and no
+        # MP3 320 -- every one of those requests comes back empty, and only
+        # the 128 request is served. The download must take it rather than
+        # pushing the track out to a YouTube match.
+        session = {
+            "api_token": "csrf",
+            "license_token": "license",
+            "http": mock.Mock(),
+            "http_lock": threading.Lock(),
+        }
+        metadata = {
+            "DATA": {
+                "SNG_ID": "3135556",
+                "SNG_TITLE": "Test track",
+                "ART_NAME": "Test artist",
+                "TRACK_TOKEN": "track-token",
+            }
+        }
+        empty = mock.Mock()
+        empty.json.return_value = {"data": []}
+        low = mock.Mock()
+        low.json.return_value = {
+            "data": [{
+                "media": [{
+                    "format": "MP3_128",
+                    "sources": [{"url": "https://media.invalid/128"}],
+                }]
+            }]
+        }
+        stream_response = mock.MagicMock()
+        config = {
+            "deezer_arl": "test-arl",
+            "deezer_format": "flac",
+            "sideb_lyrics": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    deezer_backend, "_login", return_value=session), \
+                mock.patch.object(
+                    deezer_backend, "_gw_call", return_value=metadata), \
+                mock.patch.object(
+                    deezer_backend.requests, "post",
+                    side_effect=[empty, empty, empty, low]) as post, \
+                mock.patch.object(
+                    deezer_backend.requests, "get",
+                    return_value=stream_response), \
+                mock.patch.object(
+                deezer_backend, "_decrypt_stream", side_effect=_write_decrypted
+            ), \
+                mock.patch.object(deezer_backend, "_cover_bytes",
+                                  return_value=None), \
+                mock.patch.object(deezer_backend, "_tag_mp3") as tag_mp3:
+            path = deezer_backend.download(
+                "https://www.deezer.com/track/3135556", out_dir, config)
+
+        formats = [
+            call.kwargs["json"]["media"][0]["formats"][0]["format"]
+            for call in post.call_args_list
+        ]
+        # FLAC and MP3 320 come back empty; the ladder asks 256 and 128
+        # before giving up, and 128 is what gets served.
+        self.assertEqual(
+            formats, ["FLAC", "MP3_320", "MP3_256", "MP3_128"])
+        self.assertTrue(path.endswith(".mp3"))
+        tag_mp3.assert_called_once()
+
+    def test_the_ladder_stops_at_the_first_served_quality(self):
+        session = {
+            "api_token": "csrf",
+            "license_token": "license",
+            "http": mock.Mock(),
+            "http_lock": threading.Lock(),
+        }
+        metadata = {
+            "DATA": {
+                "SNG_ID": "3135556",
+                "SNG_TITLE": "Test track",
+                "ART_NAME": "Test artist",
+                "TRACK_TOKEN": "track-token",
+            }
+        }
+        empty = mock.Mock()
+        empty.json.return_value = {"data": []}
+        served = mock.Mock()
+        served.json.return_value = {
+            "data": [{
+                "media": [{
+                    "format": "MP3_320",
+                    "sources": [{"url": "https://media.invalid/320"}],
+                }]
+            }]
+        }
+        stream_response = mock.MagicMock()
+        config = {
+            "deezer_arl": "test-arl",
+            "deezer_format": "flac",
+            "sideb_lyrics": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    deezer_backend, "_login", return_value=session), \
+                mock.patch.object(
+                    deezer_backend, "_gw_call", return_value=metadata), \
+                mock.patch.object(
+                    deezer_backend.requests, "post",
+                    side_effect=[empty, served]) as post, \
+                mock.patch.object(
+                    deezer_backend.requests, "get",
+                    return_value=stream_response), \
+                mock.patch.object(
+                deezer_backend, "_decrypt_stream", side_effect=_write_decrypted
+            ), \
+                mock.patch.object(deezer_backend, "_cover_bytes",
+                                  return_value=None), \
+                mock.patch.object(deezer_backend, "_tag_mp3"):
+            path = deezer_backend.download(
+                "https://www.deezer.com/track/3135556", out_dir, config)
+
+        # FLAC missed, 320 was served, and nothing below it was asked for.
+        formats = [
+            call.kwargs["json"]["media"][0]["formats"][0]["format"]
+            for call in post.call_args_list
+        ]
+        self.assertEqual(formats, ["FLAC", "MP3_320"])
+        self.assertTrue(path.endswith(".mp3"))
+
     def _requested_formats(self, deezer_format):
         session = {
             "api_token": "csrf",
@@ -849,14 +976,23 @@ class DeezerBackendTests(unittest.TestCase):
             }
         }
         media_response = mock.Mock()
-        media_response.json.return_value = {
-            "data": [{
-                "media": [{
-                    "format": "FLAC",
-                    "sources": [{"url": "https://media.invalid/track"}],
+        # A response served under the requested format is what makes the
+        # ladder stop; the caller reads back the one format that was asked
+        # for. (A fixed FLAC answer would send the new 320/256/128 ladder
+        # walking on for an mp3_320 setting.)
+        def _serve_requested(*args, **kwargs):
+            payload = kwargs.get("json") or args[1]
+            requested = payload["media"][0]["formats"][0]["format"]
+            media_response.json.return_value = {
+                "data": [{
+                    "media": [{
+                        "format": requested,
+                        "sources": [{"url": "https://media.invalid/track"}],
+                    }]
                 }]
-            }]
-        }
+            }
+            return media_response
+
         stream_response = mock.MagicMock()
         config = {
             "deezer_arl": "test-arl",
@@ -871,7 +1007,7 @@ class DeezerBackendTests(unittest.TestCase):
                     deezer_backend, "_gw_call", return_value=metadata), \
                 mock.patch.object(
                     deezer_backend.requests, "post",
-                    return_value=media_response) as post, \
+                    side_effect=_serve_requested) as post, \
                 mock.patch.object(
                     deezer_backend.requests, "get",
                     return_value=stream_response), \

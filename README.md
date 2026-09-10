@@ -13,6 +13,7 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Plays audio or video straight from a pasted URL, and previews search results before you commit to a download.
 - Searches dozens of music services from one box, and saves tracks tagged, with cover art and synced lyrics where a service provides them.
 - Searches Mixcloud for the DJ sets, radio shows, and long-form mixes none of the track-shaped services carry - on its own, and as part of a Music sites search.
+- Searches MP3.pm, a long-lived free MP3 archive, as part of a Music sites search; its results carry the real file's size and a bitrate read off the file itself.
 - Fills in the details a music site left out — album artist, track and disc numbers, year, genre, cover art, and the MusicBrainz ids a music library files by — from MusicBrainz and TheAudioDB. Turn it off in Settings, Downloads.
 - Finds free ebooks, audiobooks, and Internet Archive media — old-time radio, live concerts, movies, and classic TV — from the same search box.
 - Starts every selected music site concurrently on background threads, returns results as each site answers, and batches GUI updates so screen readers stay responsive.
@@ -25,7 +26,7 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Subscribes to playlists, channels, hashtags, and search pages with a per-feed order, then checks for and downloads new items automatically.
 - Follows an artist by name, so their next record arrives on its own, as a record, in a folder of its own — and follows a Soulseek user, so anything they add to their shares arrives too.
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
-- Picks a dropped Deezer transfer up where it stopped instead of failing it, and never leaves you with nothing for a track Deezer will only serve at a lower bitrate than you asked for.
+- Picks a dropped Deezer transfer up where it stopped instead of failing it, and never leaves you with nothing for a track Deezer will only serve at a lower bitrate than you asked for: when your Deezer account cannot serve the quality you chose, blindDL takes the best stream the account can get -- 320, then 256, then 128 kbps -- rather than sending the download to YouTube.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.
 - When automatic updates are enabled, checks on startup and every 12 hours,

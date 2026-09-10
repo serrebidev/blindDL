@@ -20,3 +20,4 @@ from .yinyuedao import YinyuedaoMusicClient
 from .zvu4it import Zvu4ITMusicClient
 from .freemp3cloud import FreeMp3CloudMusicClient
 from .freeqobuz import FreeQobuzMusicClient
+from .mp3pm import Mp3PmMusicClient

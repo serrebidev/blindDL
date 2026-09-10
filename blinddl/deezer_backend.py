@@ -7,10 +7,12 @@
 Search and URL inspection use the public Deezer REST API (no auth needed)
 and are always available. Downloads use the authenticated gateway API
 (BF_CBC_STRIPE decryption) when an ARL cookie is configured, unlocking
-FLAC and MP3 320.
+FLAC and MP3 320 -- and walking down Deezer's own 320/256/128 ladder when
+the account cannot serve the configured quality, so a valid but
+non-premium ARL still downloads natively at the best available bitrate.
 
 The download queue tries this first whenever an ARL is configured and
-falls back to Side B if the account cannot serve the requested quality.
+falls back to Side B only if Deezer refuses the track at every quality.
 """
 
 import concurrent.futures
@@ -59,19 +61,22 @@ HTTP_TIMEOUT_S = 30
 
 # Preference order per the dedicated Deezer format setting: flac gets
 # lossless first (Deezer's own master), mp3_320 asks for 320 kbps directly.
-# No silent drop to 128 kbps -- if the account cannot serve these, the
-# caller falls back to Side B.
+# When the account cannot serve what was configured, the ladder walks down
+# Deezer's own qualities -- 320, then 256, then 128 -- rather than pushing
+# the download out to a YouTube match that may be the wrong recording. A
+# free account's ARL therefore still downloads the track natively, at the
+# best bitrate the account can get; only a track Deezer refuses to serve at
+# any quality is left to Side B.
 _PREFERRED_FORMATS = {
-    "flac": ["FLAC", "MP3_320"],
-    "mp3_320": ["MP3_320"],
+    "flac": ["FLAC", "MP3_320", "MP3_256", "MP3_128"],
+    "mp3_320": ["MP3_320", "MP3_256", "MP3_128"],
 }
 # FLAC is the default when the setting is missing or unrecognized.
-_DEFAULT_FORMATS = ["FLAC", "MP3_320"]
-# Asked for only by a caller that has already tried everything else. Deezer
-# publishes plenty of tracks -- soundtrack albums especially -- at 128 and
-# nothing higher, and for those the choice is not "128 or better" but "128 or
-# a YouTube match that may be the wrong recording, or may not download at
-# all". See download(low_quality=True).
+_DEFAULT_FORMATS = ["FLAC", "MP3_320", "MP3_256", "MP3_128"]
+# The floor of the ladder above: Deezer publishes 64 kbps streams too, but
+# at that rate the Side B audio is the better file, so nothing below 128 is
+# ever asked for. download()'s *low_quality* flag is kept for callers that
+# have already fallen back once and want to be sure the floor is included.
 _LAST_RESORT_FORMAT = "MP3_128"
 # How many times a dropped stream is picked up again before the download is
 # called a failure, and how long the first wait between attempts is (it
@@ -1051,6 +1056,7 @@ def playback_file(url, config, cancel_event=None):
     Raises RuntimeError when no ARL is configured or Deezer will not serve
     the track, which is the caller's cue to fall back to YouTube.
     """
+
     arl = (config["deezer_arl"] or "").strip()
     if not arl:
         raise RuntimeError("No Deezer ARL cookie configured.")
@@ -1107,12 +1113,17 @@ def playback_file(url, config, cancel_event=None):
 
 def download(url, out_dir, config, progress_cb=None, cancel_event=None,
              low_quality=False):
-    """Download one Deezer track URL as FLAC or MP3 320.
+    """Download one Deezer track URL at the best quality the account can get.
 
-    *low_quality* adds Deezer's 128 kbps stream as a last resort, below the
-    configured quality rather than instead of it. It is for the caller that
-    has already tried both the configured quality and Side B: at that point
-    the alternative is not a better file, it is no file.
+    The configured quality is asked for first; when the account (a free
+    ARL, say) cannot serve it, the request walks down Deezer's own ladder
+    -- 320, 256, then 128 kbps -- so a valid but non-premium ARL still
+    lands the track natively instead of falling out to a YouTube match.
+
+    *low_quality* exists for callers that have already tried Side B and
+    come back: it guarantees the 128 kbps floor is in the ladder. The
+    ladder includes it anyway, so the flag is effectively a no-op kept for
+    compatibility.
 
     progress_cb receives (downloaded_bytes, total_bytes). Raises
     DownloadCancelled, DeezerQualityError, or RuntimeError.

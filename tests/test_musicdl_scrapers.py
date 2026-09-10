@@ -21,6 +21,7 @@ from musicdl.modules.thirdpartysites.freeqobuz import (
     search_qobuz_catalog,
 )
 from musicdl.modules.thirdpartysites.freemp3cloud import FreeMp3CloudMusicClient
+from musicdl.modules.thirdpartysites.mp3pm import Mp3PmMusicClient
 from musicdl.modules.thirdpartysites.zvu4it import Zvu4ITMusicClient
 
 
@@ -145,6 +146,26 @@ FMC_SEARCH = """
 </div>
 """
 
+MP3PM_ITEM = """
+<li class="cplayer-sound-item" data-sound-id="78101313" data-sound-url="https://cs1.mp3.pm/listen/78101313/tokA/song.mp3" data-download-url="https://cs1.mp3.pm/download/78101313/tokA/song.mp3">
+		<div class="mp3list-btns">
+			<a href="javascript:void(0);" class="mp3list-btn-play cplayer-ui-play" title="play">(play)</a>
+		</div>
+		<h4>
+			<a href="https://596-paramore.mp3.pm/"><i class="cplayer-data-sound-author">Paramore</i></a>
+			<a href="https://596-paramore.mp3.pm/song/78101313-hard-times/"><b class="cplayer-data-sound-title">Hard Times</b></a>
+		</h4>
+		<em class="cplayer-data-sound-time">03:02</em>
+	</li>
+"""
+
+MP3PM_PAGE = (
+    "<html><body><ul class='mp3list'>"
+    + MP3PM_ITEM
+    + MP3PM_ITEM.replace("78101313", "86925748").replace("tokA", "tokB")
+    + "</ul></body></html>"
+)
+
 QOBUZ_ITEM = {
     "id": 33933680,
     "title": "Creep",
@@ -244,6 +265,85 @@ class FreeMp3CloudTests(unittest.TestCase):
         post.assert_not_called()
 
 
+class Mp3PmTests(unittest.TestCase):
+    def setUp(self):
+        self.client = _client(Mp3PmMusicClient)
+
+    def test_parses_result_block_with_estimated_bitrate(self):
+        client = _client(Mp3PmMusicClient)
+        with _patch_tester():
+            song = client._parsesearchresultfromblock(MP3PM_ITEM)
+
+        self.assertTrue(song.with_valid_download_url)
+        self.assertEqual(song.song_name, "Hard Times")
+        self.assertEqual(song.singers, "Paramore")
+        self.assertEqual(song.duration_s, 182)
+        self.assertEqual(song.duration, "00:03:02")
+        self.assertEqual(song.ext, "mp3")
+        self.assertEqual(song.download_url,
+                         "https://cs1.mp3.pm/download/78101313/tokA/song.mp3")
+        # bytes * 8 / seconds / 1000: 1234567 bytes over 182 s is about 54
+        self.assertEqual(song.bitrate, 54)
+
+    def test_search_posts_the_api_and_reads_the_results_page(self):
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(("post", url, kwargs.get("data", {})))
+            return _FakeResponse(text="https://mp3.pm/search?q=paramore")
+
+        def fake_get(url, **kwargs):
+            calls.append(("get", url))
+            return _FakeResponse(text=MP3PM_PAGE)
+
+        with _patch_tester(), \
+                mock.patch.object(self.client, "post",
+                                  side_effect=fake_post), \
+                mock.patch.object(self.client, "get", side_effect=fake_get):
+            songs = []
+            self.client._search("paramore hard times",
+                                self.client._constructsearchurls(
+                                    "paramore hard times")[0],
+                                {}, songs, _FakeProgress())
+
+        self.assertEqual(
+            calls[0],
+            ("post", "https://mp3.pm/public/api.search.php",
+             {"q": "paramore hard times"}))
+        self.assertEqual(calls[1], ("get", "https://mp3.pm/search?q=paramore"))
+        # two identical items on the page differ only in id/token, so both
+        # rows are kept; dedup applies to repeated download URLs, and none
+        # repeat here.
+        self.assertEqual(len(songs), 2)
+        self.assertEqual({s.singers for s in songs}, {"Paramore"})
+
+    def test_search_dedupes_repeated_download_urls(self):
+        page = ("<html><body>" + MP3PM_ITEM + MP3PM_ITEM
+                + "</body></html>")
+
+        with _patch_tester(), \
+                mock.patch.object(self.client, "post", return_value=_FakeResponse(
+                    text="https://mp3.pm/search?q=x")), \
+                mock.patch.object(self.client, "get", return_value=_FakeResponse(
+                    text=page)):
+            songs = []
+            self.client._search("x", "https://mp3.pm/search?q=x", {},
+                                songs, _FakeProgress())
+
+        self.assertEqual(len(songs), 1)
+
+    def test_unexpected_api_answer_is_reported_not_raised(self):
+        with mock.patch.object(self.client, "post", return_value=_FakeResponse(
+                text="<html>blocked</html>")), \
+                mock.patch.object(self.client, "get") as get:
+            songs = []
+            self.client._search("x", "https://mp3.pm/search?q=x", {},
+                                songs, _FakeProgress())
+
+        self.assertEqual(songs, [])
+        get.assert_not_called()
+
+
 class FreeQobuzTests(unittest.TestCase):
     def setUp(self):
         freeqobuz._known_bad.clear()
@@ -313,7 +413,7 @@ class FreeQobuzTests(unittest.TestCase):
 class RegistrationTests(unittest.TestCase):
     def test_new_sources_registered(self):
         for name in ("Zvu4ITMusicClient", "FreeMp3CloudMusicClient",
-                     "FreeQobuzMusicClient"):
+                     "FreeQobuzMusicClient", "Mp3PmMusicClient"):
             self.assertIn(name, MusicClientBuilder.REGISTERED_MODULES)
 
 

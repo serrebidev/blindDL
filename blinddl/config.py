@@ -212,8 +212,10 @@ DEFAULTS = {
     # word-level (karaoke) lyrics. Empty = Side B audio and LRCLIB lyrics.
     "deezer_arl": "",
     # What ARL-backed Deezer downloads are saved as: "flac" takes Deezer's
-    # lossless master (falling back to MP3 320 where the account or track
-    # cannot serve FLAC), "mp3_320" asks for 320 kbps directly.
+    # lossless master, "mp3_320" asks for 320 kbps directly. Either way the
+    # download walks down Deezer's own 320/256/128 ladder when the account
+    # cannot serve the chosen quality, so a free account's ARL still gets
+    # the track natively at the best bitrate it can.
     "deezer_format": "flac",
     # Apple Music cookies file (Netscape format): unlocks full Apple Music
     # downloads (songs, albums, and playlists). Export browser cookies while

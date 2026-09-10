@@ -34,7 +34,7 @@ from ..common import GDStudioMusicClient, TuneHubMusicClient, MP3JuiceMusicClien
 from ..thirdpartysites import (
     MituMusicClient, BuguyyMusicClient, YinyuedaoMusicClient, FiveSongMusicClient, FangpiMusicClient, TwoT58MusicClient, ZhuolinMusicClient, HTQYYMusicClient, XiagebaMusicClient, GequbaoMusicClient,
     KKWSMusicClient, GequhaiMusicClient, LivePOOMusicClient, LiziYYMusicClient, MGMP3MusicClient, ITingWaMusicClient, SgogoMusicClient, XMFWAVMusicClient,
-    Zvu4ITMusicClient, FreeMp3CloudMusicClient, FreeQobuzMusicClient
+    Zvu4ITMusicClient, FreeMp3CloudMusicClient, FreeQobuzMusicClient, Mp3PmMusicClient
 )
 
 
@@ -63,6 +63,7 @@ class MusicClientBuilder(BaseModuleBuilder):
         'ITingWaMusicClient' : ITingWaMusicClient,     'SgogoMusicClient'      : SgogoMusicClient,          'XMFWAVMusicClient'     : XMFWAVMusicClient,
         # blindDL additions: ported from MusicGrabber (The Unlicense)
         'Zvu4ITMusicClient'  : Zvu4ITMusicClient,      'FreeMp3CloudMusicClient': FreeMp3CloudMusicClient,
+        'FreeQobuzMusicClient': FreeQobuzMusicClient,  'Mp3PmMusicClient'       : Mp3PmMusicClient,
     }
 
 

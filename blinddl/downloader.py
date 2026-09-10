@@ -1135,10 +1135,12 @@ class DownloadQueue:
         return ""
 
     def _run_sideb(self, item):
-        # An ARL unlocks Deezer's original MP3 320/FLAC stream. Only fall back
-        # to Side B's YouTube Music audio when the account cannot provide the
-        # requested quality; authentication and other native errors must stay
-        # visible so a broken ARL does not fail silently.
+        # An ARL unlocks Deezer's original MP3 320/FLAC stream, and the
+        # native backend already walks down Deezer's 320/256/128 ladder for
+        # a free account. Only fall back to Side B's YouTube Music audio
+        # when Deezer refuses the track at every quality; authentication and
+        # other native errors must stay visible so a broken ARL does not
+        # fail silently.
         arl = (self.config["deezer_arl"] or "").strip()
         if arl:
             try:
@@ -1152,15 +1154,13 @@ class DownloadQueue:
         except Exception as sideb_error:  # noqa: BLE001 - one more thing to try
             if not arl:
                 raise
-            # Deezer publishes whole albums -- soundtracks especially -- at
-            # 128 kbps and nothing higher, and those are exactly the tracks
-            # that end up here: too low for the configured quality, so the
-            # download went to YouTube, where the connection was refused or
-            # dropped. blindDL was then failing to download a track it would
-            # play perfectly, off the same catalogue, seconds earlier. So the
-            # last thing tried is Deezer's own 128 stream: a lower bitrate
-            # than was asked for, but the actual recording, and only ever
-            # after everything better has already been tried and failed.
+            # Deezer refused the configured quality, YouTube refused the
+            # download, and the native ladder already walked itself down to
+            # 128 -- which is exactly what used to rescue soundtrack albums
+            # published at 128 and nothing higher. low_quality=True pins the
+            # ladder's floor in place for a caller coming back a second
+            # time; re-raising Side B's own error otherwise tells the truth
+            # about what went wrong.
             try:
                 return self._run_deezer(item, low_quality=True)
             except deezer_backend.DeezerQualityError:

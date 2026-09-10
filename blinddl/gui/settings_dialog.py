@@ -1143,10 +1143,11 @@ class SettingsDialog(wx.Dialog):
         self.deezer_format_choice.SetHelpText(
             "FLAC takes Deezer's lossless master, falling back to MP3 320 "
             "where it is unavailable. MP3 320 asks for that bitrate directly. "
-            "Deezer publishes some releases -- soundtracks especially -- at "
-            "128 and nothing higher; those are fetched from YouTube Music "
-            "instead, and only if that fails as well does blindDL take "
-            "Deezer's own 128 stream rather than leave you with nothing."
+            "When your account cannot serve the chosen quality, blindDL takes "
+            "the best Deezer stream it can get instead: 320, then 256, then "
+            "128 kbps, so a free account's ARL still downloads from Deezer "
+            "natively. Only a track Deezer will not serve at all goes to "
+            "YouTube Music."
         )
         _row(sizer, deezer_format_label, self.deezer_format_choice)
         arl_row = wx.BoxSizer(wx.HORIZONTAL)

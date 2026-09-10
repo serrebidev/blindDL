@@ -15,15 +15,17 @@ source code is modified for that compatibility change.
 
 ## blindDL additions
 
-Three extra source modules live under `modules/thirdpartysites/` and are wired
+Four extra source modules live under `modules/thirdpartysites/` and are wired
 into `REGISTERED_MODULES`:
 
 - `zvu4it.py` - `Zvu4ITMusicClient` (zvu4it.org, was zvu4no.org)
 - `freemp3cloud.py` - `FreeMp3CloudMusicClient` (g2.freemp3cloud.com)
 - `freeqobuz.py` - `FreeQobuzMusicClient` (Qobuz catalogue via the shared
   qbdlx free-token pool, no account needed)
+- `mp3pm.py` - `Mp3PmMusicClient` (mp3.pm; written for blindDL, not a
+  MusicGrabber port)
 
-All three are ports of source from
+The first three are ports of source from
 [MusicGrabber](https://gitlab.com/g33kphr33k/musicgrabber) (The Unlicense),
 adapted to the musicdl `SongInfo`/`BaseMusicClient` contract. Their module
 docstrings name the origin file. FreeQobuz depends on a third-party webhook
