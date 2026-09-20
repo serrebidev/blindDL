@@ -1181,7 +1181,10 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None,
     ext = "flac" if fmt == "FLAC" else "mp3"
     artist = _sanitize(meta.get("ART_NAME") or "Unknown artist")
     title = _sanitize(meta.get("SNG_TITLE") or track_id)
-    dest = os.path.join(out_dir, artist, f"{artist} - {title}.{ext}")
+    track_number = str(meta.get("TRACK_NUMBER") or "").strip()
+    prefix = f"{int(track_number):02d} - " if track_number.isdecimal() else ""
+    dest = os.path.join(
+        out_dir, artist, f"{prefix}{artist} - {title}.{ext}")
 
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     # Decrypt into a staging file and move it into place only when complete,

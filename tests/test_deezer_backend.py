@@ -653,6 +653,7 @@ class DeezerBackendTests(unittest.TestCase):
                 "SNG_ID": "3135556",
                 "SNG_TITLE": "Test track",
                 "ART_NAME": "Test artist",
+                "TRACK_NUMBER": "3",
                 "TRACK_TOKEN": "track-token",
             }
         }
@@ -696,7 +697,8 @@ class DeezerBackendTests(unittest.TestCase):
         request_json = post.call_args.kwargs["json"]
         self.assertNotIn("track_token", request_json)
         self.assertEqual(request_json["track_tokens"], ["track-token"])
-        self.assertTrue(path.endswith(".mp3"))
+        self.assertEqual(
+            os.path.basename(path), "03 - Test artist - Test track.mp3")
         tag_mp3.assert_called_once()
 
     def test_download_prefers_flac_when_gateway_lists_mp3_first(self):
