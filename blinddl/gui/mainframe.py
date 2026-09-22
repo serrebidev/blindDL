@@ -45,6 +45,7 @@ from .tray import TrayIcon, app_icon
 from .update_dialog import UpdateDialog
 from .url_panel import UrlPanel
 from .uploads_panel import UploadsPanel
+from .. import global_hotkey
 
 # How often the update clock is looked at, rather than setting one timer for
 # the whole interval: blindDL lives in the tray for days at a time, and a
@@ -130,6 +131,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_CHILD_FOCUS, self.on_child_focus)
         self.Bind(wx.EVT_ACTIVATE, self.on_window_activate)
         self._apply_tray_setting()
+        self._hotkey_window = None
+        self._apply_hotkey_setting()
         # MainFrame is constructed before __main__ can show it. Defer all
         # background services briefly so Windows can paint a responsive window
         # before Soulseek loads a large share index.
@@ -708,6 +711,7 @@ class MainFrame(wx.Frame):
             self.queue.set_concurrency(self.config["max_concurrent"])
             self.subs.wake()
             self._apply_tray_setting()
+            self._apply_hotkey_setting()
             self._apply_torrent_setting()
             self._apply_soulseek_setting()
             self.announce("Settings saved.")
@@ -890,7 +894,10 @@ class MainFrame(wx.Frame):
         )
         if wanted and self.tray is None:
             self.tray = TrayIcon(
-                self, on_restore=self.restore_from_tray, on_exit=self.on_exit
+                self,
+                on_restore=self.restore_from_tray,
+                on_exit=self.on_exit,
+                hotkey_label=self._hotkey_label(),
             )
             if not self.tray.is_available():
                 self.tray.dispose()
@@ -905,6 +912,44 @@ class MainFrame(wx.Frame):
             self.restore_from_tray()
             self.tray.dispose()
             self.tray = None
+
+    def _hotkey_label(self):
+        """The configured global hotkey as the user wrote it, or "" when off."""
+        return str(self.config.get("global_hotkey", "") or "").strip()
+
+    def _apply_hotkey_setting(self):
+        """Register the configured global hotkey, or drop it when switched off.
+
+        Windows-only: RegisterHotKey does not exist anywhere else, so
+        anywhere else this is a no-op and the setting is inert.
+        """
+        if not global_hotkey.supported():
+            return
+        if self._hotkey_window is None:
+            self._hotkey_window = global_hotkey.new_hotkey_window(
+                self.on_global_hotkey
+            )
+        text = self._hotkey_label()
+        if not self._hotkey_window.register(text):
+            self.announce(
+                f"blindDL could not register the global hotkey {text}: "
+                "another program may already be using it. Pick a different "
+                "one in Settings, Interface."
+            )
+        if self.tray is not None:
+            self.tray.hotkey_label = text
+
+    def on_global_hotkey(self):
+        """The global hotkey: hide the window in the tray, or bring it back."""
+        if self._closing:
+            return
+        if self.IsShown() and not self.IsIconized():
+            if self.tray is not None and self.config["minimize_to_tray"]:
+                self._hide_to_tray()
+            else:
+                self.Iconize(True)
+        else:
+            self.restore_from_tray()
 
     def restore_from_tray(self):
         """Bring the window back and put the user where they left off."""
@@ -934,9 +979,11 @@ class MainFrame(wx.Frame):
             return False
         self.Hide()
         self.tray.notify_hidden()
+        hotkey = self._hotkey_label()
+        how = f"press {hotkey}, " if hotkey else ""
         self.announce(
             f"{APP_NAME} is still running in the system tray. Click the blue "
-            "B icon, press Windows plus B, or launch blindDL again to restore it."
+            f"B icon, {how}or launch blindDL again to restore it."
         )
         return True
 
@@ -1016,6 +1063,9 @@ class MainFrame(wx.Frame):
         if self.tray is not None:
             self.tray.dispose()
             self.tray = None
+        if self._hotkey_window is not None:
+            self._hotkey_window.destroy()
+            self._hotkey_window = None
         self.Destroy()
 
     # -- automatic dependency updates -------------------------------------------

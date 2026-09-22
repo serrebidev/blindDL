@@ -5,8 +5,8 @@
 """System-tray icon used when closing the window only hides it.
 
 Downloads and subscription checks keep running with the window gone, so the
-tray icon is the way back to them. NVDA reaches it with Windows+B; the same
-two commands are on its menu and on its double-click.
+tray icon is the way back to them, along with the configurable global
+hotkey (Ctrl+Alt+B unless changed in Settings, Interface).
 """
 
 import wx
@@ -48,11 +48,14 @@ class TrayIcon(wx.adv.TaskBarIcon):
     ID_RESTORE = wx.ID_OPEN
     ID_EXIT = wx.ID_EXIT
 
-    def __init__(self, frame, on_restore, on_exit):
+    def __init__(self, frame, on_restore, on_exit, hotkey_label=""):
         super().__init__()
         self.frame = frame
         self._on_restore = on_restore
         self._on_exit = on_exit
+        # The configured global hotkey, as the user wrote it, or "" when it
+        # is switched off. Named so a screen reader reads the whole hint.
+        self.hotkey_label = hotkey_label
         self.installed = bool(
             self.SetIcon(app_icon(), f"{APP_NAME} — click to restore")
             and self.IsIconInstalled()
@@ -80,11 +83,20 @@ class TrayIcon(wx.adv.TaskBarIcon):
 
     def notify_hidden(self):
         """Tell the user where the app went; Windows announces this balloon."""
+        if self.hotkey_label:
+            how = (
+                "Click the blue B icon, press " + self.hotkey_label + ", or "
+                "launch blindDL again to restore this window."
+            )
+        else:
+            how = (
+                "Click the blue B icon, or launch blindDL again to restore "
+                "this window."
+            )
         try:
             self.ShowBalloon(
                 f"{APP_NAME} is still running",
-                "Click the blue B icon, press Windows+B, or launch blindDL "
-                "again to restore this window.",
+                how,
                 8000,
             )
         except (AttributeError, RuntimeError):

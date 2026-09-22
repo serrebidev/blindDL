@@ -15,6 +15,7 @@ import threading
 import wx
 
 from .. import associations, soulseek_backend, torrent_engine
+from ..global_hotkey import parse_hotkey
 from . import sounds
 
 # Label, stored value. "Original" means the file is kept exactly as the site
@@ -122,11 +123,35 @@ class SettingsDialog(wx.Dialog):
         # sticks.
         self.notebook.SetSelection(0)
         self.Bind(wx.EVT_INIT_DIALOG, self._on_init_dialog)
+        # The hotkey box is the one setting that can be typed wrong, so OK
+        # is intercepted to validate it before the dialog may close.
+        ok_button = self.FindWindowById(wx.ID_OK)
+        if ok_button is not None:
+            ok_button.Bind(wx.EVT_BUTTON, self._on_ok)
         self.focus_first_control()
 
     def _on_init_dialog(self, event):
         event.Skip()
         self.focus_first_control()
+
+    def _on_ok(self, event):
+        """Keep Settings open when the hotkey text is not a hotkey.
+
+        Everything else in Settings applies as typed, so a bad hotkey is
+        caught here before OK can close the dialog: the message names the
+        problem, and focus goes back to the box with the invalid text
+        selected for retyping.
+        """
+        text = self.hotkey_text.GetValue().strip()
+        if text:
+            try:
+                parse_hotkey(text)
+            except ValueError as exc:
+                wx.MessageBox(str(exc), "blindDL", wx.OK | wx.ICON_ERROR, self)
+                self.hotkey_text.SetFocus()
+                self.hotkey_text.SetSelection(-1, -1)
+                return
+        event.Skip()
 
     def first_control(self):
         """The control Settings opens on: the download folder box.
@@ -914,10 +939,11 @@ class SettingsDialog(wx.Dialog):
         self.tray_check.SetValue(bool(config["minimize_to_tray"]))
         self.tray_check.SetHelpText(
             "Downloads, seeding torrents and subscription checks keep "
-            "running. Click the blue B tray icon, press Windows plus B, or "
-            "launch blindDL again to restore the existing window. Alt plus F4 "
-            "hides it too. File, Exit and Control plus Q always exit. blindDL "
-            "stays visible if Windows cannot install its tray icon."
+            "running. Click the blue B tray icon, press the global hotkey "
+            "below, or launch blindDL again to restore the existing window. "
+            "Alt plus F4 hides it too. File, Exit and Control plus Q always "
+            "exit. blindDL stays visible if Windows cannot install its tray "
+            "icon."
         )
 
         self.tray_minimize_check = wx.CheckBox(
@@ -939,6 +965,24 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.tray_check, 0, wx.ALL, 8)
         sizer.Add(self.tray_minimize_check, 0, wx.ALL, 8)
         sizer.Add(self.start_maximized_check, 0, wx.ALL, 8)
+
+        hotkey_label = wx.StaticText(
+            page, label="&Global hotkey to show or hide blindDL:"
+        )
+        self.hotkey_text = wx.TextCtrl(
+            page, value=str(config.get("global_hotkey", "") or "")
+        )
+        # A bare text box is what the focus lands in, so it carries the
+        # name the screen reader speaks.
+        self.hotkey_text.SetName("Global hotkey to show or hide blindDL")
+        self.hotkey_text.SetHelpText(
+            "Press this from anywhere in Windows to bring the blindDL "
+            "window back, or send it to the system tray when it is showing. "
+            "Write modifiers plus one key, for example Ctrl+Alt+B. Leave it "
+            "empty to switch the hotkey off. The Windows key cannot be "
+            "used: Windows keeps Win+letter combinations for itself."
+        )
+        _row(sizer, hotkey_label, self.hotkey_text)
 
         sizer.Add(self._heading(page, "Speech"), 0, wx.TOP | wx.LEFT, 12)
         self.speak_status_check = wx.CheckBox(
@@ -1467,6 +1511,7 @@ class SettingsDialog(wx.Dialog):
         self.config["minimize_to_tray"] = self.tray_check.GetValue()
         self.config["tray_on_minimize"] = self.tray_minimize_check.GetValue()
         self.config["start_maximized"] = self.start_maximized_check.GetValue()
+        self.config["global_hotkey"] = self.hotkey_text.GetValue().strip()
         self.config["speak_status"] = self.speak_status_check.GetValue()
         self.config["sounds_enabled"] = self.sounds_check.GetValue()
         self.config["sound_download_complete"] = (

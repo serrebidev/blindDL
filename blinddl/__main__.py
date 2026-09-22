@@ -213,7 +213,7 @@ def main() -> int | None:
     import wx
 
     from . import torrent_backend
-    from .config import app_data_dir
+    from .config import Config, app_data_dir
     from .gui.mainframe import MainFrame
     from .single_instance import RestoreServer, notify_existing
 
@@ -235,9 +235,19 @@ def main() -> int | None:
         if restored and opening:
             return 0
         if not restored:
+            hotkey = str(Config().get("global_hotkey", "") or "").strip()
+            if hotkey:
+                how = (
+                    "Look for the blue B icon in the system tray overflow, "
+                    f"or press {hotkey} to reach it."
+                )
+            else:
+                how = (
+                    "Look for the blue B icon in the system tray overflow "
+                    "to reach it."
+                )
             wx.MessageBox(
-                "blindDL is already running. Look for the blue B icon in the "
-                "system tray overflow, or press Windows+B to reach it.",
+                f"blindDL is already running. {how}",
                 "blindDL is already running",
                 wx.OK | wx.ICON_INFORMATION,
             )

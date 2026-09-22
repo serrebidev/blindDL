@@ -248,6 +248,13 @@ DEFAULTS = {
     # Minimizing the window puts it in the tray as well, rather than on the
     # taskbar. Both are on by default and either can be switched off.
     "tray_on_minimize": True,
+    # Global hotkey that shows the main window or hides it in the tray, from
+    # anywhere: "Ctrl+Alt+B" by default. Empty switches it off. Written as
+    # modifiers plus one key, e.g. "Ctrl+Shift+F9". The Windows key is not
+    # usable: Windows reserves Win+letter combinations for itself (Win+B
+    # opens the notification area), so the system never hands them to an
+    # application.
+    "global_hotkey": "Ctrl+Alt+B",
     # Open the main window maximized on launch.
     "start_maximized": False,
     # Say status-bar messages out loud through the screen reader as they
