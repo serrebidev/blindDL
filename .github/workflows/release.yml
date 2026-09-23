@@ -84,8 +84,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # Only the macOS packages: a dispatched run's gitleaks artifact brought a
+      # release/work directory that made the upload below fail (v0.24.54).
       - uses: actions/download-artifact@v8
         with:
+          pattern: blindDL-macos-*
           path: release
           merge-multiple: true
       - name: Upload macOS packages to the existing release
