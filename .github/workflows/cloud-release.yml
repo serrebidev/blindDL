@@ -12,8 +12,8 @@ name: Cloud release
 #             Linux release host's OS, system wxPython)
 #   publish - draft with both platforms and the notes, then the tag, then
 #             release.yml dispatched on the tag (a GITHUB_TOKEN tag push starts
-#             no workflow): it builds both macOS DMGs and publish_release.py
-#             publishes once all ten artifacts are in place.
+#             no workflow): it builds the Apple Silicon DMG and
+#             publish_release.py publishes once all eight artifacts are in place.
 #
 # First commit "chore: release X.Y.Z" (bump blinddl/__init__.py) to main, then:
 #   gh workflow run cloud-release.yml -f dry_run=true

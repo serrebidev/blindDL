@@ -1,6 +1,6 @@
 # Releasing blindDL
 
-Every release carries ten artifacts: Windows x64 (installer, zip, checksums), Linux x64 (tarball, .deb, checksums) and both macOS DMGs with their checksums. `scripts/publish_release.py` publishes a draft only when all ten are in place. Tags are `vX.Y.Z` and the release title is the tag. Release notes are house prose: an opening one-line summary, no bullet lists, no version numbers in headings.
+Every release carries eight artifacts: Windows x64 (installer, zip, checksums), Linux x64 (tarball, .deb, checksums) and the Apple Silicon macOS DMG with its checksums. Intel Macs are not built. `scripts/publish_release.py` publishes a draft only when all eight are in place. Tags are `vX.Y.Z` and the release title is the tag. Release notes are house prose: an opening one-line summary, no bullet lists, no version numbers in headings.
 
 Start every release by bumping `__version__` in `blinddl/__init__.py` and committing `chore: release X.Y.Z` to `main`.
 
@@ -8,9 +8,9 @@ Start every release by bumping `__version__` in `blinddl/__init__.py` and commit
 
 1. Run `build.bat` (no argument). It tests and builds `release/` with the weekly libtorrent wheel.
 2. Create the draft **before** pushing the tag: `gh release create vX.Y.Z --draft --latest=false release/* --notes-file notes.md`. If the tag comes first, release.yml's macOS publish fails with "release not found".
-3. Push `main` and the tag. `release.yml` builds both macOS DMGs.
+3. Push `main` and the tag. `release.yml` builds the Apple Silicon DMG.
 4. Build Linux on `root@serrebiradio.com` from the tag with `tools/build_linux_release.sh`, then upload its three files.
-5. `release.yml` (or `python scripts/publish_release.py vX.Y.Z`) publishes once everything is present.
+5. `release.yml` (or `python scripts/publish_release.py vX.Y.Z`) publishes once all eight are present.
 
 ## Cloud agents only
 

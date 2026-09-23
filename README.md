@@ -103,7 +103,7 @@ pre-release versions before packaging them.
 
 **macOS**
 
-1. Download the DMG matching your Mac: `macos-arm64` for Apple silicon or `macos-x64` for an Intel Mac.
+1. Download the `macos-arm64` DMG. blindDL is built for Apple silicon Macs only.
 2. Open it and copy BlindDL to Applications.
 3. On the first launch, you may need to choose Open from Finder because the first release is not notarized with a paid Apple certificate.
 
@@ -220,11 +220,11 @@ can be used by a release build. Their source-controlled entry points are
 `tools/update_libtorrent_windows.ps1` and
 `tools/update_libtorrent_linux.sh`.
 
-Release artifacts are built and self-tested on their target operating systems. Windows x64 is built on the maintainer's Windows machine, Linux x64 is built on `serrebiradio.com`, and GitHub Actions continues to build the Intel and Apple-silicon macOS DMGs when a version tag such as `v0.1.0` is published. The Windows and Linux frozen self-tests remove every developer Python path; Linux additionally runs with an empty executable search path. A release is rejected unless its packaged executable identifies its embedded Python and imports its bundled libtorrent.
+Release artifacts are built and self-tested on their target operating systems. Windows x64 is built on the maintainer's Windows machine, Linux x64 is built on `serrebiradio.com`, and GitHub Actions builds the Apple-silicon macOS DMG when a version tag such as `v0.1.0` is published. The Windows and Linux frozen self-tests remove every developer Python path; Linux additionally runs with an empty executable search path. A release is rejected unless its packaged executable identifies its embedded Python and imports its bundled libtorrent.
 
 Because three machines build one release, nobody publishes it by hand.
 `scripts/publish_release.py` owns that last step: it checks the draft carries
-all ten artifacts, verifies each one against the checksum its builder
+all eight artifacts, verifies each one against the checksum its builder
 published, and only then takes the release out of draft and marks it latest.
 The tag build runs it after uploading the macOS DMGs, waiting up to two hours
 for the other two hosts. The `Release guard` workflow sweeps every six hours

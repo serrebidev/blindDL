@@ -45,10 +45,6 @@ PLATFORM_ASSETS = {
         "blinddl_{version}_amd64.deb",
         "SHA256SUMS-linux-x64.txt",
     ),
-    "macOS x64 (GitHub Actions)": (
-        "blindDL-v{version}-macos-x64.dmg",
-        "SHA256SUMS-macos-x64.txt",
-    ),
     "macOS arm64 (GitHub Actions)": (
         "blindDL-v{version}-macos-arm64.dmg",
         "SHA256SUMS-macos-arm64.txt",
