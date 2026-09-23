@@ -1,0 +1,172 @@
+# Copyright (c) serrebidev and contributors
+# This file is part of blindDL.
+# SPDX-License-Identifier: MIT
+name: Cloud release
+
+# Cloud agents ONLY. On the Windows release host keep the three-host flow:
+# build.bat (Windows), draft, tag push (macOS in release.yml), Linux over SSH on
+# root@serrebiradio.com. Here every platform builds on GitHub runners:
+#   windows - build.bat with the maintained CPython 3.14 libtorrent wheel from
+#             the libtorrent-wheels pre-release (the weekly wheelhouse)
+#   linux   - tools/build_linux_release.sh in a debian:trixie container (the
+#             Linux release host's OS, system wxPython)
+#   publish - draft with both platforms and the notes, then the tag, then
+#             release.yml dispatched on the tag (a GITHUB_TOKEN tag push starts
+#             no workflow): it builds both macOS DMGs and publish_release.py
+#             publishes once all ten artifacts are in place.
+#
+# First commit "chore: release X.Y.Z" (bump blinddl/__init__.py) to main, then:
+#   gh workflow run cloud-release.yml -f dry_run=true
+#   gh workflow run cloud-release.yml -f dry_run=false -f notes="$(cat notes.md)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build Windows and Linux as workflow artifacts; tag and publish nothing
+        required: false
+        default: true
+        type: boolean
+      notes:
+        description: Release notes (house prose, Markdown). Required for a real release.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - name: Require main
+        if: ${{ github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::Cloud releases run from main only (got ${{ github.ref }})."
+          exit 1
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Read version
+        id: plan
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          v="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' blinddl/__init__.py)"
+          [ -n "$v" ] || { echo "::error::No __version__ in blinddl/__init__.py"; exit 1; }
+          if [ "$DRY_RUN" != "true" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null; then
+              echo "::error::v$v is already tagged. Commit 'chore: release X.Y.Z' with the new version first."; exit 1
+            fi
+            [ -n "$NOTES" ] || { echo "::error::A real release needs the notes input."; exit 1; }
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "blindDL $v at $(git rev-parse HEAD)"
+
+  windows:
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install dependencies, Inno Setup and the libtorrent wheel
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install "pyinstaller>=6.19" pytest -r requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+          python -m pip install --upgrade --pre yt-dlp
+          choco install innosetup --no-progress -y
+          $wheels = Join-Path $env:RUNNER_TEMP "wheels"
+          gh release download libtorrent-wheels --repo $env:GITHUB_REPOSITORY --pattern '*win_amd64.whl' --dir $wheels
+          if ($LASTEXITCODE -ne 0) { throw "wheel download failed" }
+          "BLINDDL_LIBTORRENT_WHEELHOUSE=$wheels" >> $env:GITHUB_ENV
+      - name: Test and build (build.bat)
+        shell: cmd
+        run: call build.bat
+      - uses: actions/upload-artifact@v6
+        with:
+          name: blindDL-windows-x64
+          path: release/*
+          if-no-files-found: error
+
+  linux:
+    needs: plan
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 90
+    steps:
+      - name: Install the Linux release host's packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git python3 python3-venv python3-dev python3-pip \
+            python3-wxgtk4.0 python3-wxgtk-media4.0 xvfb xauth build-essential binutils dpkg-dev
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Test and build (tools/build_linux_release.sh)
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          sh tools/build_linux_release.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: blindDL-linux-x64
+          path: release/*
+          if-no-files-found: error
+
+  publish:
+    if: ${{ !inputs.dry_run }}
+    needs: [plan, windows, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: release
+          merge-multiple: true
+      # Same order as the host flow: the draft must exist before the tag, or
+      # release.yml's macOS publish fails with "release not found".
+      - name: Draft with Windows and Linux, then tag
+        env:
+          V: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          ls -l release
+          gh release create "v$V" release/* --repo "$GITHUB_REPOSITORY" --draft --latest=false \
+            --title "v$V" --notes-file "$RUNNER_TEMP/notes.md"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$V" -f sha="$SHA" >/dev/null
+      - name: Build macOS and publish (release.yml on the tag)
+        env:
+          V: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "v$V"
+          sleep 15
+          id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
+          echo "release.yml on v$V -> https://github.com/$GITHUB_REPOSITORY/actions/runs/$id"
+          gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 60
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          [ "$latest" = "v$V" ] || { echo "::error::/releases/latest is $latest"; exit 1; }
+          echo "Published v$V as Latest."
