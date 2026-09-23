@@ -29,7 +29,6 @@ downloaded_files/
 .dlhistory
 .smoke_*/
 .freebuff/
-AGENTS.md
 *.log
 *.pkl
 *.mp3
@@ -49,3 +48,4 @@ cookies.txt
 Thumbs.db
 .idea/
 .vscode/
+AGENTS.local.md
