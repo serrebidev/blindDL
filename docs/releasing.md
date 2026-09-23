@@ -12,9 +12,9 @@ Start every release by bumping `__version__` in `blinddl/__init__.py` and commit
 4. Build Linux on `root@serrebiradio.com` from the tag with `tools/build_linux_release.sh`, then upload its three files.
 5. `release.yml` (or `python scripts/publish_release.py vX.Y.Z`) publishes once all eight are present.
 
-## Cloud agents only
+## Muse agent and cloud agents only
 
-Cloud agents without that Windows host use `.github/workflows/cloud-release.yml`, which builds every platform on GitHub runners. Never use it on the release host, and never run it while a host release is in progress.
+The Muse agent and cloud agents, which have no Windows host, use `.github/workflows/cloud-release.yml`, which builds every platform on GitHub runners. Never use it on the release host, and never run it while a host release is in progress.
 
 - `gh workflow run cloud-release.yml -f dry_run=true` runs `build.bat` on Windows and `tools/build_linux_release.sh` in a `debian:trixie` container, uploading both as workflow artifacts. It tags and publishes nothing.
 - `gh workflow run cloud-release.yml -f dry_run=false -f notes="$(cat notes.md)"` does the real release. It builds both platforms, creates the draft with the notes, creates the tag, then dispatches `release.yml` on the tag and waits for it. A tag created with `GITHUB_TOKEN` starts no workflow, so the dispatch is required. `release.yml` builds macOS and publishes, then the workflow checks `/releases/latest`.

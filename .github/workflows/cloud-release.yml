@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 name: Cloud release
 
-# Cloud agents ONLY. On the Windows release host keep the three-host flow:
+# Muse agent and cloud agents ONLY. On the Windows release host keep the three-host flow:
 # build.bat (Windows), draft, tag push (macOS in release.yml), Linux over SSH on
 # root@serrebiradio.com. Here every platform builds on GitHub runners:
 #   windows - build.bat with the maintained CPython 3.14 libtorrent wheel from
