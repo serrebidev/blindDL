@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.24.47"
+version = "0.24.56"
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,7 +31,9 @@ dependencies = [
   "accessible-output2>=0.17; platform_system == 'Windows'",
   # musicdl is vendored at its current upstream HEAD because its published
   # metadata pins a vulnerable cryptography release. Keep these requirements
-  # aligned with requirements-musicdl.txt and musicdl/VENDORED.md.
+  # aligned with requirements-musicdl.txt and musicdl/VENDORED.md. gamdl is
+  # deliberately external: its current pyplayready metadata requires an older
+  # cryptography line, so blindDL invokes gamdl as an isolated executable.
   "click>=8.0,<9",
   "json-repair>=0.58.6,<1",
   "prettytable>=3.17,<4",
@@ -44,7 +46,7 @@ dependencies = [
   "bleach>=6.3,<7",
   "beautifulsoup4>=4.14.3,<5",
   "aigpy==2022.7.8.1",
-  "av>=17,<18",
+  "av>=17,<19",
   "tabulate>=0.10,<1",
   "m3u8>=6,<7",
   "pywidevine>=1.9,<2",
@@ -63,7 +65,7 @@ dependencies = [
   "pydantic>=2.7",
   "pydantic-settings>=2.3",
   "questionary>=2.0",
-  "rich>=14.3.3,<15",
+  "rich>=14.3.3,<16",
   "ytmusicapi>=1.11.5,<2",
   # Free audiobook sites. The git build carries the chapter and narrator
   # fields the Search tab shows; the 0.7 release on PyPI does not.
@@ -83,8 +85,8 @@ dependencies = [
   # include its asyncio protocol backend so enabling it works immediately.
   "aioslsk>=1.6.3,<2",
   "python-vlc>=3.0.21203",
-  "chardet>=7,<7.4",
-  "pycparser>=2.23,<3",
+  "chardet>=7,<8",
+  "pycparser>=2.23,<4",
   # Adult providers are bundled so the disabled-by-default Settings checkbox
   # can enable them without requiring a second installation.
   "curl-cffi>=0.14,<1",

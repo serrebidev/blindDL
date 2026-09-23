@@ -14,7 +14,7 @@ httpx>=0.27
 pydantic>=2.7
 pydantic-settings>=2.3
 questionary>=2.0
-rich>=14.3.3,<15
+rich>=14.3.3,<16
 ytmusicapi>=1.11.5,<2
 # Free audiobook sites (LibriVox, LoyalBooks and friends). The git build
 # carries the chapter/narrator fields the Search tab shows; PyPI's 0.7 does
@@ -39,7 +39,7 @@ tzdata>=2025.2
 # enabling Soulseek never requires a separate package-install step.
 aioslsk>=1.6.3,<2
 python-vlc>=3.0.21203
-# Avoid known PyInstaller hook warnings in newer mypyc/packaging layouts.
-chardet>=7,<7.4
-pycparser>=2.23,<3
+# These current major lines are covered by blindDL's dependency and packaging tests.
+chardet>=7,<8
+pycparser>=2.23,<4
 -r requirements-adult.txt

@@ -392,6 +392,29 @@ class AppleMusicDownloadTests(unittest.TestCase):
             "yt_dlp.downloader.hls.HlsFD.download",
             autospec=True, side_effect=self._fake_hls_download)
 
+    def test_download_prefers_current_gamdl_for_m4a(self):
+        from blinddl import gamdl_backend
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cookies = os.path.join(tmp, "cookies.txt")
+            with open(cookies, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "# Netscape HTTP Cookie File\n"
+                    ".music.apple.com\tTRUE\t/\tTRUE\t0\tmedia-user-token\ttoken123\n"
+                )
+
+            with mock.patch.object(gamdl_backend, "available", return_value=True), \
+                 mock.patch.object(gamdl_backend, "download",
+                                   return_value=tmp) as gamdl_download, \
+                 mock.patch.object(applemusic_backend, "_authenticated_api") as native:
+                result = applemusic_backend.download(
+                    "https://music.apple.com/us/song/1", tmp,
+                    {"apple_music_cookies": cookies})
+
+            self.assertEqual(result, tmp)
+            gamdl_download.assert_called_once()
+            native.assert_not_called()
+
     def test_download_song_uses_in_process_pipeline(self):
         api = mock.Mock()
         api.getsong.return_value = {

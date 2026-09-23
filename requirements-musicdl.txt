@@ -9,12 +9,12 @@ orjson>=3.11.8,<4
 cryptography>=50,<51
 fake-useragent>=2.2,<3
 pathvalidate>=3.3.1,<4
-rich>=14.3.3,<15
+rich>=14.3.3,<16
 emoji>=2.15,<3
 bleach>=6.3,<7
 beautifulsoup4>=4.14.3,<5
 aigpy==2022.7.8.1
-av>=17,<18
+av>=17,<19
 tabulate>=0.10,<1
 mutagen>=1.47,<2
 ytmusicapi>=1.11.5,<2

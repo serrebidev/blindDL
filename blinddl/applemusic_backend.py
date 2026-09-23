@@ -10,9 +10,10 @@ Apple Music web pipeline entirely inside blindDL -- anonymous developer
 token, catalog metadata, Widevine L3 license exchange, then a CENC
 decrypt-and-remux to M4A (yt-dlp's HLS downloader assembles the encrypted
 fragmented MP4 and ffmpeg's MOV demuxer decrypts it) -- the same technique
-the gamdl / AppleMusicDecrypt family of tools pioneered. No external
-downloader is needed; the only tools involved are the yt-dlp and ffmpeg
-blindDL already bundles.
+the gamdl / AppleMusicDecrypt family of tools pioneered. When gamdl 3.9.1+
+is installed separately, blindDL prefers it for M4A downloads and keeps its
+dependency environment isolated from blindDL. Without gamdl, the built-in
+yt-dlp/ffmpeg path remains available.
 
 A full track still needs an Apple Music subscription. Export your browser
 cookies while logged in at music.apple.com (Settings, Accounts, Apple Music,
@@ -850,7 +851,6 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
     playlist tracks land in a subfolder named after the release.
     """
     os.makedirs(out_dir, exist_ok=True)
-    api, itunes_api = _authenticated_api(config)
     info = parse_apple_url(url)
     if info is None:
         raise RuntimeError(f"Not an Apple Music URL: {url}")
@@ -859,6 +859,23 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
         raise RuntimeError(
             "blindDL supports Apple Music songs, albums, and playlists only.")
     audio_format = (config or {}).get("apple_music_format", "m4a")
+    cookies_path = str((config or {}).get("apple_music_cookies") or "")
+    if cookies_path and os.path.isfile(cookies_path):
+        cookies = _cookies_from_file(cookies_path)
+        if not cookies.get("media-user-token"):
+            raise RuntimeError(
+                "Your Apple Music cookies file has no media-user-token. Export "
+                "fresh cookies while logged in at music.apple.com."
+            )
+    if audio_format == "m4a" and os.path.isfile(cookies_path):
+        from . import gamdl_backend
+
+        if gamdl_backend.available():
+            return gamdl_backend.download(
+                url, out_dir, config, cancel_event=cancel_event
+            )
+
+    api, itunes_api = _authenticated_api(config)
     if media_type == "song" or info.get("sub_id"):
         media_id = info["sub_id"] or info["media_id"]
         metadata = _catalog_song(api, media_id)
