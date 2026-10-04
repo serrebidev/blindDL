@@ -142,4 +142,4 @@ pythonpath = ["."]
 # seleniumbase (installed globally for BlindRSS) and pytest-playwright both
 # register --browser, which kills pytest at startup on this host. blindDL drives
 # no browsers, so drop seleniumbase's plugin. Harmless where it is absent.
-addopts = "-p no:cacheprovider -p no:seleniumbase --basetemp=.pytest-tmp-blinddl"
+addopts = "-p no:cacheprovider -p no:seleniumbase --basetemp=.pytest-tmp-blinddl2"
