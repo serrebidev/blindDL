@@ -30,3 +30,8 @@ The first three are ports of source from
 adapted to the musicdl `SongInfo`/`BaseMusicClient` contract. Their module
 docstrings name the origin file. FreeQobuz depends on a third-party webhook
 for its token pool and answers with no results when that pool is unreachable.
+
+## Local fixes
+
+Qingting and Ximalaya search now initialize their search type before creating
+the progress task. Offline regression tests cover album and track searches.
