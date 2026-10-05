@@ -1,3 +1,7 @@
+# Copyright (c) serrebidev and contributors
+# This file is part of blindDL.
+# SPDX-License-Identifier: MIT
+
 """Exercise the bundled search bodies without importing optional providers.
 
 The imports register every musicdl provider. These tests isolate the actual
