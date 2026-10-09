@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import json
 import os
 import sys
 import threading
@@ -83,6 +84,69 @@ _shared_vlc_instance = None
 _shared_vlc_lock = threading.Lock()
 PLAYBACK_TIMER_MS = 1000
 
+# Playback speeds offered, as multiples of normal.
+SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+
+# Where playback stopped is kept only for long media -- podcasts, mixes,
+# audiobooks -- and only once it is past the first and short of the last
+# half-minute, where starting over or finishing is what anyone would want.
+RESUME_MIN_LENGTH_MS = 10 * 60 * 1000
+RESUME_MARGIN_MS = 30 * 1000
+RESUME_KEEP = 200
+_positions_lock = threading.Lock()
+
+
+def worth_resuming(current, length):
+    """True when stopping at ``current`` of ``length`` ms should be kept."""
+    return (length >= RESUME_MIN_LENGTH_MS
+            and RESUME_MARGIN_MS <= current <= length - RESUME_MARGIN_MS)
+
+
+def _positions_path():
+    from ..config import app_data_dir
+    return os.path.join(app_data_dir(), "playback_positions.json")
+
+
+def _read_positions():
+    try:
+        with open(_positions_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_positions(data):
+    path = _positions_path()
+    temporary = path + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def saved_position(location):
+    """Milliseconds to resume ``location`` from, or 0."""
+    value = _read_positions().get(str(location), 0)
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def remember_position(location, current, length):
+    """Keep or forget where ``location`` stopped; newest entries win."""
+    key = str(location)
+    with _positions_lock:
+        data = _read_positions()
+        keep = worth_resuming(current, length)
+        if data.pop(key, None) is None and not keep:
+            return
+        if keep:
+            data[key] = int(current)
+            while len(data) > RESUME_KEEP:
+                data.pop(next(iter(data)))
+        _write_positions(data)
+
 
 def _get_vlc_instance():
     """Create one libVLC runtime shared by every player surface."""
@@ -154,6 +218,7 @@ class MediaPlayerPanel(wx.Panel):
         # point: a list should carry on by itself, and stop when stopped.
         self.finished_request: Callable[[], None] | None = None
         self._title = ""
+        self._location = ""
         self._loaded = False
         self._updating_position = False
         self._shutting_down = False
@@ -207,6 +272,15 @@ class MediaPlayerPanel(wx.Panel):
         self.volume.Bind(wx.EVT_SLIDER, self.on_volume)
         self._set_volume(80)
 
+        speed_label = wx.StaticText(self, label="Speed:")
+        self.speed = wx.Choice(
+            self, choices=[f"{value:g}x" for value in SPEEDS])
+        self.speed.SetName("Playback speed")
+        self.speed.SetHelpText(
+            "How fast media plays. Remembered for everything played after.")
+        self.speed.SetSelection(SPEEDS.index(self._rate()))
+        self.speed.Bind(wx.EVT_CHOICE, self.on_speed)
+
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         buttons.Add(self.play_btn, 0, wx.RIGHT, 8)
         buttons.Add(self.stop_btn, 0)
@@ -215,7 +289,9 @@ class MediaPlayerPanel(wx.Panel):
         seek_row.Add(self.time_text, 0, wx.ALIGN_CENTER_VERTICAL)
         volume_row = wx.BoxSizer(wx.HORIZONTAL)
         volume_row.Add(volume_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        volume_row.Add(self.volume, 1, wx.ALIGN_CENTER_VERTICAL)
+        volume_row.Add(self.volume, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        volume_row.Add(speed_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        volume_row.Add(self.speed, 0, wx.ALIGN_CENTER_VERTICAL)
 
         sizer.Add(self.now_playing, 0, wx.EXPAND | wx.BOTTOM, 4)
         sizer.Add(self.media, 1, wx.EXPAND | wx.BOTTOM, 6)
@@ -273,6 +349,7 @@ class MediaPlayerPanel(wx.Panel):
         self.stop(silent=True)
         self._load_generation += 1
         self._title = title or "Untitled media"
+        self._location = str(location)
         self._loaded = False
         self.now_playing.SetLabel(f"Loading: {self._title}")
         self._enable_controls(False)
@@ -333,8 +410,43 @@ class MediaPlayerPanel(wx.Panel):
         self.now_playing.SetLabel(f"Now playing: {self._title}")
         self.play_btn.SetLabel("&Pause")
         self.timer.Start(PLAYBACK_TIMER_MS)
+        self.speed.SetSelection(SPEEDS.index(self._rate()))
+        self._set_rate(self._rate())
+        message = f"Playing: {self._title}"
+        resume = saved_position(self._location)
+        if resume:
+            self._seek(resume)
+            message += f", resumed at {_clock(resume)}"
         self._report_status("Playing")
-        self.frame.announce(f"Playing: {self._title}")
+        self.frame.announce(message)
+
+    def _rate(self):
+        config = getattr(self.frame, "config", None)
+        value = config.get("playback_rate", 1.0) if config is not None else 1.0
+        return value if value in SPEEDS else 1.0
+
+    def on_speed(self, event):
+        rate = SPEEDS[self.speed.GetSelection()]
+        config = getattr(self.frame, "config", None)
+        if config is not None:
+            config["playback_rate"] = rate
+            config.save()
+        if self._loaded:
+            self._set_rate(rate)
+
+    def _set_rate(self, rate):
+        if self._vlc_player is not None:
+            self._vlc_player.set_rate(rate)
+        else:
+            self.media.SetPlaybackRate(rate)
+
+    def _remember(self):
+        """Keep where long media stopped, so it can start from there next."""
+        # A stopped player reads 0; that says nothing about where the
+        # listener got to, so it must not wipe what Stop already kept.
+        current = self._tell() if self._loaded else 0
+        if current and self._location:
+            remember_position(self._location, current, self._length())
 
     def _on_finished(self, event):
         self._playback_finished()
@@ -367,6 +479,9 @@ class MediaPlayerPanel(wx.Panel):
             # previous load). There is nothing to report as finished.
             return
         self.timer.Stop()
+        location = getattr(self, "_location", "")
+        if location:
+            remember_position(location, 0, 0)
         self.play_btn.SetLabel("&Play")
         self.position.SetValue(1000)
         self._report_status("")
@@ -425,6 +540,7 @@ class MediaPlayerPanel(wx.Panel):
     def stop(self, silent=False):
         self.timer.Stop()
         length = self._length() if self._loaded else 0
+        self._remember()
         if self._loaded:
             self._stop()
         self.play_btn.SetLabel("&Play")
@@ -539,6 +655,7 @@ class MediaPlayerPanel(wx.Panel):
         self._shutting_down = True
         self.timer.Stop()
         self._report_status("")
+        self._remember()
         if self._loaded:
             self._stop()
         if self._vlc_player is not None:

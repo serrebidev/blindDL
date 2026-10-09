@@ -46,6 +46,62 @@ X265_ARGS = (
 )
 
 
+# SponsorBlock categories blindDL offers to cut, as (label, category).
+# music_offtopic is the one that matters most for audio: the talking and
+# skits around the song in a music video.
+SPONSORBLOCK_CATEGORIES = (
+    ("Sponsors", "sponsor"),
+    ("Unpaid or self promotion", "selfpromo"),
+    ("Reminders to like and subscribe", "interaction"),
+    ("Intros and intermissions", "intro"),
+    ("Endcards and credits", "outro"),
+    ("Previews and recaps", "preview"),
+    ("Non-music parts of music videos", "music_offtopic"),
+    ("Filler and tangents", "filler"),
+)
+
+# Containers yt-dlp's EmbedThumbnail can write cover art into. Anything
+# else (WAV, AVI, a webm kept as it came) would fail the whole download.
+THUMBNAIL_CONTAINERS = frozenset({"mp3", "m4a", "flac", "opus", "mp4", "mkv"})
+
+
+def video_format_selector(max_height=0):
+    """yt-dlp format string for a video download, capped at max_height."""
+    if not max_height:
+        return "bestvideo+bestaudio/best"
+    cap = f"[height<={int(max_height)}]"
+    return f"bestvideo{cap}+bestaudio/best{cap}/best"
+
+
+def extra_postprocessors(final_ext, sponsorblock=(), embed_metadata=False):
+    """SponsorBlock cutting and title/chapter/cover embedding, in run order.
+
+    ``final_ext`` is the container the file ends up in, or None when the
+    site's own container is kept and cannot be known in advance.
+    SponsorBlock asks only about YouTube videos; other sites pass through.
+    """
+    processors = []
+    categories = [c for c in sponsorblock or () if isinstance(c, str) and c]
+    if categories:
+        processors.append({
+            "key": "SponsorBlock", "categories": categories,
+            "when": "after_filter",
+        })
+        processors.append({
+            "key": "ModifyChapters",
+            "remove_sponsor_segments": categories,
+        })
+    # A kept original (final_ext None) is promised no ffmpeg pass at all.
+    if embed_metadata and final_ext:
+        processors.append({
+            "key": "FFmpegMetadata", "add_chapters": True,
+            "add_metadata": True,
+        })
+        if final_ext in THUMBNAIL_CONTAINERS:
+            processors.append({"key": "EmbedThumbnail"})
+    return processors
+
+
 class DownloadCancelled(Exception):
     """Raised inside progress hooks when the user cancels a download."""
 
@@ -448,12 +504,17 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
 def download(url, out_dir, audio_only=True, audio_format="mp3",
              video_format="mp4", progress_cb=None, cancel_event=None,
              http_headers=None, cookies_from_browser=None,
-             cookies_file=None, fix_stream=None):
+             cookies_file=None, fix_stream=None, sponsorblock=(),
+             embed_metadata=False, max_height=0):
     """Download one URL. progress_cb receives yt-dlp progress dicts.
 
     audio_format and video_format both accept "original", which means the
     file is kept in whatever container the site serves: no ffmpeg pass, so
     nothing is re-encoded and the download finishes as soon as the bytes do.
+
+    ``sponsorblock`` lists SponsorBlock categories to cut out, and
+    ``embed_metadata`` writes title, chapters and cover art into the file.
+    ``max_height`` caps video resolution; 0 takes the best there is.
     """
     os.makedirs(out_dir, exist_ok=True)
     completed_paths = []
@@ -487,9 +548,11 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     }
     if http_headers:
         opts["http_headers"] = dict(http_headers)
+    final_ext = None
     if audio_only:
         opts["format"] = "bestaudio/best"
         if audio_format and audio_format != ORIGINAL_FORMAT:
+            final_ext = audio_format
             opts["postprocessors"] = [{
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": audio_format,
@@ -502,8 +565,9 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         # Always the best streams the site has, whatever they are encoded in;
         # the container is settled afterwards so nothing is thrown away to
         # satisfy it.
-        opts["format"] = "bestvideo+bestaudio/best"
+        opts["format"] = video_format_selector(max_height)
         if video_format in ("mp4", "mkv"):
+            final_ext = video_format
             # A remux, not a re-encode: the picture and sound are the site's
             # own, moved into the container the user asked for.
             opts["merge_output_format"] = video_format
@@ -520,6 +584,7 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
             # mkv, and yt-dlp skips a conversion that is already in target
             # format. Audio is copied, so only the picture is re-encoded.
             opts["merge_output_format"] = "mkv"
+            final_ext = "mp4"
             opts["postprocessors"] = [{
                 "key": "FFmpegVideoConvertor",
                 "preferedformat": "mp4",
@@ -527,6 +592,11 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
             opts["postprocessor_args"] = {"videoconvertor": list(X265_ARGS)}
         # "original" (and anything unrecognized) leaves the container to
         # yt-dlp, which keeps the streams as they came.
+    added = extra_postprocessors(final_ext, sponsorblock, embed_metadata)
+    if added:
+        opts["postprocessors"] = list(opts.get("postprocessors", [])) + added
+        if any(pp["key"] == "EmbedThumbnail" for pp in added):
+            opts["writethumbnail"] = True
     def run(opts_dict):
         with yt_dlp.YoutubeDL(opts_dict) as ydl:
             if fix_stream is None:

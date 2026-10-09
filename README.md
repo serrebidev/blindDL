@@ -26,6 +26,10 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Subscribes to playlists, channels, hashtags, and search pages with a per-feed order, then checks for and downloads new items automatically.
 - Follows an artist by name, so their next record arrives on its own, as a record, in a folder of its own — and follows a Soulseek user, so anything they add to their shares arrives too.
 - Runs as many simultaneous downloads as you choose, with no artificial limit.
+- Cuts sponsor reads, intros, like-and-subscribe reminders and the non-music parts of music videos out of YouTube downloads using SponsorBlock's crowd-sourced markers. Tick the parts to cut in Settings, Downloads; nothing is cut until you do.
+- Writes the title, uploader, chapters and cover art into files from YouTube and the other video sites, and caps video resolution (Settings, Downloads, Maximum video resolution) so a download need not be a 4K file.
+- Signs in to YouTube through your own browser, never asking for your password: Settings, Accounts, Sign in to YouTube. Signed in, BlindDL can download age-restricted, members-only and private videos, and reads your own lists when you paste youtube.com/feed/subscriptions, youtube.com/playlist?list=WL (Watch later) or youtube.com/playlist?list=LL (liked videos) into the URL tab.
+- Plays at the speed you choose, from half to three times normal, and remembers it. Podcasts, mixes and audiobooks over ten minutes long pick up where you stopped.
 - Picks a dropped Deezer transfer up where it stopped instead of failing it, and never leaves you with nothing for a track Deezer will only serve at a lower bitrate than you asked for: when your Deezer account cannot serve the quality you chose, blindDL takes the best stream the account can get -- 320, then 256, then 128 kbps -- rather than sending the download to YouTube.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.

@@ -38,6 +38,12 @@ class BrowserCookiesTests(unittest.TestCase):
         jar.append(_cookie("media-user-token", ".music.apple.com"))
         self.assertTrue(browser_cookies._has_apple_music_token(jar))
 
+    def test_youtube_sign_in_needs_login_info(self):
+        jar = [_cookie("VISITOR_INFO1_LIVE", ".youtube.com")]
+        self.assertFalse(browser_cookies._has_youtube_login(jar))
+        jar.append(_cookie("LOGIN_INFO", ".youtube.com"))
+        self.assertTrue(browser_cookies._has_youtube_login(jar))
+
     def test_export_writes_first_browser_with_token(self):
         jar_without = _FakeJar(_cookie("itspod", ".music.apple.com"))
         jar_with = _FakeJar(_cookie("media-user-token", ".music.apple.com"))

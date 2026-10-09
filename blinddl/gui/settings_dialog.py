@@ -14,7 +14,7 @@ import threading
 
 import wx
 
-from .. import associations, soulseek_backend, torrent_engine
+from .. import associations, soulseek_backend, torrent_engine, ytdlp_backend
 from ..global_hotkey import parse_hotkey
 from . import sounds
 
@@ -37,6 +37,21 @@ VIDEO_FORMAT_CHOICES = [
     ("MKV", "mkv"),
     ("AVI", "avi"),
     ("Small, x265 for long-term storage", "x265"),
+]
+# The signed-in YouTube cookies live beside the config, not in temp.
+YOUTUBE_COOKIES = "youtube_cookies.txt"
+YOUTUBE_SIGN_IN_URL = (
+    "https://accounts.google.com/ServiceLogin?service=youtube"
+    "&continue=https%3A%2F%2Fwww.youtube.com%2F"
+)
+MAX_HEIGHT_CHOICES = [
+    ("Best available", 0),
+    ("2160p (4K)", 2160),
+    ("1440p", 1440),
+    ("1080p", 1080),
+    ("720p", 720),
+    ("480p", 480),
+    ("360p", 360),
 ]
 # Kept for callers that only need the stored values.
 AUDIO_FORMATS = [value for _label, value in AUDIO_FORMAT_CHOICES]
@@ -231,6 +246,49 @@ class SettingsDialog(wx.Dialog):
             "the site serves; AVI is re-encoded, which takes longer."
         )
 
+        height_label = wx.StaticText(page, label="Maximum video &resolution:")
+        self.height_choice = self._choice(
+            page, MAX_HEIGHT_CHOICES, int(config["max_video_height"]),
+            "Maximum video resolution",
+        )
+        self.height_choice.SetHelpText(
+            "The tallest picture a video download may have. Best available "
+            "can mean very large 4K or 8K files; the next size down is used "
+            "when a video has nothing at the chosen one."
+        )
+
+        self.embed_check = wx.CheckBox(
+            page, label="Embed title, c&hapters and cover art in video-site downloads"
+        )
+        self.embed_check.SetValue(bool(config["embed_metadata"]))
+        self.embed_check.SetHelpText(
+            "Writes the title, uploader, chapters and thumbnail into files "
+            "from YouTube and the other video sites, so players can name "
+            "them and jump between chapters. Not done when the original "
+            "file is kept unconverted."
+        )
+
+        sponsor_label = wx.StaticText(
+            page, label="&SponsorBlock: cut these parts out of YouTube downloads:"
+        )
+        self.sponsor_list = wx.CheckListBox(
+            page,
+            choices=[label for label, _v in ytdlp_backend.SPONSORBLOCK_CATEGORIES],
+        )
+        self.sponsor_list.SetName(
+            "SponsorBlock: cut these parts out of YouTube downloads")
+        self.sponsor_list.SetHelpText(
+            "Space ticks a part. Ticked parts, as marked by SponsorBlock's "
+            "volunteers, are removed from the file. Nothing ticked keeps "
+            "every video whole."
+        )
+        chosen = set(config["sponsorblock_remove"])
+        self.sponsor_list.SetCheckedItems([
+            index for index, (_label, value)
+            in enumerate(ytdlp_backend.SPONSORBLOCK_CATEGORIES)
+            if value in chosen
+        ])
+
         self.metadata_check = wx.CheckBox(
             page, label="Look up &missing song details online"
         )
@@ -248,7 +306,11 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
         _row(sizer, fmt_label, self.format_choice)
         _row(sizer, video_fmt_label, self.video_format_choice)
+        _row(sizer, height_label, self.height_choice)
         sizer.Add(self.metadata_check, 0, wx.ALL, 8)
+        sizer.Add(self.embed_check, 0, wx.ALL, 8)
+        sizer.Add(sponsor_label, 0, wx.TOP | wx.LEFT, 8)
+        sizer.Add(self.sponsor_list, 0, wx.EXPAND | wx.ALL, 8)
 
         sizer.Add(self._heading(page, "Queue and cleanup"), 0,
                   wx.TOP | wx.LEFT, 12)
@@ -1222,6 +1284,20 @@ class SettingsDialog(wx.Dialog):
         )
         _row(sizer, am_format_label, self.am_format_choice)
 
+        sizer.Add(self._heading(page, "YouTube"), 0, wx.TOP | wx.LEFT, 12)
+        self.youtube_btn = wx.Button(page, label=self._youtube_label())
+        self.youtube_btn.SetName("YouTube account")
+        self.youtube_btn.SetHelpText(
+            "Signing in lets blindDL download age-restricted, members-only "
+            "and private videos, and your own lists: paste "
+            "youtube.com/feed/subscriptions, youtube.com/playlist?list=WL "
+            "for Watch later or youtube.com/playlist?list=LL for liked "
+            "videos into the URL tab. You sign in in your own browser; "
+            "blindDL never sees your password."
+        )
+        self.youtube_btn.Bind(wx.EVT_BUTTON, self._on_youtube_account)
+        sizer.Add(self.youtube_btn, 0, wx.ALL, 8)
+
         sizer.Add(self._heading(page, "Browser cookies"), 0,
                   wx.TOP | wx.LEFT, 12)
         self.cookies_auto_check = wx.CheckBox(
@@ -1408,6 +1484,82 @@ class SettingsDialog(wx.Dialog):
         if announce is not None:
             announce(f"Cookies exported from {label}.")
 
+    def _youtube_signed_in(self):
+        import os
+
+        from .. import config as config_module
+
+        path = os.path.join(config_module.app_data_dir(), YOUTUBE_COOKIES)
+        current = self.cookies_file_picker.GetPath().strip() if hasattr(
+            self, "cookies_file_picker") else self.config["cookies_file"]
+        return path, (
+            os.path.normcase(current) == os.path.normcase(path)
+            and os.path.isfile(path)
+        )
+
+    def _youtube_label(self):
+        _path, signed_in = self._youtube_signed_in()
+        return "Sign out of &YouTube" if signed_in else "Sign in to &YouTube"
+
+    def _on_youtube_account(self, event):
+        """Sign in through the user's own browser, or sign out again."""
+        import os
+        import webbrowser
+
+        from .. import browser_cookies
+
+        announce = getattr(self.frame, "announce", None) or (lambda _t: None)
+        path, signed_in = self._youtube_signed_in()
+        if signed_in:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.cookies_file_picker.SetPath("")
+            self.config["cookies_file"] = ""
+            self.youtube_btn.SetLabel(self._youtube_label())
+            announce("Signed out of YouTube.")
+            return
+        webbrowser.open(YOUTUBE_SIGN_IN_URL)
+        answer = wx.MessageBox(
+            "Your browser is opening YouTube's sign-in page. Sign in there, "
+            "then come back and press OK. If you are already signed in, "
+            "press OK now.",
+            "Sign in to YouTube",
+            wx.OK | wx.CANCEL | wx.ICON_INFORMATION,
+            self,
+        )
+        if answer != wx.OK:
+            return
+        preferred = self.config.get("cookies_from_browser") or None
+        if preferred == "auto":
+            preferred = None
+        try:
+            label = browser_cookies.export_youtube_cookies(path, preferred)
+        except browser_cookies.CookieExportError as exc:
+            wx.MessageBox(
+                "No browser is signed in to YouTube yet:\n\n"
+                + "\n".join(exc.errors),
+                "blindDL",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - report, keep the dialog open
+            wx.MessageBox(
+                f"Could not read the YouTube sign-in: {exc}",
+                "blindDL", wx.OK | wx.ICON_ERROR, self,
+            )
+            return
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self.cookies_file_picker.SetPath(path)
+        self.config["cookies_file"] = path
+        self.youtube_btn.SetLabel(self._youtube_label())
+        announce(f"Signed in to YouTube through {label}.")
+
     def _on_arl_from_browser(self, event):
         """Read the Deezer arl cookie from a signed-in browser."""
         from .. import browser_cookies
@@ -1444,6 +1596,14 @@ class SettingsDialog(wx.Dialog):
             self.video_format_choice.GetSelection()
         ][1]
         self.config["music_metadata_lookup"] = self.metadata_check.GetValue()
+        self.config["max_video_height"] = MAX_HEIGHT_CHOICES[
+            self.height_choice.GetSelection()
+        ][1]
+        self.config["embed_metadata"] = self.embed_check.GetValue()
+        self.config["sponsorblock_remove"] = [
+            ytdlp_backend.SPONSORBLOCK_CATEGORIES[index][1]
+            for index in self.sponsor_list.GetCheckedItems()
+        ]
         self.config["auto_clear_finished"] = self.auto_clear_check.GetValue()
         self.config["max_concurrent"] = self.conc_spin.GetValue()
         self.config["search_timeout_s"] = self.search_spin.GetValue()

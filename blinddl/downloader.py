@@ -1120,6 +1120,9 @@ class DownloadQueue:
             cancel_event=item.cancel_event,
             cookies_from_browser=self.config["cookies_from_browser"],
             cookies_file=self.config.get("cookies_file"),
+            sponsorblock=self.config.get("sponsorblock_remove") or (),
+            embed_metadata=bool(self.config.get("embed_metadata")),
+            max_height=int(self.config.get("max_video_height") or 0),
         )
 
     def _run_musicdl(self, item):

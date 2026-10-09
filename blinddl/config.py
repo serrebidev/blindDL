@@ -42,6 +42,18 @@ DEFAULTS = {
     # (re-encoded small for long-term storage), or "original" to keep
     # whatever container the streams come in.
     "video_format": "mp4",
+    # Tallest video picture to download, in lines (1080, 720...). 0 takes
+    # the best the site has, which can mean 4K or 8K files.
+    "max_video_height": 0,
+    # Write title, uploader, chapters and cover art into files downloaded
+    # through yt-dlp (YouTube and the other video sites).
+    "embed_metadata": True,
+    # SponsorBlock categories cut out of YouTube downloads: sponsor,
+    # selfpromo, interaction, intro, outro, preview, music_offtopic, filler.
+    # Empty leaves every video whole.
+    "sponsorblock_remove": [],
+    # Speed of the built-in player, remembered between tracks. 1.0 is normal.
+    "playback_rate": 1.0,
     # Maximum simultaneous downloads. No hard cap beyond this user setting.
     "max_concurrent": 4,
     # Take a download out of the Finished downloads list once it has

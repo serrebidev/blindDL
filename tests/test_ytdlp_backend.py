@@ -48,6 +48,32 @@ def _playlist_youtube_dl(info):
 
 
 class YtDlpBackendTests(unittest.TestCase):
+    def test_download_cuts_sponsors_embeds_details_and_caps_height(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _YoutubeDL):
+            ytdlp_backend.download(
+                "https://youtu.be/x", folder, audio_only=False,
+                video_format="mp4", sponsorblock=["sponsor"],
+                embed_metadata=True, max_height=720)
+        opts = _YoutubeDL.instances[-1].options
+        keys = [pp["key"] for pp in opts["postprocessors"]]
+        self.assertEqual(keys, ["SponsorBlock", "ModifyChapters",
+                                "FFmpegMetadata", "EmbedThumbnail"])
+        self.assertTrue(opts["writethumbnail"])
+        self.assertIn("[height<=720]", opts["format"])
+
+    def test_cover_art_only_goes_where_it_fits(self):
+        def keys(ext):
+            return [pp["key"] for pp in ytdlp_backend.extra_postprocessors(
+                ext, (), embed_metadata=True)]
+        self.assertIn("EmbedThumbnail", keys("mp3"))
+        self.assertEqual(keys("wav"), ["FFmpegMetadata"])
+        # A kept original is promised no ffmpeg pass at all.
+        self.assertEqual(keys(None), [])
+        self.assertEqual(ytdlp_backend.extra_postprocessors("mp3", ()), [])
+        self.assertEqual(
+            ytdlp_backend.video_format_selector(0), "bestvideo+bestaudio/best")
+
     def setUp(self):
         _YoutubeDL.instances.clear()
 
