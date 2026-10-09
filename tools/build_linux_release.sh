@@ -14,7 +14,7 @@ if [ "$(uname -s)" != "Linux" ]; then
     exit 1
 fi
 
-for command in "$PYTHON" xvfb-run; do
+for command in "$PYTHON" xvfb-run dbus-run-session; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "$command is required for the Linux release build." >&2
         exit 1
@@ -45,5 +45,6 @@ fi
 "$VENV/bin/python" -m pip check
 "$VENV/bin/python" "$ROOT/scripts/check_no_arl.py"
 cd "$ROOT"
-xvfb-run -a "$VENV/bin/python" -m pytest -q
+# An inherited desktop bus can block GTK startup in headless tests.
+xvfb-run -a dbus-run-session -- "$VENV/bin/python" -m pytest -q
 "$VENV/bin/python" tools/build_release.py
