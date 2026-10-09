@@ -374,29 +374,6 @@ def export_apple_music_cookies(dest_path, preferred=None):
     )
 
 
-def _has_youtube_login(jar):
-    """True when the jar holds YouTube's signed-in LOGIN_INFO cookie."""
-    return any(
-        cookie.name == "LOGIN_INFO" and cookie.domain.endswith("youtube.com")
-        for cookie in jar
-    )
-
-
-def export_youtube_cookies(dest_path, preferred=None):
-    """Export cookies from a browser signed in to YouTube into ``dest_path``.
-
-    Keeps only exports that carry YouTube's ``LOGIN_INFO`` cookie, so a
-    browser that is merely installed is never taken for a signed-in one.
-    """
-    return export_cookies(
-        dest_path,
-        preferred=preferred,
-        needs=_has_youtube_login,
-        why="not signed in to YouTube",
-        require=("LOGIN_INFO", ("youtube.com",)),
-    )
-
-
 def extract_cookie_value(name, domains, preferred=None):
     """Return ``(value, label)`` for the first browser with a matching cookie.
 

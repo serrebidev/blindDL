@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import yt_dlp
 from yt_dlp.cookies import CookieLoadError
 
-from . import search_order
+from . import search_order, youtube_account
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 
 # The audio_format / video_format value meaning "leave the file alone".
@@ -355,6 +355,12 @@ def extract_flat(url, cookies_from_browser=None, cookies_file=None,
     *order* only reaches the feeds that have one to choose -- searches and
     hashtags. See ordered_feed_url.
     """
+    # Subscriptions, Watch later, liked videos and history are read through
+    # the google.com/device sign-in when there is one; yt-dlp can only reach
+    # them with browser cookies.
+    feed = youtube_account.feed_for(url)
+    if feed and youtube_account.signed_in():
+        return youtube_account.list_feed(feed, limit)
     url = ordered_feed_url(url, order)
     if limit is None and _RANKED_FEED_RE.match(url):
         limit = RANKED_FEED_LIMIT

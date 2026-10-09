@@ -11,10 +11,18 @@ end to end without losing your place.
 
 import sys
 import threading
+import time
+import webbrowser
 
 import wx
 
-from .. import associations, soulseek_backend, torrent_engine, ytdlp_backend
+from .. import (
+    associations,
+    soulseek_backend,
+    torrent_engine,
+    youtube_account,
+    ytdlp_backend,
+)
 from ..global_hotkey import parse_hotkey
 from . import sounds
 
@@ -38,12 +46,6 @@ VIDEO_FORMAT_CHOICES = [
     ("AVI", "avi"),
     ("Small, x265 for long-term storage", "x265"),
 ]
-# The signed-in YouTube cookies live beside the config, not in temp.
-YOUTUBE_COOKIES = "youtube_cookies.txt"
-YOUTUBE_SIGN_IN_URL = (
-    "https://accounts.google.com/ServiceLogin?service=youtube"
-    "&continue=https%3A%2F%2Fwww.youtube.com%2F"
-)
 MAX_HEIGHT_CHOICES = [
     ("Best available", 0),
     ("2160p (4K)", 2160),
@@ -1288,12 +1290,12 @@ class SettingsDialog(wx.Dialog):
         self.youtube_btn = wx.Button(page, label=self._youtube_label())
         self.youtube_btn.SetName("YouTube account")
         self.youtube_btn.SetHelpText(
-            "Signing in lets blindDL download age-restricted, members-only "
-            "and private videos, and your own lists: paste "
+            "Signs in the way a TV does: blindDL shows a code, and you "
+            "enter it at google.com/device. Signed in, the URL tab and "
+            "Subscriptions read your own lists: "
             "youtube.com/feed/subscriptions, youtube.com/playlist?list=WL "
-            "for Watch later or youtube.com/playlist?list=LL for liked "
-            "videos into the URL tab. You sign in in your own browser; "
-            "blindDL never sees your password."
+            "for Watch later, youtube.com/playlist?list=LL for liked videos "
+            "and youtube.com/feed/history. blindDL never sees your password."
         )
         self.youtube_btn.Bind(wx.EVT_BUTTON, self._on_youtube_account)
         sizer.Add(self.youtube_btn, 0, wx.ALL, 8)
@@ -1484,81 +1486,44 @@ class SettingsDialog(wx.Dialog):
         if announce is not None:
             announce(f"Cookies exported from {label}.")
 
-    def _youtube_signed_in(self):
-        import os
-
-        from .. import config as config_module
-
-        path = os.path.join(config_module.app_data_dir(), YOUTUBE_COOKIES)
-        current = self.cookies_file_picker.GetPath().strip() if hasattr(
-            self, "cookies_file_picker") else self.config["cookies_file"]
-        return path, (
-            os.path.normcase(current) == os.path.normcase(path)
-            and os.path.isfile(path)
-        )
-
     def _youtube_label(self):
-        _path, signed_in = self._youtube_signed_in()
-        return "Sign out of &YouTube" if signed_in else "Sign in to &YouTube"
+        return ("Sign out of &YouTube" if youtube_account.signed_in()
+                else "Sign in to &YouTube")
 
     def _on_youtube_account(self, event):
-        """Sign in through the user's own browser, or sign out again."""
-        import os
-        import webbrowser
-
-        from .. import browser_cookies
-
+        """Sign in with a code at google.com/device, as SmartTube does."""
         announce = getattr(self.frame, "announce", None) or (lambda _t: None)
-        path, signed_in = self._youtube_signed_in()
-        if signed_in:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            self.cookies_file_picker.SetPath("")
-            self.config["cookies_file"] = ""
+        if youtube_account.signed_in():
+            youtube_account.sign_out()
             self.youtube_btn.SetLabel(self._youtube_label())
             announce("Signed out of YouTube.")
             return
-        webbrowser.open(YOUTUBE_SIGN_IN_URL)
-        answer = wx.MessageBox(
-            "Your browser is opening YouTube's sign-in page. Sign in there, "
-            "then come back and press OK. If you are already signed in, "
-            "press OK now.",
-            "Sign in to YouTube",
-            wx.OK | wx.CANCEL | wx.ICON_INFORMATION,
-            self,
-        )
-        if answer != wx.OK:
-            return
-        preferred = self.config.get("cookies_from_browser") or None
-        if preferred == "auto":
-            preferred = None
         try:
-            label = browser_cookies.export_youtube_cookies(path, preferred)
-        except browser_cookies.CookieExportError as exc:
-            wx.MessageBox(
-                "No browser is signed in to YouTube yet:\n\n"
-                + "\n".join(exc.errors),
-                "blindDL",
-                wx.OK | wx.ICON_ERROR,
-                self,
-            )
+            with wx.BusyCursor():
+                code = youtube_account.start_sign_in()
+        except Exception as exc:  # noqa: BLE001 - network or YouTube refusal
+            wx.MessageBox(f"Could not start the YouTube sign-in: {exc}",
+                          "blindDL", wx.OK | wx.ICON_ERROR, self)
             return
-        except Exception as exc:  # noqa: BLE001 - report, keep the dialog open
-            wx.MessageBox(
-                f"Could not read the YouTube sign-in: {exc}",
-                "blindDL", wx.OK | wx.ICON_ERROR, self,
-            )
-            return
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        self.cookies_file_picker.SetPath(path)
-        self.config["cookies_file"] = path
+        dialog = YouTubeSignInDialog(self, code)
+        result = dialog.ShowModal()
+        error = dialog.error
+        dialog.Destroy()
         self.youtube_btn.SetLabel(self._youtube_label())
-        announce(f"Signed in to YouTube through {label}.")
+        if error:
+            wx.MessageBox(error, "blindDL", wx.OK | wx.ICON_ERROR, self)
+            return
+        if result != wx.ID_OK:
+            return
+        announce("Signed in to YouTube.")
+        panel = getattr(self.frame, "subs_panel", None)
+        if panel is not None and wx.MessageBox(
+                "Signed in to YouTube.\n\nSubscribe to your YouTube "
+                "subscriptions feed now? New videos from the channels you "
+                "follow on YouTube will then download on their own, from "
+                "now on.",
+                "blindDL", wx.YES_NO | wx.ICON_QUESTION, self) == wx.YES:
+            panel.follow(youtube_account.SUBSCRIPTIONS_URL)
 
     def _on_arl_from_browser(self, event):
         """Read the Deezer arl cookie from a signed-in browser."""
@@ -1713,3 +1678,70 @@ def _positive_float(text, fallback):
     except (TypeError, ValueError):
         return fallback
     return value if value >= 0 else fallback
+
+
+class YouTubeSignInDialog(wx.Dialog):
+    """Shows the google.com/device code and waits for it to be entered."""
+
+    def __init__(self, parent, code):
+        super().__init__(parent, title="Sign in to YouTube")
+        self.error = ""
+        self._stop = threading.Event()
+        url = code.get("verification_url") or "https://www.google.com/device"
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        intro = wx.StaticText(self, label=(
+            f"Go to {url} on any phone or computer, sign in to Google if "
+            "asked, and enter this code. This window closes by itself once "
+            "you have."))
+        intro.Wrap(420)
+        code_label = wx.StaticText(self, label="&Code:")
+        self.code_text = wx.TextCtrl(
+            self, value=code["user_code"], style=wx.TE_READONLY)
+        self.code_text.SetName("Code")
+        open_btn = wx.Button(self, label="&Open google.com/device")
+        open_btn.Bind(wx.EVT_BUTTON, lambda _e: webbrowser.open(url))
+        copy_btn = wx.Button(self, label="Co&py code")
+        copy_btn.Bind(wx.EVT_BUTTON, self._on_copy)
+        cancel = wx.Button(self, wx.ID_CANCEL, "Cancel")
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        for button in (open_btn, copy_btn, cancel):
+            buttons.Add(button, 0, wx.RIGHT, 6)
+        sizer.Add(intro, 0, wx.ALL, 10)
+        _row(sizer, code_label, self.code_text)
+        sizer.Add(buttons, 0, wx.ALL, 10)
+        self.SetSizerAndFit(sizer)
+        self.code_text.SetFocus()
+        self.Bind(wx.EVT_WINDOW_DESTROY, lambda e: (self._stop.set(), e.Skip()))
+        threading.Thread(
+            target=self._wait, daemon=True,
+            args=(code["device_code"], int(code.get("interval") or 5),
+                  int(code.get("expires_in") or 1800))).start()
+
+    def _on_copy(self, event):
+        if wx.TheClipboard.Open():
+            wx.TheClipboard.SetData(wx.TextDataObject(self.code_text.GetValue()))
+            wx.TheClipboard.Close()
+
+    def _wait(self, device_code, interval, expires_in):
+        deadline = time.monotonic() + expires_in
+        while not self._stop.wait(interval):
+            if time.monotonic() > deadline:
+                wx.CallAfter(self._finish, "The code expired. Start the "
+                             "sign-in again.")
+                return
+            try:
+                if youtube_account.finish_sign_in(device_code):
+                    wx.CallAfter(self._finish, "")
+                    return
+            except youtube_account.SignInError as exc:
+                wx.CallAfter(self._finish, str(exc))
+                return
+            except OSError:
+                continue  # a dropped connection; try again next interval
+
+    def _finish(self, error):
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self.error = error
+        self.EndModal(wx.ID_CANCEL if error else wx.ID_OK)
