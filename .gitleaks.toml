@@ -4,6 +4,13 @@ minVersion = "8.30.1"
 useDefault = true
 
 [[allowlists]]
+description = "Public YouTube TV client constant from coletdjnz/yt-dlp-youtube-oauth2"
+condition = "AND"
+paths = ['''^blinddl/youtube_account\.py$''']
+regexTarget = "secret"
+regexes = ['''^SboVhoG9s0rNafixCSGGKXAT$''']
+
+[[allowlists]]
 description = "Exact upstream musicdl vendor snapshot; see musicdl/VENDORED.md"
 paths = [
   '''^musicdl/''',
