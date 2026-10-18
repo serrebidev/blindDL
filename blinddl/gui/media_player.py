@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from urllib.parse import urlparse
 
@@ -86,6 +87,13 @@ PLAYBACK_TIMER_MS = 1000
 
 # Playback speeds offered, as multiples of normal.
 SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+
+# Sleep timer: what it offers, and how long the sound takes to go. A player
+# that stops dead is a jolt, and silence is where a sleep timer gets used.
+SLEEP_CHOICES = ((15, "15 minutes"), (30, "30 minutes"),
+                 (45, "45 minutes"), (60, "60 minutes"))
+SLEEP_FADE_MS = 100
+SLEEP_FADE_STEPS = 25
 
 # Where playback stopped is kept only for long media -- podcasts, mixes,
 # audiobooks -- and only once it is past the first and short of the last
@@ -204,6 +212,14 @@ class MediaPlayerPanel(wx.Panel):
         if button is not None:
             self._enable_controls(self._loaded)
 
+    def is_playing(self):
+        """True while this player is the one making sound."""
+        return self._loaded and self._is_playing()
+
+    def has_media(self):
+        """True once something has been loaded, playing or not."""
+        return self._loaded
+
     def __init__(self, parent, frame, video_height=180):
         super().__init__(parent)
         self.frame = frame
@@ -228,6 +244,13 @@ class MediaPlayerPanel(wx.Panel):
         # Increments on every load(); libVLC events carry the value they saw
         # so a stale event from a media just replaced is ignored.
         self._load_generation = 0
+        # When the sleep timer should pause playback, as a reading of the
+        # clock rather than a countdown left to run, so a paused player and
+        # a machine that slept both still fire it at the right moment.
+        # None is off.
+        self._sleep_deadline = None
+        self._sleep_fading = False
+        self._sleep_fade_levels = []
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.now_playing = wx.StaticText(self, label="Nothing playing.")
@@ -302,6 +325,11 @@ class MediaPlayerPanel(wx.Panel):
 
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_timer, self.timer)
+        # The fade before a sleep-timer pause has its own timer: it runs
+        # several times a second for a couple of seconds, where the one
+        # above ticks once a second for as long as anything plays.
+        self.sleep_fade_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_sleep_fade, self.sleep_fade_timer)
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self._enable_controls(False)
 
@@ -539,6 +567,12 @@ class MediaPlayerPanel(wx.Panel):
 
     def stop(self, silent=False):
         self.timer.Stop()
+        self._clear_sleep_fade()
+        if not silent:
+            # An explicit Stop is also the user saying they do not want to
+            # be paused later. A load() in between -- the next item of a
+            # list -- is not, so a sleep timer outlives a running playlist.
+            self._sleep_deadline = None
         length = self._length() if self._loaded else 0
         self._remember()
         if self._loaded:
@@ -550,6 +584,66 @@ class MediaPlayerPanel(wx.Panel):
             self.now_playing.SetLabel(f"Stopped: {self._title}")
         if not silent and self._title:
             self.frame.announce("Playback stopped.")
+
+    def set_sleep_timer(self, minutes):
+        """Pause playback after *minutes*, fading the sound out first.
+
+        Zero turns the timer off. The deadline is a reading of the clock
+        rather than a countdown, so pausing, seeking, or playing the next
+        item of a playlist neither spends it early nor loses it -- which is
+        the whole point of setting one before an audiobook chapter
+        you are not going to stay awake for.
+        """
+        minutes = int(minutes or 0)
+        self._clear_sleep_fade()
+        if minutes <= 0:
+            self._sleep_deadline = None
+            self.frame.announce("Sleep timer off.")
+            return
+        self._sleep_deadline = time.monotonic() + minutes * 60
+        self.frame.announce(f"Sleep timer: pausing in {minutes} minutes.")
+
+    def sleep_timer_active(self):
+        return self._sleep_deadline is not None
+
+    def _clear_sleep_fade(self):
+        self.sleep_fade_timer.Stop()
+        self._sleep_fading = False
+        self._sleep_fade_levels = []
+
+    def _start_sleep_fade(self):
+        """Take the volume down to nothing, then pause."""
+        if self._sleep_fading:
+            return
+        self._sleep_deadline = None
+        self._sleep_fading = True
+        # The fade starts from the slider's own value, so it lasts the same
+        # whatever the listening volume, and the control goes back to
+        # reading what the user set when the sound is restored.
+        volume = max(1, self.volume.GetValue())
+        self._sleep_fade_levels = [
+            round(volume * (SLEEP_FADE_STEPS - step) / SLEEP_FADE_STEPS)
+            for step in range(SLEEP_FADE_STEPS + 1)
+        ]
+        self.sleep_fade_timer.Start(SLEEP_FADE_MS)
+
+    def _on_sleep_fade(self, event):
+        if not self._sleep_fade_levels:
+            self._clear_sleep_fade()
+            return
+        self._set_volume(self._sleep_fade_levels.pop(0))
+        if self._sleep_fade_levels:
+            return
+        self._clear_sleep_fade()
+        self._set_volume(self.volume.GetValue())
+        if self._is_playing():
+            self._pause()
+        # Paused, so the position clock has nothing left to read: this is
+        # what on_play_pause does on the way down, and for the same reason.
+        self.timer.Stop()
+        self.play_btn.SetLabel("&Play")
+        self._report_status("Paused")
+        self.frame.announce("Sleep timer: playback paused.")
 
     def on_seek(self, event):
         if self._updating_position or not self._loaded:
@@ -632,6 +726,9 @@ class MediaPlayerPanel(wx.Panel):
     def _on_timer(self, event):
         if not self._loaded:
             return
+        if (self._sleep_deadline is not None
+                and time.monotonic() >= self._sleep_deadline):
+            self._start_sleep_fade()
         length = self._length()
         current = self._tell()
         self._set_time(current, length)
@@ -654,6 +751,7 @@ class MediaPlayerPanel(wx.Panel):
             return
         self._shutting_down = True
         self.timer.Stop()
+        self._clear_sleep_fade()
         self._report_status("")
         self._remember()
         if self._loaded:

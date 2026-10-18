@@ -30,6 +30,7 @@ from .chat_panel import ChatPanel
 from .downloads_panel import DownloadsPanel
 from .feeds_dialog import FeedsDialog
 from .library_panel import LibraryPanel
+from .media_player import SLEEP_CHOICES
 from .messages_panel import MessagesPanel
 from .podcast_archiver_dialog import PodcastArchiverDialog
 from .queue_panel import QueuePanel
@@ -275,6 +276,26 @@ class MainFrame(wx.Frame):
         tools_menu.Append(
             self.ID_PODCAST_ARCHIVER, "Podcast &archiver...\tCtrl+Shift+P")
 
+        # The player belongs to whichever tab is in front, and finding its
+        # buttons means leaving the list you are reading. These act on it
+        # from anywhere, which is what playing or pausing by keyboard is
+        # meant to mean.
+        playback_menu = wx.Menu()
+        self.ID_PLAY_PAUSE = wx.NewIdRef()
+        playback_menu.Append(self.ID_PLAY_PAUSE, "&Play or pause\tCtrl+P")
+        self.ID_STOP_PLAYBACK = wx.NewIdRef()
+        playback_menu.Append(self.ID_STOP_PLAYBACK, "&Stop")
+        playback_menu.AppendSeparator()
+        sleep_menu = wx.Menu()
+        self.ID_SLEEP_OFF = wx.NewIdRef()
+        sleep_menu.Append(self.ID_SLEEP_OFF, "&Off")
+        self._sleep_menu_items = []
+        for minutes, label in SLEEP_CHOICES:
+            item_id = wx.NewIdRef()
+            self._sleep_menu_items.append((minutes, item_id))
+            sleep_menu.Append(item_id, label)
+        playback_menu.AppendSubMenu(sleep_menu, "Sleep &timer")
+
         # Checking for updates is about blindDL itself rather than about the
         # media it fetches, which is what everything left in Tools is, so it
         # sits with About under Help where an application usually keeps it.
@@ -287,6 +308,7 @@ class MainFrame(wx.Frame):
         menubar = wx.MenuBar()
         menubar.Append(file_menu, "&File")
         menubar.Append(tools_menu, "&Tools")
+        menubar.Append(playback_menu, "&Playback")
         menubar.Append(help_menu, "&Help")
         self.SetMenuBar(menubar)
 
@@ -301,6 +323,17 @@ class MainFrame(wx.Frame):
         self.Bind(
             wx.EVT_MENU, self.on_podcast_archiver,
             id=self.ID_PODCAST_ARCHIVER)
+        self.Bind(wx.EVT_MENU, self.on_play_pause_menu, id=self.ID_PLAY_PAUSE)
+        self.Bind(wx.EVT_MENU, self.on_stop_playback, id=self.ID_STOP_PLAYBACK)
+        self.Bind(
+            wx.EVT_MENU, lambda event: self.on_sleep_timer(0),
+            id=self.ID_SLEEP_OFF)
+        for minutes, item_id in self._sleep_menu_items:
+            self.Bind(
+                wx.EVT_MENU,
+                lambda event, value=minutes: self.on_sleep_timer(value),
+                id=item_id,
+            )
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
 
     def _bind_shortcuts(self):
@@ -699,6 +732,49 @@ class MainFrame(wx.Frame):
         path = self.config["download_dir"]
         os.makedirs(path, exist_ok=True)
         open_folder(path)
+
+    # -- the Playback menu -----------------------------------------------------
+
+    def _playback_player(self):
+        """The player a Playback menu item should act on.
+
+        Sounding wins: only one player plays at a time, so that is always
+        the one being listened to. Then the tab in front, then any player
+        that still has something loaded in it -- which is what makes Stop
+        work on a track the user paused a moment ago.
+        """
+        players = self._players()
+        for player in players:
+            if player.is_playing():
+                return player
+        page_player = getattr(self.notebook.GetCurrentPage(), "player", None)
+        if page_player is not None and page_player.has_media():
+            return page_player
+        for player in players:
+            if player.has_media():
+                return player
+        return page_player
+
+    def on_play_pause_menu(self, event=None):
+        player = self._playback_player()
+        if player is None:
+            self.announce("There is nothing to play yet.")
+            return
+        player.on_play_pause(None)
+
+    def on_stop_playback(self, event=None):
+        player = self._playback_player()
+        if player is None or not player.has_media():
+            self.announce("Nothing is playing.")
+            return
+        player.stop()
+
+    def on_sleep_timer(self, minutes):
+        player = self._playback_player()
+        if player is None:
+            self.announce("There is nothing to play yet.")
+            return
+        player.set_sleep_timer(minutes)
 
     def on_settings(self, event):
         auto_update_was_enabled = bool(self.config["auto_update"])

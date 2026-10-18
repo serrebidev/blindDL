@@ -1123,6 +1123,7 @@ class DownloadQueue:
             sponsorblock=self.config.get("sponsorblock_remove") or (),
             embed_metadata=bool(self.config.get("embed_metadata")),
             max_height=int(self.config.get("max_video_height") or 0),
+            save_transcript=bool(self.config.get("save_transcript")),
         )
 
     def _run_musicdl(self, item):

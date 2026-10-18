@@ -48,6 +48,11 @@ DEFAULTS = {
     # Write title, uploader, chapters and cover art into files downloaded
     # through yt-dlp (YouTube and the other video sites).
     "embed_metadata": True,
+    # Save the captions a site provides beside the download as a plain text
+    # transcript: every line once, a paragraph at each pause, for reading,
+    # searching, or a Braille display. It costs one extra request per
+    # download, made after the media itself is safely on disk.
+    "save_transcript": False,
     # SponsorBlock categories cut out of YouTube downloads: sponsor,
     # selfpromo, interaction, intro, outro, preview, music_offtopic, filler.
     # Empty leaves every video whole.

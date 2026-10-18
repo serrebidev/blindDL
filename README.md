@@ -30,6 +30,8 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 - Writes the title, uploader, chapters and cover art into files from YouTube and the other video sites, and caps video resolution (Settings, Downloads, Maximum video resolution) so a download need not be a 4K file.
 - Signs in to YouTube the way SmartTube and other TV apps do: Settings, Accounts, Sign in to YouTube shows a code to enter at google.com/device, and BlindDL never sees your password. The sign-in renews itself until you sign out or remove it from your Google account. Signed in, your subscriptions feed, Watch later, liked videos and history open from the URL tab and can be followed on the Subscriptions tab (youtube.com/feed/subscriptions, youtube.com/playlist?list=WL, youtube.com/playlist?list=LL, youtube.com/feed/history), so new videos from the channels you follow download on their own. Age-restricted and members-only videos still need browser cookies (Settings, Accounts, Browser cookies), because Google accepts TV sign-ins only from TV apps.
 - Plays at the speed you choose, from half to three times normal, and remembers it. Podcasts, mixes and audiobooks over ten minutes long pick up where you stopped.
+- Stops itself when you tell it to. On the **Playback** menu, **Sleep timer** pauses playback after 15, 30, 45 or 60 minutes, fading the sound out over a couple of seconds first, so a podcast in bed ends in silence instead of running on into the next chapter. The timer counts real time, so pausing or playing the next item of an album does not move it, and Stop turns it off. The Playback menu works from any tab: Play or pause (Ctrl+P), Stop, and the sleep timer, without leaving the list you are reading.
+- Saves a readable text transcript beside a download when the site has English captions: every line once, with a new paragraph at each pause, for reading, searching or a Braille display. Tick **Save a text transcript of the captions** in Settings, Downloads; nothing is fetched when a site has no captions, and the words arrive after the media itself is safely saved.
 - Picks a dropped Deezer transfer up where it stopped instead of failing it, and never leaves you with nothing for a track Deezer will only serve at a lower bitrate than you asked for: when your Deezer account cannot serve the quality you chose, blindDL takes the best stream the account can get -- 320, then 256, then 128 kbps -- rather than sending the download to YouTube.
 - Includes a Library tab that finds and plays finished downloads, including media in subfolders.
 - Updates its downloader components — yt-dlp and friends — from inside the app.
@@ -252,6 +254,7 @@ python scripts/publish_release.py v0.24.25
 - Ctrl+8 / 9 — Soulseek Chat / Messages tabs when Soulseek is enabled
 - Ctrl+L — jump to the URL field
 - Ctrl+F — jump to search
+- Ctrl+P — play or pause the player, from any tab (Playback menu; Stop and the sleep timer are there too)
 - Ctrl+O — open the download folder
 - Ctrl+, — open Settings
 - Ctrl+U — check for updates (Help menu)

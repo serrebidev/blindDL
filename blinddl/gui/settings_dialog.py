@@ -303,6 +303,18 @@ class SettingsDialog(wx.Dialog):
             "file, and never changes a detail the file already has."
         )
 
+        self.transcript_check = wx.CheckBox(
+            page, label="Save a &text transcript of the captions"
+        )
+        self.transcript_check.SetValue(bool(config["save_transcript"]))
+        self.transcript_check.SetHelpText(
+            "Saves a site's English captions beside the download as a plain "
+            "text file: every line once, with a new paragraph at each pause, "
+            "so it can be read, searched or sent to a Braille display. It "
+            "adds one request per download, made after the file itself has "
+            "arrived, and does nothing when a site has no captions."
+        )
+
         sizer.Add(dir_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.dir_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.audio_only_check, 0, wx.ALL, 8)
@@ -311,6 +323,7 @@ class SettingsDialog(wx.Dialog):
         _row(sizer, height_label, self.height_choice)
         sizer.Add(self.metadata_check, 0, wx.ALL, 8)
         sizer.Add(self.embed_check, 0, wx.ALL, 8)
+        sizer.Add(self.transcript_check, 0, wx.ALL, 8)
         sizer.Add(sponsor_label, 0, wx.TOP | wx.LEFT, 8)
         sizer.Add(self.sponsor_list, 0, wx.EXPAND | wx.ALL, 8)
 
@@ -1565,6 +1578,7 @@ class SettingsDialog(wx.Dialog):
             self.height_choice.GetSelection()
         ][1]
         self.config["embed_metadata"] = self.embed_check.GetValue()
+        self.config["save_transcript"] = self.transcript_check.GetValue()
         self.config["sponsorblock_remove"] = [
             ytdlp_backend.SPONSORBLOCK_CATEGORIES[index][1]
             for index in self.sponsor_list.GetCheckedItems()

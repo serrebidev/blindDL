@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import yt_dlp
 from yt_dlp.cookies import CookieLoadError
 
-from . import search_order, youtube_account
+from . import search_order, transcript, youtube_account
 from .search_order import ORDER_POPULAR, ORDER_RECENT, ORDER_RELEVANCE
 
 # The audio_format / video_format value meaning "leave the file alone".
@@ -507,11 +507,57 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
     return str(stream_url)
 
 
+def _save_transcript(url, media_path, cookies_from_browser=None,
+                     cookies_file=None):
+    """Fetch a URL's captions and write them as text beside its download.
+
+    A separate, subtitles-only pass rather than an option on the download
+    itself: a captions request can be refused -- a burst of them earns
+    YouTube's "too many requests" -- and that must never cost a download
+    that has already finished. This runs once the media is safely on disk,
+    and anything that goes wrong here is its own. Returns the transcript's
+    path, or "" when the site had no English captions to read.
+    """
+    out_dir = os.path.dirname(os.path.abspath(media_path))
+    opts = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        # English, and named one by one rather than patterned: "en.*" also
+        # matches every auto-translated variant a site offers (en-de, en-fr
+        # and dozens more), which is enough requests to earn a refusal
+        # instead of a transcript.
+        "subtitleslangs": ["en", "en-US", "en-GB", "en-orig"],
+        # vtt and srt carry the words and when they were said; the other
+        # formats a site may offer belong to a player and are not read here.
+        "subtitlesformat": "vtt/srt/best",
+        # The same template the download uses, so the captions land beside
+        # the media under the same name and are found from it.
+        "outtmpl": os.path.join(out_dir, "%(title).150B [%(id)s].%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "windowsfilenames": True,
+    }
+
+    def run(opts_dict):
+        with yt_dlp.YoutubeDL(opts_dict) as ydl:
+            ydl.download([url])
+
+    _with_cookie_fallback(
+        cookies_from_browser, cookies_file,
+        make_opts=lambda cookie_opts: {**opts, **cookie_opts},
+        run=run,
+    )
+    return transcript.write_transcript(media_path)
+
+
 def download(url, out_dir, audio_only=True, audio_format="mp3",
              video_format="mp4", progress_cb=None, cancel_event=None,
              http_headers=None, cookies_from_browser=None,
              cookies_file=None, fix_stream=None, sponsorblock=(),
-             embed_metadata=False, max_height=0):
+             embed_metadata=False, max_height=0, save_transcript=False):
     """Download one URL. progress_cb receives yt-dlp progress dicts.
 
     audio_format and video_format both accept "original", which means the
@@ -521,6 +567,9 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     ``sponsorblock`` lists SponsorBlock categories to cut out, and
     ``embed_metadata`` writes title, chapters and cover art into the file.
     ``max_height`` caps video resolution; 0 takes the best there is.
+    ``save_transcript`` saves the site's English captions beside the
+    finished file as a readable text transcript -- a second pass, made
+    only once the media itself is safely on disk.
     """
     os.makedirs(out_dir, exist_ok=True)
     completed_paths = []
@@ -635,7 +684,17 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         if cancel_event is not None and cancel_event.is_set():
             raise DownloadCancelled()
         raise
-    return next(
+    final_path = next(
         (path for path in reversed(completed_paths) if os.path.isfile(path)),
         "",
     )
+    if save_transcript and final_path:
+        try:
+            _save_transcript(
+                url, final_path,
+                cookies_from_browser=cookies_from_browser,
+                cookies_file=cookies_file,
+            )
+        except Exception:  # noqa: BLE001 - a transcript never fails a download
+            pass
+    return final_path

@@ -1523,7 +1523,7 @@ class GuiInteractionTests(unittest.TestCase):
         menubar = holder.SetMenuBar.call_args[0][0]
         labels = [menubar.GetMenuLabelText(index)
                   for index in range(menubar.GetMenuCount())]
-        self.assertEqual(labels, ["File", "Tools", "Help"])
+        self.assertEqual(labels, ["File", "Tools", "Playback", "Help"])
         help_menu = menubar.GetMenu(labels.index("Help"))
         help_labels = [item.GetItemLabelText() for item in help_menu.GetMenuItems()
                        if not item.IsSeparator()]
@@ -1539,6 +1539,35 @@ class GuiInteractionTests(unittest.TestCase):
         # The shortcut moved with it rather than being left behind.
         item = help_menu.FindItemById(holder.ID_UPDATE)
         self.assertIn("CTRL+U", item.GetItemLabel().upper())
+
+    def test_the_playback_menu_works_the_player_from_any_tab(self):
+        # The player's buttons live on one tab, so playing, stopping and
+        # the sleep timer are on the menu bar where every tab can reach
+        # them, with Ctrl+P for the one worth a keystroke.
+        holder = mock.MagicMock()
+
+        MainFrame._build_menus(holder)
+
+        menubar = holder.SetMenuBar.call_args[0][0]
+        labels = [menubar.GetMenuLabelText(index)
+                  for index in range(menubar.GetMenuCount())]
+        playback_menu = menubar.GetMenu(labels.index("Playback"))
+        playback_labels = [item.GetItemLabelText()
+                           for item in playback_menu.GetMenuItems()
+                           if not item.IsSeparator()]
+        self.assertEqual(playback_labels,
+                         ["Play or pause", "Stop", "Sleep timer"])
+        item = playback_menu.FindItemById(holder.ID_PLAY_PAUSE)
+        self.assertIn("CTRL+P", item.GetItemLabel().upper())
+        sleep_item = next(
+            item for item in playback_menu.GetMenuItems()
+            if item.GetItemLabelText() == "Sleep timer")
+        sleep_labels = [item.GetItemLabelText()
+                        for item in sleep_item.GetSubMenu().GetMenuItems()
+                        if not item.IsSeparator()]
+        self.assertEqual(
+            sleep_labels,
+            ["Off", "15 minutes", "30 minutes", "45 minutes", "60 minutes"])
 
     def test_exit_menu_leaves_alt_f4_to_the_window_close_path(self):
         # A menu accelerator is matched before Windows' own close handling, so
@@ -2306,6 +2335,7 @@ class GuiInteractionTests(unittest.TestCase):
     def test_media_timer_skips_unchanged_accessible_values(self):
         panel = SimpleNamespace(
             _loaded=True,
+            _sleep_deadline=None,
             _length=lambda: 10_000,
             _tell=lambda: 1_000,
             _is_playing=lambda: True,
@@ -2329,6 +2359,7 @@ class GuiInteractionTests(unittest.TestCase):
     def test_media_timer_does_not_move_a_focused_seek_slider(self):
         panel = SimpleNamespace(
             _loaded=True,
+            _sleep_deadline=None,
             _length=lambda: 10_000,
             _tell=lambda: 5_000,
             _is_playing=lambda: True,
@@ -2365,6 +2396,7 @@ class GuiInteractionTests(unittest.TestCase):
         frame = SimpleNamespace(set_playback_status=mock.Mock())
         panel = SimpleNamespace(
             _loaded=True,
+            _sleep_deadline=None,
             _length=lambda: 320_000,
             _tell=lambda: 83_000,
             _is_playing=lambda: True,
