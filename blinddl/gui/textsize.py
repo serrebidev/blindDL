@@ -110,14 +110,26 @@ def _config_of(window):
 def apply(window, scale):
     """Give *window* and everything inside it the scaled text size."""
     scale = nearest_step(scale)
-    for control in _controls(window):
+    controls = _controls(window)
+    # Every control's own size is read before anything is resized. On GTK a
+    # child with no font of its own reports its parent's, so resizing as we
+    # walk would have the next control down take the size just given to the
+    # one above it as its starting point -- and a window would grow by a
+    # factor of itself once for every level of nesting.
+    for control in controls:
+        if getattr(control, _BASE_ATTRIBUTE, None) is not None:
+            continue
         font = control.GetFont()
         if font is None or not font.IsOk():
             continue
+        setattr(control, _BASE_ATTRIBUTE, font.GetPointSize())
+    for control in controls:
         base = getattr(control, _BASE_ATTRIBUTE, None)
         if base is None:
-            base = font.GetPointSize()
-            setattr(control, _BASE_ATTRIBUTE, base)
+            continue
+        font = control.GetFont()
+        if font is None or not font.IsOk():
+            continue
         # A platform font carries more than its size -- the face, the
         # weight, whether it is italic -- so the size is changed on a copy
         # of it rather than a new font being made.

@@ -26,14 +26,24 @@ class AwakeTests(unittest.TestCase):
         awake.release()
 
     def test_the_hold_is_taken_once_however_often_it_is_asked_for(self):
-        with mock.patch.object(awake, "_windows_keeper") as keeper, \
-                mock.patch.object(awake.threading, "Thread") as thread:
+        started = []
+
+        def start_child():
+            started.append("child")
+            return mock.Mock()
+
+        with mock.patch.object(awake, "_windows_keeper"), \
+                mock.patch.object(awake.threading, "Thread") as thread, \
+                mock.patch.object(awake, "_start_child", start_child), \
+                mock.patch.object(awake.shutil, "which", return_value="/bin/x"):
             self.assertTrue(awake.hold())
             self.assertTrue(awake.hold())
 
         self.assertTrue(awake.held())
-        thread.assert_called_once()
-        keeper.assert_not_called()
+        # One hold, whichever way this system takes it: a thread that keeps
+        # renewing it on Windows, a child process that watches blindDL
+        # everywhere else. Never two.
+        self.assertEqual(thread.call_count + len(started), 1)
 
     def test_releasing_twice_is_harmless(self):
         with mock.patch.object(awake, "_windows_keeper"), \
