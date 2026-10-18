@@ -602,6 +602,83 @@ class SoulseekLeecherGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(refusal.allowed)
         self.assertEqual(refusal.reason, FailReason.FILE_NOT_SHARED)
 
+    async def test_a_zero_count_is_rechecked_sooner_than_a_real_one(self):
+        self.guard()
+        service = SimpleNamespace(
+            _client=mock.AsyncMock(return_value=SimpleNamespace(shared_file_count=7))
+        )
+        aged = soulseek_backend.time.monotonic() - (
+            soulseek_backend._LEECHER_ZERO_CACHE_SECONDS + 1
+        )
+        soulseek_backend._leecher_counts["newpeer"] = (aged, 0)
+        soulseek_backend._leecher_counts["sharer"] = (aged, 5)
+
+        with mock.patch.object(soulseek_backend, "_SERVICE", service):
+            # The stale zero is looked up again -- the peer was only still
+            # scanning, and turns out to share after all. A positive count
+            # of the same age is still trusted.
+            self.assertEqual(await soulseek_backend._shared_file_count("NewPeer"), 7)
+            self.assertEqual(await soulseek_backend._shared_file_count("Sharer"), 5)
+
+        service._client.assert_awaited_once()
+
+
+class SoulseekShareScanTests(unittest.IsolatedAsyncioTestCase):
+    def test_scan_replacement_is_installed(self):
+        self.assertTrue(getattr(SharesManager.scan, "_blinddl_early_report", False))
+
+    async def test_scan_reports_the_file_listing_before_attributes_finish(self):
+        with tempfile.TemporaryDirectory() as folder:
+            album = Path(folder, "Album")
+            album.mkdir()
+            Path(album, "one.mp3").write_bytes(b"x" * 64)
+            Path(album, "two.flac").write_bytes(b"y" * 64)
+            settings = soulseek_backend.Settings(
+                credentials=soulseek_backend.CredentialsSettings(
+                    username="listener", password="secret"
+                )
+            )
+            settings.shares.directories = [
+                soulseek_backend.SharedDirectorySettingEntry(path=folder)
+            ]
+            bus = mock.Mock()
+            bus.emit = mock.AsyncMock()
+            manager = SharesManager(settings, bus, mock.Mock())
+            manager.load_from_settings()
+
+            reports = []
+
+            async def record_report():
+                reports.append(manager.get_stats())
+
+            manager.report_shares = record_report
+
+            gate = asyncio.Event()
+            original_attributes = manager.scan_directory_file_attributes
+
+            async def stalled_attributes(directory):
+                await gate.wait()
+                return await original_attributes(directory)
+
+            manager.scan_directory_file_attributes = stalled_attributes
+
+            scan = asyncio.create_task(manager.scan())
+            for _ in range(200):
+                if reports:
+                    break
+                await asyncio.sleep(0.01)
+
+            # The metadata pass is still stalled, but the server has already
+            # been told what this client shares.
+            self.assertEqual(reports, [(1, 2)])
+            gate.set()
+            await scan
+
+            self.assertEqual(reports, [(1, 2), (1, 2)])
+            bus.emit.assert_awaited_once()
+            event = bus.emit.await_args.args[0]
+            self.assertIsInstance(event, soulseek_backend.ScanCompleteEvent)
+
 
 class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_startup_can_retry_with_unchanged_settings(self):

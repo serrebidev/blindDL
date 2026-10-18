@@ -54,6 +54,7 @@ try:
         RoomLeftEvent,
         RoomListEvent,
         RoomMessageEvent,
+        ScanCompleteEvent,
         TransferAddedEvent,
         TransferProgressEvent,
         TransferRemovedEvent,
@@ -280,12 +281,70 @@ def _install_aioslsk_query_fix() -> None:
     SharesManager.query = _optimized_share_query
 
 
+async def _early_reporting_share_scan(self):
+    """aioslsk's share scan, announcing the files before their metadata.
+
+    Upstream reports the shares to the server only twice in a client's life:
+    at sign-in, with whatever the index holds at that moment, and at the end
+    of a scan. On a cold share cache the index is empty at sign-in, and the
+    scan's metadata pass -- a mutagen parse of every file in the library --
+    can run for minutes on a large one. The whole time, the server tells
+    anyone who asks that this user shares zero files, while their downloads
+    already work; that is exactly what other clients' leecher protection
+    bans for. Reporting as soon as the file listing is known closes the
+    window: the counts are right after the walk, and attributes catch up
+    behind them. The end-of-scan report and completion event are unchanged.
+    """
+    start_time = time.perf_counter()
+
+    files_tasks = [
+        self.scan_directory_files(shared_directory)
+        for shared_directory in self._shared_directories
+    ]
+    await asyncio.gather(*files_tasks, return_exceptions=True)
+
+    # The index now knows every shared file. Announce it before the slow
+    # part; a failed announcement must not stop the scan itself.
+    try:
+        await self.report_shares()
+    except Exception:
+        logger.debug("could not report shares mid-scan", exc_info=True)
+
+    attribute_futures = [
+        self.scan_directory_file_attributes(shared_directory)
+        for shared_directory in self._shared_directories
+    ]
+    await asyncio.gather(*attribute_futures)
+
+    logger.info("completed scan in %f seconds", time.perf_counter() - start_time)
+    folder_count, file_count = self.get_stats()
+    await self._event_bus.emit(
+        ScanCompleteEvent(folder_count, file_count)
+    )
+
+    await self.report_shares()
+
+
+def _install_aioslsk_early_share_report_fix() -> None:
+    """Report shares mid-scan, as soon as the file listing is known."""
+    if not available() or getattr(SharesManager.scan, "_blinddl_early_report", False):
+        return
+    _early_reporting_share_scan._blinddl_early_report = True
+    SharesManager.scan = _early_reporting_share_scan
+
+
 # -- refusing uploads to users who share nothing ------------------------------
 
 # How long a peer's shared-file count is trusted before it is looked up again.
 # Long enough that a peer requesting a whole folder is only checked once, short
 # enough that somebody who starts sharing is let in during the same session.
 _LEECHER_CACHE_SECONDS = 600.0
+
+# A count of zero is trusted for much less time: it usually means the peer is
+# still in their own startup scan, and refusing them for the full ten minutes
+# after they finish scanning reads, from their side, as this client sharing
+# nothing back.
+_LEECHER_ZERO_CACHE_SECONDS = 60.0
 
 # Set from the current settings every time the client is configured.
 _leecher_guard: dict[str, Any] = {"enabled": True, "allowed": frozenset()}
@@ -307,8 +366,12 @@ async def _shared_file_count(username: str) -> int | None:
     key = username.casefold()
     cached = _leecher_counts.get(key)
     now = time.monotonic()
-    if cached is not None and now - cached[0] < _LEECHER_CACHE_SECONDS:
-        return cached[1]
+    if cached is not None:
+        trust = (
+            _LEECHER_CACHE_SECONDS if cached[1] > 0 else _LEECHER_ZERO_CACHE_SECONDS
+        )
+        if now - cached[0] < trust:
+            return cached[1]
     client = _SERVICE._client
     if client is None:
         return None
@@ -520,6 +583,7 @@ def available() -> bool:
 
 _install_aioslsk_cross_drive_fix()
 _install_aioslsk_query_fix()
+_install_aioslsk_early_share_report_fix()
 _install_leecher_guard()
 
 
