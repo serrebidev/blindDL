@@ -13,10 +13,11 @@ the second until they are wanted.
 """
 
 import os
+import threading
 
 import wx
 
-from .. import torrent_engine
+from .. import describe, torrent_engine
 from ..downloader import (
     ACTIVE_STATUSES,
     FINISHED_STATUSES,
@@ -26,6 +27,12 @@ from ..downloader import (
     STATUS_QUEUED,
 )
 from ..runtime import open_file, open_folder
+from .description_dialog import (
+    ACTION_DOWNLOAD,
+    ACTION_MAKE,
+    ACTION_PLAY,
+    DescriptionDialog,
+)
 
 COLUMNS = ("Title", "Status", "Progress", "Speed", "ETA", "Error")
 
@@ -173,6 +180,7 @@ class DownloadsPanel(wx.Panel):
         menu.AppendSeparator()
         open_result = menu.Append(wx.ID_ANY, "&Open downloaded item")
         show_result = menu.Append(wx.ID_ANY, "Show in &folder")
+        described = menu.Append(wx.ID_ANY, "Find &audio description...")
         menu.AppendSeparator()
         remove = menu.Append(wx.ID_ANY, "&Remove from list")
         delete_data = menu.Append(wx.ID_ANY, "&Delete with data...")
@@ -197,6 +205,8 @@ class DownloadsPanel(wx.Panel):
                            if selected else False)
         show_result.Enable(len(selected) == 1 and bool(paths[0])
                            if selected else False)
+        described.Enable(len(selected) == 1
+                         and self._can_describe(selected[0]))
         removable = [item for item in selected
                      if item.status != STATUS_DOWNLOADING and not item.seeding]
         remove.Enable(bool(removable))
@@ -218,6 +228,8 @@ class DownloadsPanel(wx.Panel):
         menu.Bind(wx.EVT_MENU, lambda e: self.on_open(e, control), open_result)
         menu.Bind(wx.EVT_MENU, lambda e: self.on_show_folder(e, control),
                   show_result)
+        menu.Bind(wx.EVT_MENU, lambda e: self.on_audio_description(e, control),
+                  described)
         menu.Bind(wx.EVT_MENU, lambda e: self.on_remove(e, control), remove)
         menu.Bind(wx.EVT_MENU, lambda e: self.on_delete_data(e, control),
                   delete_data)
@@ -233,6 +245,120 @@ class DownloadsPanel(wx.Panel):
     def _result_path(item):
         path = str(getattr(item, "result_path", "") or "")
         return path if path and os.path.exists(path) else ""
+
+    # -- audio description -----------------------------------------------------
+
+    @staticmethod
+    def _can_describe(item):
+        """Whether this row is one audio description can be found for."""
+        return (getattr(item, "kind", "") == "ytdlp"
+                and isinstance(getattr(item, "payload", None), str)
+                and item.payload.startswith("http"))
+
+    def on_audio_description(self, event=None, control=None):
+        """Look for the description of one download, and offer what is there.
+
+        Three things can describe a video and they are tried in order of
+        how much they can be trusted: the track the video carries, a
+        described version somebody published, and -- only when neither
+        exists -- one made here from the picture.
+        """
+        control = control if control is not None else self.list
+        selected = self._selected_items(control)
+        if len(selected) != 1 or not self._can_describe(selected[0]):
+            self.frame.announce(
+                "Choose one download from a video site to look for its "
+                "audio description.")
+            return
+        item = selected[0]
+        self.frame.announce(f"Looking for audio description for {item.title}...")
+        threading.Thread(
+            target=self._find_description, args=(item,), daemon=True,
+            name="blinddl-description-search",
+        ).start()
+
+    def _find_description(self, item):
+        config = self.frame.config
+        try:
+            track = describe.described_track(item.payload, config)
+        except Exception:  # noqa: BLE001 - the search below may still answer
+            track = None
+        if track is not None:
+            # A description written by the publisher beats anything found or
+            # made afterwards, so it is worth saying even though there is
+            # nothing to choose.
+            note = str(track.get("format_note") or track.get("format") or "")
+            wx.CallAfter(
+                self.frame.announce,
+                f"This video carries its own audio description"
+                + (f" ({note})" if note else "")
+                + ". Playing it described means choosing that track when "
+                "downloading, with Choose an exact stream on the URL tab.",
+            )
+        try:
+            candidates = describe.described_versions(item.title)
+        except Exception as exc:  # noqa: BLE001 - said, not raised
+            wx.CallAfter(
+                self.frame.announce,
+                f"Could not search for a described version: {exc}")
+            return
+        wx.CallAfter(self._offer_description, item, candidates)
+
+    def _offer_description(self, item, candidates):
+        dialog = DescriptionDialog(
+            self, item.title, candidates,
+            can_make=bool(self._result_path(item)))
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            action, candidate = dialog.action, dialog.selected()
+        finally:
+            dialog.Destroy()
+        if action == ACTION_DOWNLOAD and candidate:
+            added = self.frame.queue.add_ytdlp(
+                candidate["url"], f"{candidate['title']} (audio described)")
+            self.frame.announce(f"Queued the described version: {added.title}")
+            self.frame.show_downloads_tab()
+        elif action == ACTION_PLAY and candidate:
+            # Played through the URL tab rather than here: that tab is the
+            # one with a player in it, and this is the same thing as pasting
+            # the link there and pressing Play.
+            self.frame.url_panel.url_text.SetValue(candidate["url"])
+            self.frame.show_tab(0)
+            self.frame.url_panel.on_play_url(None)
+        elif action == ACTION_MAKE:
+            self._make_description(item)
+
+    def _make_description(self, item):
+        path = self._result_path(item)
+        if not path:
+            self.frame.announce(
+                "Download it first: a description is made from the video "
+                "itself.")
+            return
+        self.frame.announce(
+            "Making an audio description. This takes a few minutes.")
+        threading.Thread(
+            target=self._make_description_worker, args=(item, path),
+            daemon=True, name="blinddl-description-make",
+        ).start()
+
+    def _make_description_worker(self, item, path):
+        def say(line):
+            wx.CallAfter(self.frame.announce, line)
+
+        try:
+            written = describe.make_description(path, log=say)
+        except Exception as exc:  # noqa: BLE001 - said, not raised
+            wx.CallAfter(
+                self.frame.announce,
+                f"Could not make an audio description: {exc}")
+            return
+        wx.CallAfter(
+            self.frame.announce,
+            f"Audio description saved beside the download as "
+            f"{os.path.basename(written)}. Play the file and it is read out "
+            "as the video reaches each moment.")
 
     def on_resume(self, event, control=None):
         control = control if control is not None else self.list

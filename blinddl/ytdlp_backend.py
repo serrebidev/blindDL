@@ -507,6 +507,154 @@ def resolve_stream(url, audio_only=False, cookies_from_browser=None,
     return str(stream_url)
 
 
+# Codec families as a sentence would name them, for the stream chooser.
+# The first match wins, and a family that is not listed keeps its own name.
+_CODEC_NAMES = (
+    ("avc1", "H.264"), ("avc3", "H.264"), ("h264", "H.264"),
+    ("hev1", "HEVC"), ("hvc1", "HEVC"), ("hevc", "HEVC"),
+    ("vp09", "VP9"), ("vp9", "VP9"), ("vp8", "VP8"), ("av01", "AV1"),
+    ("mp4a", "AAC"), ("opus", "Opus"), ("vorbis", "Vorbis"),
+    ("mp3", "MP3"), ("flac", "FLAC"), ("alac", "ALAC"),
+    ("ec-3", "Dolby Digital Plus"), ("ac-3", "Dolby Digital"),
+    ("pcm", "PCM"),
+)
+
+
+def _codec_name(codec):
+    """The codec as a sentence would name it, or "" when there is none."""
+    codec = str(codec or "")
+    if codec in ("", "none"):
+        return ""
+    for prefix, name in _CODEC_NAMES:
+        if codec.startswith(prefix):
+            return name
+    # An unlisted codec still says something: its family name, which is the
+    # part before the version dots (avc1.640028 would be AVC1).
+    return codec.split(".")[0].upper()
+
+
+def format_size(size, approximate=False):
+    """A file size as it would be read out: "3 MB", "about 45 MB"."""
+    if not size or float(size) <= 0:
+        return ""
+    value = float(size)
+    if value >= 1024 ** 3:
+        amount, unit = value / 1024 ** 3, "GB"
+    elif value >= 1024 ** 2:
+        amount, unit = value / 1024 ** 2, "MB"
+    else:
+        amount, unit = value / 1024, "KB"
+    text = (f"{amount:.1f}".rstrip("0").rstrip(".") if amount < 100
+            else f"{amount:.0f}")
+    return f"{'about ' if approximate else ''}{text} {unit}"
+
+
+def format_choice(fmt):
+    """Describe one of a site's streams as a sentence.
+
+    A stream list is a table nobody listening can see, so each stream is
+    named by what it holds, in the words the thing itself would use:
+    "720p MP4, H.264 with AAC, 1.2 Mbps, 45 MB". The short form goes on the
+    download's own row, where it is one of many.
+    """
+    video = _codec_name(fmt.get("vcodec"))
+    audio = _codec_name(fmt.get("acodec"))
+    container = str(fmt.get("ext") or "").upper()
+    height = fmt.get("height")
+    if video and height:
+        head = f"{int(height)}p {container}".strip()
+    elif video:
+        head = f"Video {container}".strip()
+    elif audio:
+        head = f"Audio only {container}".strip()
+    else:
+        head = f"Stream {container}".strip()
+    detail = []
+    if video and audio:
+        detail.append(f"{video} with {audio}")
+    elif video:
+        detail.append(f"{video}, no sound")
+    elif audio:
+        detail.append(audio)
+    if video:
+        rate = fmt.get("tbr")
+        if rate:
+            detail.append(f"{float(rate) / 1000:.1f} Mbps")
+    else:
+        rate = fmt.get("abr") or fmt.get("tbr")
+        if rate:
+            detail.append(f"{int(round(float(rate)))} kbps")
+    size = (format_size(fmt.get("filesize"))
+            or format_size(fmt.get("filesize_approx"), approximate=True))
+    if size:
+        detail.append(size)
+    return {
+        "format_id": str(fmt.get("format_id")),
+        "short": head,
+        "label": ", ".join([head, *detail]),
+        "height": int(height) if height else 0,
+        "has_video": bool(video),
+        "has_audio": bool(audio),
+    }
+
+
+def inspect_media(url, cookies_from_browser=None, cookies_file=None):
+    """The site's own metadata for one URL, downloading nothing.
+
+    The stream chooser lists what this returns, and the audio description
+    search reads the track labels off it; both want the same call, so it
+    is made once and here rather than twice.
+    """
+    opts = {
+        "quiet": True,
+        "noprogress": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+    }
+
+    def run(opts_dict):
+        with yt_dlp.YoutubeDL(opts_dict) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    info = _with_cookie_fallback(
+        cookies_from_browser, cookies_file,
+        make_opts=lambda cookie_opts: {**opts, **cookie_opts},
+        run=run,
+    )
+    if not info:
+        raise RuntimeError(f"Could not read any details from: {url}")
+    entries = info.get("entries")
+    if entries is not None:
+        info = next((entry for entry in entries if entry), None)
+    if not info:
+        raise RuntimeError("That link held nothing to download.")
+    return info
+
+
+def list_formats(url, cookies_from_browser=None, cookies_file=None):
+    """Every stream *url* offers, best first, downloading nothing.
+
+    yt-dlp's own order runs worst to best, which is the wrong way round for
+    a list someone reads down and stops at: the best stream is the one
+    wanted most often, so that is the one offered first.
+    """
+    info = inspect_media(url, cookies_from_browser, cookies_file)
+    seen = set()
+    choices = []
+    for fmt in reversed(info.get("formats") or []):
+        format_id = str(fmt.get("format_id") or "")
+        # A storyboard ("mhtml") is a contact sheet rather than something to
+        # watch, and a site often lists the same stream more than once.
+        if not format_id or format_id in seen or fmt.get("ext") == "mhtml":
+            continue
+        seen.add(format_id)
+        choices.append(format_choice(fmt))
+    if not choices:
+        raise RuntimeError("That site did not list any streams to choose from.")
+    return str(info.get("title") or url), choices
+
+
 def _save_transcript(url, media_path, cookies_from_browser=None,
                      cookies_file=None):
     """Fetch a URL's captions and write them as text beside its download.
@@ -557,7 +705,8 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
              video_format="mp4", progress_cb=None, cancel_event=None,
              http_headers=None, cookies_from_browser=None,
              cookies_file=None, fix_stream=None, sponsorblock=(),
-             embed_metadata=False, max_height=0, save_transcript=False):
+             embed_metadata=False, max_height=0, save_transcript=False,
+             format_id=""):
     """Download one URL. progress_cb receives yt-dlp progress dicts.
 
     audio_format and video_format both accept "original", which means the
@@ -569,7 +718,9 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     ``max_height`` caps video resolution; 0 takes the best there is.
     ``save_transcript`` saves the site's English captions beside the
     finished file as a readable text transcript -- a second pass, made
-    only once the media itself is safely on disk.
+    only once the media itself is safely on disk. ``format_id`` downloads
+    one stream exactly as the site serves it, whatever the format settings
+    say; see list_formats for what can be chosen.
     """
     os.makedirs(out_dir, exist_ok=True)
     completed_paths = []
@@ -604,7 +755,13 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
     if http_headers:
         opts["http_headers"] = dict(http_headers)
     final_ext = None
-    if audio_only:
+    if format_id:
+        # An exact stream is taken exactly as it comes: no container is
+        # imposed and nothing is re-encoded, because a stream someone chose
+        # out of a list by hand is the one they want, not the one a preset
+        # would have picked for them instead.
+        opts["format"] = str(format_id)
+    elif audio_only:
         opts["format"] = "bestaudio/best"
         if audio_format and audio_format != ORIGINAL_FORMAT:
             final_ext = audio_format

@@ -58,6 +58,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         library_roots,
     )
     from blinddl.gui import mainframe as mainframe_module
+    from blinddl.gui import search_panel as search_panel_module
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
     from blinddl.gui.messages_panel import MessagesPanel
     from blinddl.gui.podcast_archiver_dialog import PodcastArchiverDialog
@@ -104,6 +105,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
         SOULSEEK_SORT_LABELS,
         SearchPanel,
         artist_page_url,
+        can_go_deeper,
         _kind_capable_sources,
         _kind_phrase,
         _order_capable_sources,
@@ -1523,7 +1525,7 @@ class GuiInteractionTests(unittest.TestCase):
         menubar = holder.SetMenuBar.call_args[0][0]
         labels = [menubar.GetMenuLabelText(index)
                   for index in range(menubar.GetMenuCount())]
-        self.assertEqual(labels, ["File", "Tools", "Playback", "Help"])
+        self.assertEqual(labels, ["File", "Tools", "View", "Playback", "Help"])
         help_menu = menubar.GetMenu(labels.index("Help"))
         help_labels = [item.GetItemLabelText() for item in help_menu.GetMenuItems()
                        if not item.IsSeparator()]
@@ -1568,6 +1570,48 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(
             sleep_labels,
             ["Off", "15 minutes", "30 minutes", "45 minutes", "60 minutes"])
+
+    def test_the_view_menu_carries_the_text_size(self):
+        # A list read at twelve points is a list read through a magnifier,
+        # so the three sizes sit on the menu bar with their shortcuts.
+        holder = mock.MagicMock()
+
+        MainFrame._build_menus(holder)
+
+        menubar = holder.SetMenuBar.call_args[0][0]
+        labels = [menubar.GetMenuLabelText(index)
+                  for index in range(menubar.GetMenuCount())]
+        view_menu = menubar.GetMenu(labels.index("View"))
+        view_labels = [item.GetItemLabelText()
+                       for item in view_menu.GetMenuItems()
+                       if not item.IsSeparator()]
+        self.assertEqual(view_labels,
+                         ["Bigger text", "Smaller text", "Normal text"])
+        for item_id in (holder.ID_TEXT_BIGGER, holder.ID_TEXT_SMALLER,
+                        holder.ID_TEXT_NORMAL):
+            self.assertIsNotNone(view_menu.FindItemById(item_id))
+
+    def test_the_text_keys_step_and_return_to_normal(self):
+        holder = SimpleNamespace(
+            _text_scale=1.0, config=_SavingConfig({"text_scale": 1.0}),
+            announce=mock.Mock(),
+        )
+        for name in ("_set_text_scale", "on_text_bigger", "on_text_normal"):
+            setattr(holder, name, getattr(MainFrame, name).__get__(holder))
+
+        with mock.patch.object(mainframe_module.textsize,
+                               "apply_everywhere") as resize:
+            holder.on_text_bigger()
+            self.assertEqual(holder._text_scale, 1.15)
+
+            holder.on_text_normal()
+            self.assertEqual(holder._text_scale, 1.0)
+
+        self.assertEqual(holder.config["text_scale"], 1.0)
+        self.assertEqual(resize.call_count, 2)
+        # Both ends of the shortcut say what happened, because the size is
+        # the one change nobody can see the result of until they read on.
+        self.assertIn("100 percent", holder.announce.call_args.args[0])
 
     def test_exit_menu_leaves_alt_f4_to_the_window_close_path(self):
         # A menu accelerator is matched before Windows' own close handling, so
@@ -1908,6 +1952,97 @@ class GuiInteractionTests(unittest.TestCase):
         media_player.MediaPlayerPanel._playback_finished(panel)
 
         panel.finished_request.assert_not_called()
+
+    def test_more_results_only_promises_what_a_source_can_give(self):
+        # A book library, an archive collection or an indexer answers one
+        # page per query, so asking it again returns the same rows.
+        self.assertTrue(can_go_deeper(ENGINE_YOUTUBE))
+        self.assertTrue(can_go_deeper(ENGINE_SOUNDCLOUD))
+        self.assertTrue(can_go_deeper(ENGINE_MUSIC))
+        self.assertFalse(can_go_deeper(ENGINE_TORRENTS))
+        self.assertFalse(can_go_deeper(ENGINE_BOOKS))
+        self.assertFalse(can_go_deeper(ENGINE_PODCASTS))
+
+    def test_more_results_says_so_when_there_is_nothing_to_ask(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_BOOKS
+        panel._search_args = {
+            "query": "x", "sources": [], "order": None,
+            "kind": search_kind.KIND_BEST,
+            "artist_scope": search_kind.ARTIST_SCOPE_ALL,
+        }
+        panel.done = True
+
+        panel.on_more_results()
+
+        self.assertEqual(panel.depth, 1)
+        self.assertIn("no further pages", self.frame.messages[-1])
+        self.assertTrue(panel.more_btn.IsEnabled())
+
+    def test_more_results_waits_for_the_search_that_is_running(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_YOUTUBE
+        panel._search_args = {
+            "query": "x", "sources": [], "order": None,
+            "kind": search_kind.KIND_BEST,
+            "artist_scope": search_kind.ARTIST_SCOPE_ALL,
+        }
+        panel.done = False
+
+        panel.on_more_results()
+
+        self.assertEqual(panel.depth, 1)
+        self.assertIn("Wait for this search", self.frame.messages[-1])
+
+    def test_more_results_asks_one_page_deeper(self):
+        # The deeper run keeps the same token, so its rows are added to the
+        # list on screen rather than replacing it.
+        panel = SearchPanel(self.host, self.frame)
+        panel.result_engine = ENGINE_YOUTUBE
+        panel._search_args = {
+            "query": "drone", "sources": [],
+            "order": search_order.ORDER_RELEVANCE,
+            "kind": search_kind.KIND_BEST,
+            "artist_scope": search_kind.ARTIST_SCOPE_ALL,
+        }
+        panel.done = True
+
+        with mock.patch.object(search_panel_module.threading, "Thread") as thread:
+            panel.on_more_results()
+
+        self.assertEqual(panel.depth, 2)
+        self.assertFalse(panel.more_btn.IsEnabled())
+        # One job: the engine's own search, on the same token, so its rows
+        # join the list rather than replacing it.
+        (call,) = thread.call_args_list
+        job_args = call.kwargs["args"]
+        self.assertIs(job_args[0], panel.token)
+        self.assertEqual(job_args[1], ENGINE_YOUTUBE)
+        self.assertEqual(job_args[3]["query"], "drone")
+        thread.return_value.start.assert_called_once_with()
+
+    def test_a_deeper_run_leaves_the_reader_where_they_were(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel._deeper_from = 5
+
+        with mock.patch.object(panel, "_add_site"), \
+                mock.patch.object(panel, "_flush_results"), \
+                mock.patch.object(panel, "_result_count", return_value=7):
+            panel._deeper_done(panel.token, [], ENGINE_YOUTUBE)
+
+        self.assertIn("2 more. 7 in the list.", self.frame.messages[-1])
+        self.assertTrue(panel.more_btn.IsEnabled())
+
+    def test_a_deeper_run_with_nothing_new_says_so(self):
+        panel = SearchPanel(self.host, self.frame)
+        panel._deeper_from = 5
+
+        with mock.patch.object(panel, "_add_site"), \
+                mock.patch.object(panel, "_flush_results"), \
+                mock.patch.object(panel, "_result_count", return_value=5):
+            panel._deeper_done(panel.token, [], ENGINE_YOUTUBE)
+
+        self.assertIn("Nothing further came back", self.frame.messages[-1])
 
     def test_a_book_search_leaves_the_play_button_to_say_so(self):
         panel = SearchPanel(self.host, self.frame)
@@ -2336,6 +2471,8 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SimpleNamespace(
             _loaded=True,
             _sleep_deadline=None,
+            _description=[],
+            _read_due_description=lambda: None,
             _length=lambda: 10_000,
             _tell=lambda: 1_000,
             _is_playing=lambda: True,
@@ -2360,6 +2497,8 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SimpleNamespace(
             _loaded=True,
             _sleep_deadline=None,
+            _description=[],
+            _read_due_description=lambda: None,
             _length=lambda: 10_000,
             _tell=lambda: 5_000,
             _is_playing=lambda: True,
@@ -2397,6 +2536,8 @@ class GuiInteractionTests(unittest.TestCase):
         panel = SimpleNamespace(
             _loaded=True,
             _sleep_deadline=None,
+            _description=[],
+            _read_due_description=lambda: None,
             _length=lambda: 320_000,
             _tell=lambda: 83_000,
             _is_playing=lambda: True,

@@ -24,7 +24,7 @@ from .. import (
     ytdlp_backend,
 )
 from ..global_hotkey import parse_hotkey
-from . import sounds
+from . import media_player, sounds
 
 # Label, stored value. "Original" means the file is kept exactly as the site
 # serves it: no ffmpeg pass, no quality lost, whatever container comes down.
@@ -342,6 +342,19 @@ class SettingsDialog(wx.Dialog):
             "are still seeding keep their row until seeding stops."
         )
 
+        self.awake_check = wx.CheckBox(
+            page, label="Keep the computer a&wake while downloading"
+        )
+        self.awake_check.SetValue(bool(config["keep_awake"]))
+        self.awake_check.SetHelpText(
+            "A playlist or a queue started before bed finishes instead of "
+            "being interrupted by the computer sleeping. The hold is let go "
+            "as soon as nothing is downloading or waiting to start, and it "
+            "ends with blindDL, so a crash cannot leave a machine that will "
+            "not sleep. On Windows and macOS this works as described; on "
+            "Linux it needs systemd-inhibit."
+        )
+
         conc_label = wx.StaticText(page, label="&Concurrent downloads:")
         self.conc_spin = wx.SpinCtrl(
             page, min=1, max=32, initial=int(config["max_concurrent"])
@@ -364,6 +377,7 @@ class SettingsDialog(wx.Dialog):
         self.sub_spin.SetName("Subscription interval in hours")
 
         sizer.Add(self.auto_clear_check, 0, wx.ALL, 8)
+        sizer.Add(self.awake_check, 0, wx.ALL, 8)
         _row(sizer, conc_label, self.conc_spin)
         _row(sizer, search_label, self.search_spin)
         _row(sizer, sub_label, self.sub_spin)
@@ -1128,6 +1142,24 @@ class SettingsDialog(wx.Dialog):
         sizer.Add(self.sound_failed_picker, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(self.sound_test_btn, 0, wx.LEFT | wx.BOTTOM, 8)
 
+        sizer.Add(self._heading(page, "Playback"), 0, wx.TOP | wx.LEFT, 12)
+        description_label = wx.StaticText(
+            page, label="Audio &description:")
+        self.description_choice = self._choice(
+            page, media_player.DESCRIPTION_MODES,
+            config.get("description_mode", media_player.DESCRIPTION_PAUSE),
+            "Audio description",
+        )
+        self.description_choice.SetHelpText(
+            "What to do when a download has a description written beside it "
+            "-- a described version somebody published, or one made here. "
+            "Pausing the video is the safest: nothing is talked over, and "
+            "playback carries on when the description has been read. "
+            "Reading over the sound drops it to about a third while the "
+            "words are said."
+        )
+        _row(sizer, description_label, self.description_choice)
+
         page.SetSizer(sizer)
         return page
 
@@ -1584,6 +1616,10 @@ class SettingsDialog(wx.Dialog):
             for index in self.sponsor_list.GetCheckedItems()
         ]
         self.config["auto_clear_finished"] = self.auto_clear_check.GetValue()
+        self.config["keep_awake"] = self.awake_check.GetValue()
+        self.config["description_mode"] = media_player.DESCRIPTION_MODES[
+            self.description_choice.GetSelection()
+        ][1]
         self.config["max_concurrent"] = self.conc_spin.GetValue()
         self.config["search_timeout_s"] = self.search_spin.GetValue()
         self.config["sub_check_hours"] = self.sub_spin.GetValue()

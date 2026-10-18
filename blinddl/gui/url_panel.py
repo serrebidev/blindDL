@@ -13,6 +13,7 @@ from .. import (
     preview, sideb_backend, soulseek_backend, ytdlp_backend,
 )
 from ..downloader import addition_summary
+from .format_dialog import FormatDialog
 from .item_picker_dialog import ItemPickerDialog
 from .media_player import MediaPlayerPanel
 from .podcast_archiver_dialog import PodcastArchiverDialog
@@ -44,11 +45,18 @@ class UrlPanel(wx.Panel):
         self.play_btn.SetHelpText(
             "Plays this URL without adding it to the download queue.")
         self.play_btn.Bind(wx.EVT_BUTTON, self.on_play_url)
+        self.exact_btn = wx.Button(self, label="Choose an e&xact stream...")
+        self.exact_btn.SetHelpText(
+            "Lists every stream this link offers and downloads the one you "
+            "choose exactly as the site serves it, with nothing converted."
+        )
+        self.exact_btn.Bind(wx.EVT_BUTTON, self.on_exact_stream)
         self.player = MediaPlayerPanel(self, frame, video_height=220)
 
         actions = wx.BoxSizer(wx.HORIZONTAL)
         actions.Add(self.download_btn, 0, wx.RIGHT, 8)
-        actions.Add(self.play_btn, 0)
+        actions.Add(self.play_btn, 0, wx.RIGHT, 8)
+        actions.Add(self.exact_btn, 0)
 
         sizer.Add(label, 0, wx.ALL, 8)
         sizer.Add(self.url_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
@@ -132,6 +140,69 @@ class UrlPanel(wx.Panel):
         self.frame.announce("Reading URL...")
         threading.Thread(target=self._inspect, args=(url, audio_only),
                          daemon=True).start()
+
+    def on_exact_stream(self, event):
+        """Download one stream the user picks out of everything on offer."""
+        if self.closing or not self.exact_btn.IsEnabled():
+            return
+        url = self.url_text.GetValue().strip()
+        if not url:
+            self.frame.announce("Enter a URL.")
+            return
+        self.exact_btn.Disable()
+        self.frame.announce("Reading the streams this link offers...")
+        threading.Thread(
+            target=self._list_streams, args=(url,), daemon=True,
+            name="blinddl-stream-list",
+        ).start()
+
+    def _list_streams(self, url):
+        try:
+            title, choices = ytdlp_backend.list_formats(
+                url,
+                cookies_from_browser=self.frame.config["cookies_from_browser"],
+                cookies_file=self.frame.config.get("cookies_file"),
+            )
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            wx.CallAfter(self._streams_failed, str(exc))
+            return
+        wx.CallAfter(self._streams_ready, url, title, choices)
+
+    def _streams_failed(self, error):
+        if self.closing:
+            return
+        self.exact_btn.Enable()
+        self.frame.announce("Could not read the streams.")
+        wx.MessageBox(
+            f"Could not read the streams this link offers:\n{error}",
+            "blindDL", wx.OK | wx.ICON_ERROR, self,
+        )
+        self.url_text.SetFocus()
+
+    def _streams_ready(self, url, title, choices):
+        if self.closing:
+            return
+        self.exact_btn.Enable()
+        dialog = FormatDialog(self, title, choices)
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                self.frame.announce("Cancelled.")
+                self.url_text.SetFocus()
+                return
+            choice = dialog.selected()
+        finally:
+            dialog.Destroy()
+        if choice is None:
+            self.frame.announce("No stream chosen.")
+            return
+        # The row names the stream, because the same link downloaded twice
+        # in two different streams is two files sitting next to each other.
+        added = self.frame.queue.add_ytdlp(
+            url, f"{title} — {choice['short']}", audio_only=False,
+            format_id=choice["format_id"])
+        self.frame.announce(addition_summary([added], [title]))
+        self.url_text.Clear()
+        self.frame.show_downloads_tab()
 
     def _open_podcast_archiver(self, url):
         self.frame.announce("Opening podcast archive...")

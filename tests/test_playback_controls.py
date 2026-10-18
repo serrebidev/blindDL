@@ -23,6 +23,11 @@ _PANEL_METHODS = (
     "_on_sleep_fade",
     "set_sleep_timer",
     "sleep_timer_active",
+    "description_mode",
+    "_read_due_description",
+    "_read_description",
+    "_end_description",
+    "_sync_description_position",
 )
 
 
@@ -31,6 +36,7 @@ def _panel(**values):
         frame=mock.Mock(),
         volume=mock.Mock(GetValue=lambda: 80),
         sleep_fade_timer=mock.Mock(),
+        description_timer=mock.Mock(),
         timer=mock.Mock(),
         play_btn=mock.Mock(),
         position=mock.Mock(),
@@ -40,9 +46,16 @@ def _panel(**values):
         _sleep_deadline=None,
         _sleep_fading=False,
         _sleep_fade_levels=[],
+        _description=[],
+        _description_at=0,
+        _description_busy=False,
+        _description_until=0.0,
+        _description_volume=None,
+        _description_paused=False,
         _set_volume=mock.Mock(),
         _stop=mock.Mock(),
         _pause=mock.Mock(),
+        _play=mock.Mock(return_value=True),
         _is_playing=mock.Mock(return_value=True),
         _length=lambda: 0,
         _tell=lambda: 0,
@@ -124,6 +137,79 @@ class SleepTimerTests(unittest.TestCase):
 
         MediaPlayerPanel.stop(panel)
         self.assertFalse(panel.sleep_timer_active())
+
+
+class AudioDescriptionTests(unittest.TestCase):
+    """Reading a description out at its moment, over whatever is playing."""
+
+    def test_a_description_is_read_when_its_moment_arrives(self):
+        panel = _panel(_description=[(5.0, "A dog barks.")], _tell=lambda: 6000)
+        panel.frame.config = {"description_mode": "pause"}
+
+        panel._read_due_description()
+
+        self.assertTrue(panel._description_busy)
+        panel.frame.announce.assert_called_once_with("A dog barks.")
+        # Paused while the words are read, so nothing is talked over.
+        panel._pause.assert_called_once_with()
+        panel.description_timer.Start.assert_called_once()
+
+    def test_nothing_is_read_over_the_sound_when_the_user_said_not_to(self):
+        panel = _panel(_description=[(5.0, "A dog barks.")], _tell=lambda: 6000)
+        panel.frame.config = {"description_mode": "off"}
+
+        panel._read_due_description()
+
+        self.assertFalse(panel._description_busy)
+        panel.frame.announce.assert_not_called()
+
+    def test_a_moment_already_gone_past_is_not_read_out(self):
+        # Seeking past a description leaves its moment behind; reading it
+        # now would describe a picture that is no longer on screen.
+        panel = _panel(_description=[(5.0, "A dog barks.")], _tell=lambda: 60000)
+        panel.frame.config = {"description_mode": "pause"}
+
+        panel._read_due_description()
+
+        self.assertFalse(panel._description_busy)
+        panel.frame.announce.assert_not_called()
+
+    def test_reading_over_the_sound_drops_the_volume_and_puts_it_back(self):
+        panel = _panel(_description=[(1.0, "Words.")], _tell=lambda: 2000)
+        panel.frame.config = {"description_mode": "duck"}
+
+        panel._read_due_description()
+        panel._set_volume.assert_called_once_with(24)
+
+        panel._end_description()
+        self.assertEqual(panel._set_volume.call_args.args[0], 80)
+        self.assertFalse(panel._description_busy)
+        panel.description_timer.Stop.assert_called_once_with()
+
+    def test_playback_carries_on_once_the_description_has_been_read(self):
+        playing = {"now": True}
+        panel = _panel(_description=[(1.0, "Words.")], _tell=lambda: 2000,
+                       _is_playing=lambda: playing["now"])
+        panel.frame.config = {"description_mode": "pause"}
+
+        panel._read_due_description()
+        self.assertTrue(panel._description_paused)
+
+        # The pause took effect, as it would on a real player.
+        playing["now"] = False
+        panel._end_description()
+
+        panel._play.assert_called_once_with()
+        self.assertFalse(panel._description_paused)
+
+    def test_seeking_moves_the_description_with_it(self):
+        panel = _panel(
+            _description=[(1.0, "one"), (10.0, "two"), (20.0, "three")],
+            _tell=lambda: 15000)
+
+        panel._sync_description_position()
+
+        self.assertEqual(panel._description_at, 2)
 
 
 class PlaybackMenuTests(unittest.TestCase):

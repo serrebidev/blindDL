@@ -21,6 +21,7 @@ import threading
 import wx
 
 from .. import speech, updater
+from . import textsize
 
 
 class ExternalToolsDialog(wx.Dialog):
@@ -49,6 +50,10 @@ class ExternalToolsDialog(wx.Dialog):
         sizer.Add(self.log_text, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.close_btn, 0, wx.ALL | wx.ALIGN_RIGHT, 8)
         self.SetSizer(sizer)
+        # This window is shown rather than opened modally, so the size has
+        # to be applied here rather than by the ShowModal hook that fits
+        # every other dialog in blindDL.
+        textsize.fit(self)
         self.SetEscapeId(wx.ID_CLOSE)
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)

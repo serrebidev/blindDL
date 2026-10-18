@@ -47,6 +47,93 @@ def _playlist_youtube_dl(info):
     return _Stub
 
 
+class ExactStreamTests(unittest.TestCase):
+    """The stream chooser: what a stream is called, and what it downloads."""
+
+    def test_a_video_stream_is_named_by_what_it_holds(self):
+        choice = ytdlp_backend.format_choice({
+            "format_id": "137", "ext": "mp4", "height": 1080, "fps": 30,
+            "vcodec": "avc1.640028", "acodec": "none", "tbr": 4500.5,
+            "filesize": 45 * 1024 ** 2,
+        })
+        self.assertEqual(choice["short"], "1080p MP4")
+        self.assertEqual(
+            choice["label"],
+            "1080p MP4, H.264, no sound, 4.5 Mbps, 45 MB")
+        self.assertTrue(choice["has_video"])
+        self.assertFalse(choice["has_audio"])
+
+    def test_an_audio_stream_is_named_by_its_bitrate(self):
+        choice = ytdlp_backend.format_choice({
+            "format_id": "251", "ext": "webm", "vcodec": "none",
+            "acodec": "opus", "abr": 129.7, "filesize_approx": 3 * 1024 ** 2,
+        })
+        self.assertEqual(choice["label"],
+                         "Audio only WEBM, Opus, 130 kbps, about 3 MB")
+        self.assertFalse(choice["has_video"])
+
+    def test_a_muxed_stream_names_both_codecs_and_its_container(self):
+        choice = ytdlp_backend.format_choice({
+            "format_id": "18", "ext": "mp4", "height": 360, "fps": 30,
+            "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "tbr": 612.0,
+            "filesize": 12 * 1024 ** 2,
+        })
+        self.assertEqual(
+            choice["label"], "360p MP4, H.264 with AAC, 0.6 Mbps, 12 MB")
+
+    def test_a_stream_with_no_size_says_so_by_saying_nothing(self):
+        self.assertEqual(ytdlp_backend.format_size(None), "")
+        self.assertEqual(ytdlp_backend.format_size(0), "")
+        self.assertEqual(ytdlp_backend.format_size(2048), "2 KB")
+
+    def test_an_unlisted_codec_keeps_its_family_name(self):
+        choice = ytdlp_backend.format_choice({
+            "format_id": "x", "ext": "webm", "vcodec": "none",
+            "acodec": "qdm2", "abr": 64,
+        })
+        self.assertIn("QDM2", choice["label"])
+
+    def test_the_stream_list_offers_the_best_one_first(self):
+        info = {
+            "title": "Example", "id": "1",
+            "formats": [
+                {"format_id": "worst", "ext": "mp4", "height": 144,
+                 "vcodec": "avc1", "acodec": "mp4a"},
+                {"format_id": "storyboard", "ext": "mhtml"},
+                {"format_id": "best", "ext": "mp4", "height": 1080,
+                 "vcodec": "avc1", "acodec": "mp4a"},
+                {"format_id": "best", "ext": "mp4", "height": 1080,
+                 "vcodec": "avc1", "acodec": "mp4a"},
+            ],
+        }
+        with mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL",
+                               _playlist_youtube_dl(info)):
+            title, choices = ytdlp_backend.list_formats("https://youtu.be/x")
+
+        self.assertEqual(title, "Example")
+        self.assertEqual([c["format_id"] for c in choices], ["best", "worst"])
+
+    def test_a_link_with_no_streams_says_so(self):
+        with mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL",
+                               _playlist_youtube_dl({"title": "Empty"})):
+            with self.assertRaises(RuntimeError):
+                ytdlp_backend.list_formats("https://youtu.be/x")
+
+    def test_a_chosen_stream_is_downloaded_exactly_as_it_comes(self):
+        # A stream picked out of a list by hand is the one that was wanted,
+        # so no preset may re-encode it or move it into another container.
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _YoutubeDL):
+            ytdlp_backend.download(
+                "https://youtu.be/x", folder, audio_only=True,
+                audio_format="mp3", format_id="251", embed_metadata=True)
+
+        opts = _YoutubeDL.instances[-1].options
+        self.assertEqual(opts["format"], "251")
+        self.assertNotIn("postprocessors", opts)
+        self.assertNotIn("merge_output_format", opts)
+
+
 class YtDlpBackendTests(unittest.TestCase):
     def test_download_cuts_sponsors_embeds_details_and_caps_height(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(

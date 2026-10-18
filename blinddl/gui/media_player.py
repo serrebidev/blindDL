@@ -13,11 +13,14 @@ import os
 import sys
 import threading
 import time
+from bisect import bisect_left
 from collections.abc import Callable
 from urllib.parse import urlparse
 
 import wx
 import wx.media
+
+from .. import describe
 
 
 def _configure_vlc():
@@ -94,6 +97,26 @@ SLEEP_CHOICES = ((15, "15 minutes"), (30, "30 minutes"),
                  (45, "45 minutes"), (60, "60 minutes"))
 SLEEP_FADE_MS = 100
 SLEEP_FADE_STEPS = 25
+
+# Audio description read out during playback. The sound is dropped to this
+# share of the volume while a description is read over it, which is the
+# honest compromise: real description goes in the gaps in the dialogue,
+# and choosing which line matters more than which sentence is an editorial
+# judgement nothing here can make.
+DESCRIPTION_DUCK_LEVEL = 0.3
+DESCRIPTION_OFF, DESCRIPTION_DUCK, DESCRIPTION_PAUSE = "off", "duck", "pause"
+DESCRIPTION_MODES = (
+    ("Read it out, pausing the video", DESCRIPTION_PAUSE),
+    ("Read it out over the sound, quietly", DESCRIPTION_DUCK),
+    ("Do not read it out", DESCRIPTION_OFF),
+)
+DESCRIPTION_MODE_LABELS = {value: label for label, value in DESCRIPTION_MODES}
+# How often the pause is looked at while a description is being read.
+DESCRIPTION_TICK_MS = 200
+# A description whose moment has been passed by more than this is one the
+# user skipped over -- by seeking or by playing something else -- and the
+# rest of that moment is not worth reading out.
+DESCRIPTION_LATE_S = 4.0
 
 # Where playback stopped is kept only for long media -- podcasts, mixes,
 # audiobooks -- and only once it is past the first and short of the last
@@ -251,6 +274,16 @@ class MediaPlayerPanel(wx.Panel):
         self._sleep_deadline = None
         self._sleep_fading = False
         self._sleep_fade_levels = []
+        # Audio description for this media, as (seconds, words), and where
+        # playback has got to in it. Only ever read out while playing: a
+        # description that talks over a paused picture is a reading of
+        # nothing.
+        self._description = []
+        self._description_at = 0
+        self._description_busy = False
+        self._description_until = 0.0
+        self._description_volume = None
+        self._description_paused = False
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.now_playing = wx.StaticText(self, label="Nothing playing.")
@@ -330,6 +363,12 @@ class MediaPlayerPanel(wx.Panel):
         # above ticks once a second for as long as anything plays.
         self.sleep_fade_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_sleep_fade, self.sleep_fade_timer)
+        # Reading a description pauses the picture for as long as the words
+        # take, and no screen reader will say when it has finished, so this
+        # is what starts playback again afterwards.
+        self.description_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_description_tick,
+                  self.description_timer)
         self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self._enable_controls(False)
 
@@ -378,6 +417,11 @@ class MediaPlayerPanel(wx.Panel):
         self._load_generation += 1
         self._title = title or "Untitled media"
         self._location = str(location)
+        # A description belongs to the file it describes, so it is looked
+        # for beside whatever is being played rather than remembered from
+        # the last thing that was.
+        self._description = describe.load_description(location)
+        self._description_at = 0
         self._loaded = False
         self.now_playing.SetLabel(f"Loading: {self._title}")
         self._enable_controls(False)
@@ -445,6 +489,13 @@ class MediaPlayerPanel(wx.Panel):
         if resume:
             self._seek(resume)
             message += f", resumed at {_clock(resume)}"
+        self._sync_description_position()
+        if self._description:
+            mode = self.description_mode()
+            message += (
+                f". Audio description: {DESCRIPTION_MODE_LABELS[mode].lower()}."
+                if mode != DESCRIPTION_OFF
+                else ". This one has an audio description; it is switched off.")
         self._report_status("Playing")
         self.frame.announce(message)
 
@@ -568,6 +619,7 @@ class MediaPlayerPanel(wx.Panel):
     def stop(self, silent=False):
         self.timer.Stop()
         self._clear_sleep_fade()
+        self._end_description()
         if not silent:
             # An explicit Stop is also the user saying they do not want to
             # be paused later. A load() in between -- the next item of a
@@ -645,6 +697,88 @@ class MediaPlayerPanel(wx.Panel):
         self._report_status("Paused")
         self.frame.announce("Sleep timer: playback paused.")
 
+    # -- audio description -----------------------------------------------------
+
+    def description_mode(self):
+        """How this player reads audio description out, from Settings."""
+        config = getattr(self.frame, "config", None)
+        value = config.get("description_mode") if config is not None else None
+        known = {mode for _label, mode in DESCRIPTION_MODES}
+        return value if value in known else DESCRIPTION_PAUSE
+
+    def has_description(self):
+        """True when something beside this media describes it."""
+        return bool(self._description)
+
+    def _sync_description_position(self):
+        """Line the description up with wherever playback has been moved to."""
+        if not self._description:
+            return
+        now = self._tell() / 1000.0
+        self._description_at = bisect_left(
+            [at for at, _text in self._description], now)
+
+    def _read_due_description(self):
+        """Read out the next description whose moment has arrived."""
+        if not self._description or self._description_busy:
+            return
+        mode = self.description_mode()
+        if mode == DESCRIPTION_OFF or not self._is_playing():
+            return
+        now = self._tell() / 1000.0
+        while self._description_at < len(self._description):
+            at, text = self._description[self._description_at]
+            if at > now:
+                return
+            self._description_at += 1
+            # A moment that far behind is one the user has already gone
+            # past -- by seeking, or by playing something else -- and
+            # reading it out now would describe a picture that is gone.
+            if now - at <= DESCRIPTION_LATE_S:
+                self._read_description(text, mode)
+                return
+
+    def _read_description(self, text, mode):
+        """Say one description, holding the picture for as long as it takes.
+
+        No screen reader will say when it has finished, so the pause lasts
+        as long as the words take at an ordinary reading rate. That is an
+        estimate, and it is the honest one available: the alternative is
+        either talking over the description or never carrying on.
+        """
+        self._description_busy = True
+        self._description_until = (
+            time.monotonic() + describe.reading_seconds(text))
+        self._description_paused = False
+        if mode == DESCRIPTION_DUCK:
+            self._description_volume = self.volume.GetValue()
+            self._set_volume(max(1, int(
+                self._description_volume * DESCRIPTION_DUCK_LEVEL)))
+        elif self._is_playing():
+            self._pause()
+            self._description_paused = True
+        self.frame.announce(text)
+        self.description_timer.Start(DESCRIPTION_TICK_MS)
+
+    def _on_description_tick(self, event):
+        if time.monotonic() < self._description_until:
+            return
+        self._end_description()
+
+    def _end_description(self):
+        """Stop holding the picture and put the sound back as it was."""
+        self.description_timer.Stop()
+        self._description_busy = False
+        if self._description_volume is not None:
+            self._set_volume(self._description_volume)
+            self._description_volume = None
+        if self._description_paused:
+            self._description_paused = False
+            if not self._is_playing():
+                self._play()
+                self.play_btn.SetLabel("&Pause")
+                self.timer.Start(PLAYBACK_TIMER_MS)
+
     def on_seek(self, event):
         if self._updating_position or not self._loaded:
             return
@@ -654,6 +788,7 @@ class MediaPlayerPanel(wx.Panel):
             self._set_time(self._tell(), length)
             self._report_status(
                 "Playing" if self._is_playing() else "Paused")
+            self._sync_description_position()
 
     def on_volume(self, event):
         self._set_volume(self.volume.GetValue())
@@ -729,6 +864,8 @@ class MediaPlayerPanel(wx.Panel):
         if (self._sleep_deadline is not None
                 and time.monotonic() >= self._sleep_deadline):
             self._start_sleep_fade()
+        else:
+            self._read_due_description()
         length = self._length()
         current = self._tell()
         self._set_time(current, length)
@@ -752,6 +889,7 @@ class MediaPlayerPanel(wx.Panel):
         self._shutting_down = True
         self.timer.Stop()
         self._clear_sleep_fade()
+        self.description_timer.Stop()
         self._report_status("")
         self._remember()
         if self._loaded:

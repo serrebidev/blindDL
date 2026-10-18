@@ -26,6 +26,7 @@ from . import (
     applemusic_backend,
     archive_backend,
     audiobook_backend,
+    awake,
     book_backend,
     deezer_backend,
     musicdl_backend,
@@ -134,7 +135,8 @@ def safe_folder(name):
 
 class DownloadItem:
     def __init__(self, title, kind, payload, audio_only=True,
-                 audio_format="mp3", video_format="mp4", folder=""):
+                 audio_format="mp3", video_format="mp4", folder="",
+                 format_id=""):
         self.id = uuid.uuid4().hex
         self.title = title
         # Subfolder of the download folder this item belongs in: the name of
@@ -148,6 +150,9 @@ class DownloadItem:
         self.audio_only = audio_only
         self.audio_format = audio_format
         self.video_format = video_format
+        # One exact stream, chosen from the link's own list. It overrides the
+        # format settings above: see ytdlp_backend.list_formats.
+        self.format_id = str(format_id or "")
         self.status = STATUS_QUEUED
         self.percent = 0.0
         self.speed = ""
@@ -193,6 +198,8 @@ class DownloadQueue:
         self._wanted_workers = 0
         self._wanted_torrent_workers = 0
         self._shutting_down = False
+        # Whether the computer is being kept awake for the queue's sake.
+        self._awake_hold = False
         self._save_lock = threading.Lock()
         self._batch_depth = 0
         self._batched_items = []
@@ -379,6 +386,9 @@ class DownloadQueue:
             variant = (
                 item.audio_only,
                 item.audio_format if item.audio_only else item.video_format,
+                # Two downloads of one link are two files when one of them
+                # named a stream and the other took a preset.
+                str(getattr(item, "format_id", "") or ""),
             ) if kind == "ytdlp" else ()
             return (kind, payload.strip(), variant)
 
@@ -509,14 +519,15 @@ class DownloadQueue:
                 for item in items:
                     self._notify(item)
 
-    def add_ytdlp(self, url, title, audio_only=None, folder=""):
+    def add_ytdlp(self, url, title, audio_only=None, folder="",
+                  format_id=""):
         if audio_only is None:
             audio_only = self.config["audio_only"]
         item = DownloadItem(title=title, kind="ytdlp", payload=url,
                             audio_only=audio_only,
                             audio_format=self.config["audio_format"],
                             video_format=self.config["video_format"],
-                            folder=folder)
+                            folder=folder, format_id=format_id)
         return self.add(item)
 
     def add_musicdl(self, song_info, title, folder=""):
@@ -758,6 +769,9 @@ class DownloadQueue:
                 )
             self._save_state(force=True)
             self._shutting_down = True
+        # Nothing will be downloading any more, so the computer is free to
+        # sleep the moment blindDL closes.
+        self._set_awake_hold(False)
 
     def counts(self):
         with self._cond:
@@ -852,6 +866,7 @@ class DownloadQueue:
             "audio_only": item.audio_only,
             "audio_format": item.audio_format,
             "video_format": item.video_format,
+            "format_id": getattr(item, "format_id", ""),
             "status": item.status,
             "percent": item.percent,
             "error": item.error,
@@ -887,6 +902,7 @@ class DownloadQueue:
             audio_format=str(record.get("audio_format") or "mp3"),
             video_format=str(record.get("video_format") or "mp4"),
             folder=str(record.get("folder") or ""),
+            format_id=str(record.get("format_id") or ""),
         )
         item.id = str(record.get("id") or uuid.uuid4().hex)
         item.percent = max(0.0, min(100.0, float(record.get("percent") or 0)))
@@ -989,8 +1005,33 @@ class DownloadQueue:
             item._last_notify = now
         with self._cond:
             self._record_status_locked(item)
+            wanted = self._wants_awake_hold()
+        self._set_awake_hold(wanted)
         if self.notify is not None:
             self.notify(item)
+
+    def _wants_awake_hold(self):
+        """Whether the queue holds work the computer should stay up for.
+
+        Anything running or waiting to run counts. A paused row does not:
+        it is waiting for the user rather than for the network, and someone
+        who paused everything means the machine can sleep. Callers hold the
+        condition lock, which is what keeps the counts steady to read.
+        """
+        if not self.config.get("keep_awake", True):
+            return False
+        return bool(self._status_counts[STATUS_DOWNLOADING]
+                    or self._status_counts[STATUS_QUEUED])
+
+    def _set_awake_hold(self, wanted):
+        """Keep the computer awake while the queue still has work in it."""
+        if wanted == self._awake_hold:
+            return
+        self._awake_hold = wanted
+        if wanted:
+            awake.hold()
+        else:
+            awake.release()
 
     def _worker(self, torrents_only=False, worker_index=0):
         while True:
@@ -1116,6 +1157,7 @@ class DownloadQueue:
             audio_only=item.audio_only,
             audio_format=item.audio_format,
             video_format=item.video_format,
+            format_id=getattr(item, "format_id", ""),
             progress_cb=progress,
             cancel_event=item.cancel_event,
             cookies_from_browser=self.config["cookies_from_browser"],

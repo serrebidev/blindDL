@@ -40,6 +40,7 @@ from .soulseek_user_dialog import UserBrowserDialog, UserProfileDialog
 from .sounds import DownloadSounds
 from .sources_dialog import SourcesDialog
 from .subs_panel import SubsPanel
+from . import textsize
 from .tools_dialog import ExternalToolsDialog
 from .tools_dialog import finished_text as tools_dialog_result
 from .tray import TrayIcon, app_icon
@@ -89,6 +90,9 @@ class MainFrame(wx.Frame):
         self._quitting = False
         self.tray = None
         self.config = Config()
+        # Read here so the window and its menus agree from the first
+        # keypress; applied once there are windows to apply it to.
+        self._text_scale = textsize.scale_for(self.config)
         if self.config["start_maximized"]:
             self.Maximize(True)
         # Restored rows must exist before the panels are built, but workers
@@ -122,6 +126,9 @@ class MainFrame(wx.Frame):
         self._tools_dialog = None
 
         self._build_ui()
+        textsize.apply(self, self._text_scale)
+        # Dialogs are fitted as they open, including any written later.
+        textsize.install()
         self.downloads_panel.refresh_all()
         self._build_menus()
         self._bind_shortcuts()
@@ -276,6 +283,17 @@ class MainFrame(wx.Frame):
         tools_menu.Append(
             self.ID_PODCAST_ARCHIVER, "Podcast &archiver...\tCtrl+Shift+P")
 
+        # Text size belongs to the window's view of itself rather than to
+        # the media it fetches, and it is the one setting a low-vision user
+        # changes far more often than any other.
+        view_menu = wx.Menu()
+        self.ID_TEXT_BIGGER = wx.NewIdRef()
+        view_menu.Append(self.ID_TEXT_BIGGER, "&Bigger text\tCtrl++")
+        self.ID_TEXT_SMALLER = wx.NewIdRef()
+        view_menu.Append(self.ID_TEXT_SMALLER, "&Smaller text\tCtrl+-")
+        self.ID_TEXT_NORMAL = wx.NewIdRef()
+        view_menu.Append(self.ID_TEXT_NORMAL, "&Normal text\tCtrl+0")
+
         # The player belongs to whichever tab is in front, and finding its
         # buttons means leaving the list you are reading. These act on it
         # from anywhere, which is what playing or pausing by keyboard is
@@ -308,6 +326,7 @@ class MainFrame(wx.Frame):
         menubar = wx.MenuBar()
         menubar.Append(file_menu, "&File")
         menubar.Append(tools_menu, "&Tools")
+        menubar.Append(view_menu, "&View")
         menubar.Append(playback_menu, "&Playback")
         menubar.Append(help_menu, "&Help")
         self.SetMenuBar(menubar)
@@ -325,6 +344,9 @@ class MainFrame(wx.Frame):
             id=self.ID_PODCAST_ARCHIVER)
         self.Bind(wx.EVT_MENU, self.on_play_pause_menu, id=self.ID_PLAY_PAUSE)
         self.Bind(wx.EVT_MENU, self.on_stop_playback, id=self.ID_STOP_PLAYBACK)
+        self.Bind(wx.EVT_MENU, self.on_text_bigger, id=self.ID_TEXT_BIGGER)
+        self.Bind(wx.EVT_MENU, self.on_text_smaller, id=self.ID_TEXT_SMALLER)
+        self.Bind(wx.EVT_MENU, self.on_text_normal, id=self.ID_TEXT_NORMAL)
         self.Bind(
             wx.EVT_MENU, lambda event: self.on_sleep_timer(0),
             id=self.ID_SLEEP_OFF)
@@ -349,6 +371,19 @@ class MainFrame(wx.Frame):
         ]
         entries.append((wx.ACCEL_CTRL, ord("F"), ids[fixed_tabs + 2]))
         entries.append((wx.ACCEL_CTRL, ord("L"), ids[fixed_tabs + 3]))
+        # Ctrl+Plus is Ctrl+Shift+Equals on most keyboards, so the key next
+        # to it and the keypad's own plus mean the same thing: nobody should
+        # have to work out which of the two they have.
+        entries.append((wx.ACCEL_CTRL, ord("="), self.ID_TEXT_BIGGER))
+        entries.append((wx.ACCEL_CTRL, wx.WXK_NUMPAD_ADD, self.ID_TEXT_BIGGER))
+        entries.append(
+            (wx.ACCEL_CTRL, wx.WXK_NUMPAD_SUBTRACT, self.ID_TEXT_SMALLER))
+        # More results is the Search tab's own button; the key is for the
+        # same reason as Ctrl+F, which is that the results list has focus
+        # and the mouse is not what anybody here is reaching for.
+        self.ID_MORE_RESULTS = wx.NewIdRef()
+        entries.append(
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord("M"), self.ID_MORE_RESULTS))
         self.SetAcceleratorTable(
             wx.AcceleratorTable([wx.AcceleratorEntry(*e) for e in entries])
         )
@@ -368,6 +403,11 @@ class MainFrame(wx.Frame):
             wx.EVT_MENU, lambda e: self._focus_search(), id=ids[fixed_tabs + 2])
         self.Bind(
             wx.EVT_MENU, lambda e: self._focus_url(), id=ids[fixed_tabs + 3])
+        self.Bind(
+            wx.EVT_MENU,
+            lambda e: self.search_panel.on_more_results(),
+            id=self.ID_MORE_RESULTS,
+        )
 
     # -- helpers used by panels ----------------------------------------------
 
@@ -775,6 +815,32 @@ class MainFrame(wx.Frame):
             self.announce("There is nothing to play yet.")
             return
         player.set_sleep_timer(minutes)
+
+    # -- the View menu ---------------------------------------------------------
+
+    def on_text_bigger(self, event=None):
+        self._set_text_scale(textsize.next_step(self._text_scale, 1))
+
+    def on_text_smaller(self, event=None):
+        self._set_text_scale(textsize.next_step(self._text_scale, -1))
+
+    def on_text_normal(self, event=None):
+        self._set_text_scale(textsize.DEFAULT)
+
+    def _set_text_scale(self, scale):
+        """Resize every window blindDL has open, and remember it.
+
+        Every window rather than the one in front: someone who needs the
+        text larger needs it larger in the player's labels and in the
+        dialog they are about to open as well as in the list they are
+        reading now.
+        """
+        scale = textsize.nearest_step(scale)
+        self._text_scale = scale
+        self.config["text_scale"] = scale
+        self.config.save()
+        textsize.apply_everywhere(scale)
+        self.announce(f"Text size: {textsize.describe(scale)}.")
 
     def on_settings(self, event):
         auto_update_was_enabled = bool(self.config["auto_update"])

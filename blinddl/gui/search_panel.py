@@ -288,6 +288,24 @@ def _is_archive_engine(engine):
     return engine in ARCHIVE_ENGINE_CATEGORIES
 
 
+# The engines whose sources have a further page to ask for. A front-end
+# catalogue -- a book library, an indexer, an archive collection, a
+# podcast directory -- answers one page per query, and asking it again
+# returns the same rows, so More results says so instead of pretending.
+DEEPENING_ENGINES = frozenset({
+    ENGINE_MUSIC,
+    ENGINE_YOUTUBE,
+    ENGINE_SOUNDCLOUD,
+    ENGINE_DEEZER,
+    ENGINE_MIXCLOUD,
+})
+
+
+def can_go_deeper(engine):
+    """Whether More results has anything to ask this source for."""
+    return engine in DEEPENING_ENGINES
+
+
 def _soulseek_media_kind(engine):
     """Return the extension group for an explicit Soulseek-only source."""
     return SOULSEEK_ENGINE_KINDS.get(engine)
@@ -1007,6 +1025,9 @@ class SearchPanel(wx.Panel):
         self.shown_sources = set()
         self.asked = []  # sites this search went out to
         self.done = False  # True once the current search hit its deadline
+        self.depth = 1  # pages deep the current search has been asked to go
+        self._search_args = None  # what the last search asked for
+        self._deeper_from = 0  # rows on the list before a deeper run began
         self._soulseek_streaming = False  # a Soulseek search is running now
         self.started_at = 0.0
         self.closing = False
@@ -1139,6 +1160,15 @@ class SearchPanel(wx.Panel):
         # re-find, and the row it sits in would shuffle underneath them
         # every time a search started or ended. Off means no search to stop.
         self.stop_btn.Disable()
+        self.more_btn = wx.Button(self, label="&More results")
+        self.more_btn.SetName("More results")
+        self.more_btn.SetHelpText(
+            "Asks the sites that have further pages for the next ones, and "
+            "adds what comes back to the list. Sites that answer one page "
+            "per search have nothing more to give, so this says so rather "
+            "than fetching the same rows again."
+        )
+        self.more_btn.Bind(wx.EVT_BUTTON, self.on_more_results)
 
         # Every control on this row is a way of describing the search, so
         # Enter runs it from any of them, exactly as it does from the query
@@ -1218,6 +1248,7 @@ class SearchPanel(wx.Panel):
         top.Add(self.sort_choice, 0, wx.RIGHT, 12)
         top.Add(self.search_btn, 0)
         top.Add(self.stop_btn, 0, wx.LEFT, 8)
+        top.Add(self.more_btn, 0, wx.LEFT, 8)
 
         sizer.Add(query_label, 0, wx.ALL, 8)
         sizer.Add(self.query_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
@@ -1739,6 +1770,14 @@ class SearchPanel(wx.Panel):
         # still answering, and rows would then be ranked against a query
         # nobody has run yet.
         self.query = query
+        # What More results asks again: the same words, the same sites, one
+        # page deeper. A deeper run adds to this list rather than replacing
+        # it, which is why the starting count is written down here.
+        self.depth = 1
+        self._search_args = {
+            "query": query, "sources": sources, "order": order, "kind": kind,
+            "artist_scope": artist_scope,
+        }
         threading.Thread(
             target=self._search,
             args=(query, engine, self.token, self.stop, sources, order, kind,
@@ -1747,7 +1786,15 @@ class SearchPanel(wx.Panel):
         ).start()
 
     def _search(self, query, engine, token, stop, sources, order=None,
-                kind=KIND_BEST, artist_scope=search_kind.ARTIST_SCOPE_ALL):
+                kind=KIND_BEST, artist_scope=search_kind.ARTIST_SCOPE_ALL,
+                depth=1):
+        """Run one search.
+
+        *depth* is how many pages deep the sites that have pages are asked
+        to go. More results raises it and calls this again with the same
+        token, so what arrives is added to the list already on screen
+        rather than replacing it.
+        """
         order = search_order.normalize(order or self.current_order)
         kind = search_kind.normalize(kind)
         artist_scope = search_kind.normalize_artist_scope(artist_scope)
@@ -1791,7 +1838,7 @@ class SearchPanel(wx.Panel):
                 threading.Thread(
                     target=self._deezer_search,
                     args=(query, token, engine, stop, order, kind,
-                          artist_scope),
+                          artist_scope, depth),
                     daemon=True,
                     name="search-deezer",
                 ).start()
@@ -1811,13 +1858,13 @@ class SearchPanel(wx.Panel):
                 threading.Thread(
                     target=self._deezer_search,
                     args=(query, token, engine, stop, order, kind,
-                          artist_scope),
+                          artist_scope, depth),
                     daemon=True,
                     name="search-deezer",
                 ).start()
                 threading.Thread(
                     target=self._mixcloud_search,
-                    args=(query, token, engine, stop, order),
+                    args=(query, token, engine, stop, order, depth),
                     daemon=True,
                     name="search-mixcloud",
                 ).start()
@@ -1897,11 +1944,13 @@ class SearchPanel(wx.Panel):
                 items = []
             elif engine == ENGINE_SOUNDCLOUD:
                 items, _title = ytdlp_backend.extract_flat(
-                    f"scsearch{SOUNDCLOUD_SEARCH_COUNT}:{query}", order=order
+                    f"scsearch{SOUNDCLOUD_SEARCH_COUNT * depth}:{query}",
+                    order=order
                 )
             elif engine == ENGINE_MIXCLOUD:
                 items = mixcloud_backend.search(
-                    query, self.frame.config, order=order)
+                    query, self.frame.config, order=order,
+                    count=mixcloud_backend.SEARCH_COUNT * depth)
             elif engine == ENGINE_BANDCAMP:
                 items = bandcamp_backend.search(query, self.frame.config, order=order)
             elif engine == ENGINE_APPLE_MUSIC:
@@ -1913,6 +1962,7 @@ class SearchPanel(wx.Panel):
                 items = deezer_backend.search(
                     query, self.frame.config, order=order, kind=kind,
                     artist_scope=artist_scope,
+                    limit=deezer_backend._SEARCH_TARGET * depth,
                 )
             elif engine == ENGINE_PODCASTS:
                 items = podcast_archiver.search_podcasts(
@@ -1936,15 +1986,23 @@ class SearchPanel(wx.Panel):
                 # on_adult_site already delivered these.
                 items = []
             else:
-                items = ytdlp_backend.search(query, order=order)
+                items = ytdlp_backend.search(
+                    query, count=ytdlp_backend.SEARCH_COUNT * depth,
+                    order=order)
         except Exception as exc:  # noqa: BLE001 - shown to the user
             if _is_soulseek_engine(engine):
                 wx.CallAfter(self._soulseek_failed, token, str(exc))
             else:
                 wx.CallAfter(self._search_failed, token, str(exc))
             return
-        if not stop.is_set():
-            wx.CallAfter(self._search_done, token, items, engine, asked)
+        if stop.is_set():
+            return
+        if depth > 1:
+            # A deeper run adds to what is on screen, so the list is left
+            # where the user is reading it and only the new rows arrive.
+            wx.CallAfter(self._deeper_done, token, items, engine)
+            return
+        wx.CallAfter(self._search_done, token, items, engine, asked)
 
     def _sideb_search(self, query, token, engine, stop, order=ORDER_RELEVANCE):
         try:
@@ -1958,7 +2016,7 @@ class SearchPanel(wx.Panel):
         )
 
     def _mixcloud_search(self, query, token, engine, stop,
-                         order=ORDER_RELEVANCE):
+                         order=ORDER_RELEVANCE, depth=1):
         """Mixcloud's share of a Music sites search, on its own thread.
 
         Mixcloud is the only source in that search carrying DJ sets and
@@ -1968,7 +2026,8 @@ class SearchPanel(wx.Panel):
         """
         try:
             items = mixcloud_backend.search(
-                query, self.frame.config, order=order)
+                query, self.frame.config, order=order,
+                count=mixcloud_backend.SEARCH_COUNT * depth)
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
         if stop.is_set():
@@ -1978,11 +2037,13 @@ class SearchPanel(wx.Panel):
         )
 
     def _deezer_search(self, query, token, engine, stop, order=ORDER_RELEVANCE,
-                       kind=KIND_BEST, artist_scope=search_kind.ARTIST_SCOPE_ALL):
+                       kind=KIND_BEST, artist_scope=search_kind.ARTIST_SCOPE_ALL,
+                       depth=1):
         try:
             items = deezer_backend.search(
                 query, self.frame.config, order=order, kind=kind,
                 artist_scope=artist_scope,
+                limit=deezer_backend._SEARCH_TARGET * depth,
             )
         except Exception:  # noqa: BLE001 - one failing site must not kill the rest
             items = []
@@ -2389,6 +2450,94 @@ class SearchPanel(wx.Panel):
         if self.done:
             self.frame.announce(
                 f"{self._result_count()} so far. {self._pending_phrase()}"
+            )
+
+    def on_more_results(self, event=None):
+        """Ask the sites that have a next page for the next page.
+
+        Only those sites: running the same search again fetches the same
+        rows, and on the music engines that means asking four dozen sites
+        for answers they have already given. What is on screen stays
+        exactly where it is and the new rows are added to it.
+        """
+        if self.closing or not self.more_btn.IsEnabled():
+            return
+        if self._search_args is None or not self.done:
+            self.frame.announce("Wait for this search to finish first.")
+            return
+        engine = self.result_engine
+        if not can_go_deeper(engine):
+            self.frame.announce(
+                f"{ENGINE_LABELS[engine]} has no further pages to ask for. "
+                "Try different words."
+            )
+            return
+        self.depth += 1
+        self._deeper_from = self._result_count()
+        self.more_btn.Disable()
+        self.frame.announce(f"Looking further into {ENGINE_LABELS[engine]}...")
+        threading.Thread(
+            target=self._deeper_search,
+            args=(self.token, engine, self.stop, dict(self._search_args)),
+            daemon=True,
+            name="search-deeper",
+        ).start()
+
+    def _deeper_search(self, token, engine, stop, args):
+        """Run the sites that can go deeper, and wait for all of them.
+
+        Everything here is a fetch that streams into the results list
+        through the ordinary per-site path, so this only has to know when
+        to say what came back.
+        """
+        jobs = []
+        if engine == ENGINE_MUSIC:
+            # The musicdl sites answer one page per query, so only the two
+            # music sources with a page to move on to are asked again.
+            jobs.append((
+                self._deezer_search,
+                (args["query"], token, engine, stop, args["order"],
+                 args["kind"], args["artist_scope"], self.depth),
+            ))
+            jobs.append((
+                self._mixcloud_search,
+                (args["query"], token, engine, stop, args["order"],
+                 self.depth),
+            ))
+        else:
+            jobs.append((
+                self._search,
+                (args["query"], engine, token, stop, args["sources"],
+                 args["order"], args["kind"], args["artist_scope"],
+                 self.depth),
+            ))
+        threads = [
+            threading.Thread(
+                target=target, args=job_args, daemon=True, name="search-more")
+            for target, job_args in jobs
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        wx.CallAfter(self._deeper_done, token, [], engine)
+
+    def _deeper_done(self, token, items, engine):
+        """Add a deeper run's rows and say how many of them there were."""
+        if self.closing or token is not self.token:
+            return
+        self.more_btn.Enable()
+        self._add_site(token, engine, "", items)
+        self._flush_results()
+        added = self._result_count() - self._deeper_from
+        if added:
+            self.frame.announce(
+                f"{added} more. {self._result_count()} in the list."
+            )
+        else:
+            self.frame.announce(
+                "Nothing further came back. Try different words, or another "
+                "source."
             )
 
     def _search_done(self, token, items, engine, asked=()):

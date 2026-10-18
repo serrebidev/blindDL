@@ -59,8 +59,21 @@ DEFAULTS = {
     "sponsorblock_remove": [],
     # Speed of the built-in player, remembered between tracks. 1.0 is normal.
     "playback_rate": 1.0,
+    # What the player does with an audio description written beside a
+    # download: "pause" stops the picture while it is read, "duck" reads it
+    # over the sound at a third of the volume, and "off" leaves it alone.
+    "description_mode": "pause",
+    # Text size for every window, as a multiple of the platform's own:
+    # 1.0 is normal, and View, Bigger text steps it up. Remembered, so a
+    # large screen setup does not have to be redone every morning.
+    "text_scale": 1.0,
     # Maximum simultaneous downloads. No hard cap beyond this user setting.
     "max_concurrent": 4,
+    # Ask the operating system not to sleep while anything is downloading.
+    # A queue or a long playlist started before bed is the reason this
+    # exists; the hold is let go the moment the queue is empty, and it dies
+    # with blindDL, so a crash cannot leave a computer that will not sleep.
+    "keep_awake": True,
     # Take a download out of the Finished downloads list once it has
     # completed, and an upload out of Finished uploads once the other side
     # has the file. Off by default. Downloads that failed or were cancelled
