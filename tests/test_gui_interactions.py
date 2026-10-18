@@ -60,6 +60,7 @@ with mock.patch("logging.FileHandler", return_value=logging.NullHandler()):
     from blinddl.gui import mainframe as mainframe_module
     from blinddl.gui import search_panel as search_panel_module
     from blinddl.gui.mainframe import MainFrame, TAB_DOWNLOADS, TAB_LIBRARY
+    from blinddl.gui.friends_panel import FriendsPanel
     from blinddl.gui.messages_panel import MessagesPanel
     from blinddl.gui.podcast_archiver_dialog import PodcastArchiverDialog
     from blinddl.gui.queue_panel import QueuePanel
@@ -5016,36 +5017,82 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertTrue(config.saved)
         dialog.Destroy()
 
-    def test_soulseek_messages_exposes_friends_and_private_transcript(self):
+    def test_soulseek_messages_transcript_binds_the_reply_target(self):
         self.frame.config = _SettingsConfig()
         self.frame.config["soulseek_enabled"] = True
-        with (
-            mock.patch.object(
-                soulseek_backend,
-                "friends_snapshot",
-                return_value=[{"username": "alice", "status": "Online"}],
-            ),
-            mock.patch.object(
-                soulseek_backend,
-                "private_messages_snapshot",
-                return_value=[
-                    {
-                        "timestamp": 123,
-                        "user": "alice",
-                        "message": "hello",
-                        "outgoing": False,
-                    }
-                ],
-            ),
+        with mock.patch.object(
+            soulseek_backend,
+            "private_messages_snapshot",
+            return_value=[
+                {
+                    "timestamp": 123,
+                    "user": "alice",
+                    "message": "hello",
+                    "outgoing": False,
+                }
+            ],
         ):
             panel = MessagesPanel(self.host, self.frame)
 
-        self.assertEqual(panel.friends_list.GetItemText(0), "alice")
-        self.assertEqual(panel.friends_list.GetItemText(0, 1), "Online")
         self.assertEqual(panel.list.GetItemText(0, 1), "From")
         self.assertEqual(panel.list.GetItemText(0, 3), "hello")
+        self.assertEqual(panel.message_text.GetName(), "Soulseek private message")
 
-        panel.recipient_text.SetValue("bob")
+        # Tab order is transcript, message field, Send, recipient: focusing
+        # a message and pressing Tab once lands in the field that sends the
+        # reply, and the field says who it goes to.
+        focusable = [
+            child
+            for child in panel.GetChildren()
+            if child in (
+                panel.list,
+                panel.message_text,
+                panel.send_button,
+                panel.recipient_text,
+            )
+        ]
+        self.assertEqual(
+            focusable,
+            [panel.list, panel.message_text, panel.send_button, panel.recipient_text],
+        )
+
+        panel.on_message_selected(SimpleNamespace(GetIndex=lambda: 0))
+        self.assertEqual(panel.recipient_text.GetValue(), "alice")
+        # The name is what a screen reader announces on Tab into the field.
+        # (wxGTK returns "" for a text control's help text, so only the
+        # name is asserted here.)
+        self.assertEqual(
+            panel.message_text.GetName(), "Soulseek private message to alice"
+        )
+
+        panel.set_recipient("carol")
+        self.assertEqual(
+            panel.message_text.GetName(), "Soulseek private message to carol"
+        )
+        panel.Destroy()
+
+    def test_soulseek_friends_have_their_own_panel(self):
+        self.frame.config = _SettingsConfig()
+        self.frame.config["soulseek_enabled"] = True
+        addressed = []
+        self.frame.set_soulseek_recipient = addressed.append
+        with mock.patch.object(
+            soulseek_backend,
+            "friends_snapshot",
+            return_value=[{"username": "alice", "status": "Online"}],
+        ):
+            panel = FriendsPanel(self.host, self.frame)
+
+        self.assertEqual(panel.friends_list.GetItemText(0), "alice")
+        self.assertEqual(panel.friends_list.GetItemText(0, 1), "Online")
+
+        # Selecting a friend fills the username field and addresses the
+        # Messages tab at them.
+        panel.on_friend_selected(SimpleNamespace(GetIndex=lambda: 0))
+        self.assertEqual(panel.username_text.GetValue(), "alice")
+        self.assertEqual(addressed, ["alice"])
+
+        panel.username_text.SetValue("bob")
         panel._friend_changed(
             "bob",
             True,
@@ -5073,16 +5120,19 @@ class GuiInteractionTests(unittest.TestCase):
             notebook=wx.Notebook(self.host),
             chat_panel=None,
             messages_panel=None,
+            friends_panel=None,
         )
         holder.config["soulseek_enabled"] = True
         with (
             mock.patch("blinddl.gui.mainframe.ChatPanel", OptionalPanel),
             mock.patch("blinddl.gui.mainframe.MessagesPanel", OptionalPanel),
+            mock.patch("blinddl.gui.mainframe.FriendsPanel", OptionalPanel),
         ):
             MainFrame._sync_soulseek_tabs(holder)
-            self.assertEqual(holder.notebook.GetPageCount(), 2)
+            self.assertEqual(holder.notebook.GetPageCount(), 3)
             self.assertEqual(holder.notebook.GetPageText(0), "Chat")
             self.assertEqual(holder.notebook.GetPageText(1), "Messages")
+            self.assertEqual(holder.notebook.GetPageText(2), "Friends")
 
             holder.config["soulseek_enabled"] = False
             MainFrame._sync_soulseek_tabs(holder)
@@ -5090,6 +5140,7 @@ class GuiInteractionTests(unittest.TestCase):
         self.assertEqual(holder.notebook.GetPageCount(), 0)
         self.assertIsNone(holder.chat_panel)
         self.assertIsNone(holder.messages_panel)
+        self.assertIsNone(holder.friends_panel)
 
     def test_soulseek_result_queues_its_own_backend_in_soulseek_sections(self):
         panel = SearchPanel(self.host, self.frame)

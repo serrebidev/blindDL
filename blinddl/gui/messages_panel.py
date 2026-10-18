@@ -2,7 +2,14 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-"""Accessible Soulseek friends and private messages."""
+"""Accessible Soulseek private messages.
+
+The reply target follows the transcript: focusing a message makes its
+sender the person the next message goes to, and the message field carries
+that person's name, so Tab from a message lands in a field that says who
+it writes to. Friends live on their own tab; selecting a friend there
+addresses this tab the same way.
+"""
 
 import threading
 
@@ -18,41 +25,17 @@ class MessagesPanel(wx.Panel):
         self.frame = frame
         self._alive = True
 
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        recipient_row = wx.BoxSizer(wx.HORIZONTAL)
-        recipient_label = wx.StaticText(self, label="&Recipient or friend:")
-        self.recipient_text = wx.TextCtrl(self)
-        self.recipient_text.SetName("Soulseek message recipient")
-        self.recipient_text.SetHelpText(
-            "Type a Soulseek username, or select a friend below."
-        )
-        self.add_friend_button = wx.Button(self, label="&Add friend")
-        self.remove_friend_button = wx.Button(self, label="&Remove friend")
-        self.browse_button = wx.Button(self, label="&Browse")
-        self.slot_button = wx.Button(self, label="Free &slot")
-        self.profile_button = wx.Button(self, label="&Profile")
-        recipient_row.Add(recipient_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
-        recipient_row.Add(self.recipient_text, 1, wx.RIGHT, 6)
-        recipient_row.Add(self.add_friend_button, 0, wx.RIGHT, 6)
-        recipient_row.Add(self.remove_friend_button, 0)
-        recipient_row.Add(self.browse_button, 0, wx.LEFT, 6)
-        recipient_row.Add(self.slot_button, 0, wx.LEFT, 6)
-        recipient_row.Add(self.profile_button, 0, wx.LEFT, 6)
-
-        friends_label = wx.StaticText(self, label="&Friends:")
-        self.friends_list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.friends_list.SetName("Soulseek friends")
-        self.friends_list.SetHelpText("Select a friend to address a private message.")
-        self.friends_list.InsertColumn(0, "Username")
-        self.friends_list.InsertColumn(1, "Status")
-        self.friends_list.SetColumnWidth(0, 260)
-        self.friends_list.SetColumnWidth(1, 120)
-        self.friends_list.SetMinSize((-1, 125))
-
+        # Focusable controls are created in Tab order -- transcript, message
+        # field, Send, recipient -- whatever order the sizer below lays them
+        # out in visually: focus a message, Tab once, and you are writing
+        # the reply to whoever sent it.
         transcript_label = wx.StaticText(self, label="Private &messages:")
         self.list = wx.ListCtrl(self, style=wx.LC_REPORT)
         self.list.SetName("Soulseek private message transcript")
-        self.list.SetHelpText("Private Soulseek messages received and sent.")
+        self.list.SetHelpText(
+            "Private Soulseek messages received and sent. Selecting a "
+            "message addresses your next message to that person."
+        )
         for index, heading in enumerate(("Time", "Direction", "User", "Message")):
             self.list.InsertColumn(index, heading)
         self.list.SetColumnWidth(0, 80)
@@ -60,52 +43,49 @@ class MessagesPanel(wx.Panel):
         self.list.SetColumnWidth(2, 170)
         self.list.SetColumnWidth(3, 470)
 
-        message_row = wx.BoxSizer(wx.HORIZONTAL)
         message_label = wx.StaticText(self, label="&Message:")
         self.message_text = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
-        self.message_text.SetName("Soulseek private message")
-        self.message_text.SetHelpText("Type a private message and press Enter to send.")
         self.send_button = wx.Button(self, label="&Send")
+
+        recipient_label = wx.StaticText(self, label="&Recipient:")
+        self.recipient_text = wx.TextCtrl(self)
+        self.recipient_text.SetName("Soulseek message recipient")
+        self.recipient_text.SetHelpText(
+            "Who the next message goes to. Selecting a message above fills "
+            "this in; type a different Soulseek username to write to "
+            "somebody else."
+        )
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        recipient_row = wx.BoxSizer(wx.HORIZONTAL)
+        recipient_row.Add(recipient_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        recipient_row.Add(self.recipient_text, 1)
+        message_row = wx.BoxSizer(wx.HORIZONTAL)
         message_row.Add(message_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         message_row.Add(self.message_text, 1, wx.RIGHT, 6)
         message_row.Add(self.send_button, 0)
-
         sizer.Add(recipient_row, 0, wx.EXPAND | wx.ALL, 8)
-        sizer.Add(friends_label, 0, wx.LEFT | wx.RIGHT, 8)
-        sizer.Add(self.friends_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         sizer.Add(transcript_label, 0, wx.LEFT | wx.RIGHT, 8)
         sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         sizer.Add(message_row, 0, wx.EXPAND | wx.ALL, 8)
         self.SetSizer(sizer)
 
-        self.add_friend_button.Bind(wx.EVT_BUTTON, self.on_add_friend)
-        self.remove_friend_button.Bind(wx.EVT_BUTTON, self.on_remove_friend)
-        self.browse_button.Bind(
-            wx.EVT_BUTTON,
-            lambda event: self.frame.open_soulseek_user(self._selected_username()),
-        )
-        self.slot_button.Bind(
-            wx.EVT_BUTTON,
-            lambda event: self.frame.give_soulseek_free_slot(
-                self._selected_username()
-            ),
-        )
-        self.profile_button.Bind(
-            wx.EVT_BUTTON,
-            lambda event: self.frame.view_soulseek_profile(
-                self._selected_username()
-            ),
-        )
-        self.friends_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_friend_selected)
+        self._update_target_name()
+        self.list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_message_selected)
+        self.recipient_text.Bind(wx.EVT_TEXT, self._on_recipient_typed)
         self.send_button.Bind(wx.EVT_BUTTON, self.on_send)
         self.message_text.Bind(wx.EVT_TEXT_ENTER, self.on_send)
 
-        self._show_friends(soulseek_backend.friends_snapshot())
         for message in soulseek_backend.private_messages_snapshot():
             self._append_message(message)
 
     def focus_input(self):
-        self.recipient_text.SetFocus()
+        # With a target chosen, writing is the point of this tab; without
+        # one, the recipient field is the first thing needed.
+        if self._selected_username():
+            self.message_text.SetFocus()
+        else:
+            self.recipient_text.SetFocus()
 
     def shutdown(self):
         self._alive = False
@@ -113,21 +93,8 @@ class MessagesPanel(wx.Panel):
     def handle_soulseek_event(self, event):
         if not self._alive:
             return
-        if event.get("type") == "friends":
-            self._show_friends(event.get("friends", []))
-        elif event.get("type") == "private_message":
+        if event.get("type") == "private_message":
             self._append_message(event["message"])
-
-    def _show_friends(self, friends):
-        selected = self.recipient_text.GetValue()
-        self.friends_list.DeleteAllItems()
-        for friend in friends:
-            row = self.friends_list.InsertItem(
-                self.friends_list.GetItemCount(), friend["username"]
-            )
-            self.friends_list.SetItem(row, 1, friend.get("status", "Unknown"))
-            if friend["username"].casefold() == selected.casefold():
-                self.friends_list.Select(row)
 
     def _append_message(self, message):
         row = self.list.InsertItem(
@@ -138,8 +105,35 @@ class MessagesPanel(wx.Panel):
         self.list.SetItem(row, 3, message.get("message", ""))
         self.list.EnsureVisible(row)
 
-    def on_friend_selected(self, event):
-        self.recipient_text.SetValue(self.friends_list.GetItemText(event.GetIndex()))
+    def set_recipient(self, username):
+        """Address the next message to *username* and say so on the field."""
+        self.recipient_text.SetValue(str(username or ""))
+        self._update_target_name()
+
+    def on_message_selected(self, event):
+        # The User column is the other party in both directions: the sender
+        # of a received message, the addressee of a sent one.
+        username = self.list.GetItemText(event.GetIndex(), 2)
+        if username:
+            self.set_recipient(username)
+
+    def _on_recipient_typed(self, event):
+        self._update_target_name()
+        event.Skip()
+
+    def _update_target_name(self):
+        username = self._selected_username()
+        if username:
+            self.message_text.SetName(f"Soulseek private message to {username}")
+            self.message_text.SetHelpText(
+                f"Type a private message to {username} and press Enter to send."
+            )
+        else:
+            self.message_text.SetName("Soulseek private message")
+            self.message_text.SetHelpText(
+                "Select a message or enter a recipient first, then type a "
+                "private message and press Enter to send."
+            )
 
     def _worker(self, action, success, *args):
         try:
@@ -155,56 +149,6 @@ class MessagesPanel(wx.Panel):
 
     def _selected_username(self):
         return self.recipient_text.GetValue().strip()
-
-    def on_add_friend(self, event=None):
-        username = self._selected_username()
-        if not username:
-            self.frame.announce("Enter a Soulseek username to add.")
-            return
-        threading.Thread(
-            target=self._worker,
-            args=(
-                soulseek_backend.add_friend,
-                lambda friends: self._friend_changed(username, True, friends),
-                username,
-                self.frame.config,
-            ),
-            daemon=True,
-            name="blinddl-soulseek-add-friend",
-        ).start()
-
-    def on_remove_friend(self, event=None):
-        username = self._selected_username()
-        if not username:
-            self.frame.announce("Select or enter a Soulseek friend to remove.")
-            return
-        threading.Thread(
-            target=self._worker,
-            args=(
-                soulseek_backend.remove_friend,
-                lambda friends: self._friend_changed(username, False, friends),
-                username,
-                self.frame.config,
-            ),
-            daemon=True,
-            name="blinddl-soulseek-remove-friend",
-        ).start()
-
-    def _friend_changed(self, username, added, friends):
-        if not self._alive:
-            return
-        saved = list(self.frame.config.get("soulseek_friends", []) or [])
-        if added and username.casefold() not in {value.casefold() for value in saved}:
-            saved.append(username)
-        elif not added:
-            saved = [
-                value for value in saved if value.casefold() != username.casefold()
-            ]
-        self.frame.config["soulseek_friends"] = saved
-        self.frame.config.save()
-        self._show_friends(friends)
-        verb = "Added" if added else "Removed"
-        self.frame.announce(f"{verb} Soulseek friend {username}.")
 
     def on_send(self, event=None):
         username = self._selected_username()

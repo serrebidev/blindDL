@@ -29,6 +29,7 @@ from ..subscriptions import SubscriptionStore
 from .chat_panel import ChatPanel
 from .downloads_panel import DownloadsPanel
 from .feeds_dialog import FeedsDialog
+from .friends_panel import FriendsPanel
 from .library_panel import LibraryPanel
 from .media_player import SLEEP_CHOICES
 from .messages_panel import MessagesPanel
@@ -107,6 +108,7 @@ class MainFrame(wx.Frame):
         self._last_counts = None
         self.chat_panel = None
         self.messages_panel = None
+        self.friends_panel = None
         # Players that belong to a dialog rather than a tab. They join the
         # rule that only one thing plays at a time for as long as the dialog
         # that owns them is open.
@@ -360,10 +362,10 @@ class MainFrame(wx.Frame):
 
     def _bind_shortcuts(self):
         # Ctrl+1 through Ctrl+7 are the seven tabs that are always there, in
-        # the order they appear; Ctrl+8 and Ctrl+9 are the two Soulseek tabs
-        # that only exist when Soulseek does.
+        # the order they appear; Ctrl+8, Ctrl+9 and Ctrl+0 are the Soulseek
+        # tabs that only exist when Soulseek does.
         fixed_tabs = 7
-        ids = [wx.NewIdRef() for _ in range(fixed_tabs + 4)]
+        ids = [wx.NewIdRef() for _ in range(fixed_tabs + 5)]
         keys = [str(number) for number in range(1, fixed_tabs + 3)]
         entries = [
             (wx.ACCEL_CTRL, ord(key), ids[index])
@@ -371,6 +373,7 @@ class MainFrame(wx.Frame):
         ]
         entries.append((wx.ACCEL_CTRL, ord("F"), ids[fixed_tabs + 2]))
         entries.append((wx.ACCEL_CTRL, ord("L"), ids[fixed_tabs + 3]))
+        entries.append((wx.ACCEL_CTRL, ord("0"), ids[fixed_tabs + 4]))
         # Ctrl+Plus is Ctrl+Shift+Equals on most keyboards, so the key next
         # to it and the keypad's own plus mean the same thing: nobody should
         # have to work out which of the two they have.
@@ -398,6 +401,11 @@ class MainFrame(wx.Frame):
             wx.EVT_MENU,
             lambda event: self._show_optional_tab(self.messages_panel, "Messages"),
             id=ids[fixed_tabs + 1],
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda event: self._show_optional_tab(self.friends_panel, "Friends"),
+            id=ids[fixed_tabs + 4],
         )
         self.Bind(
             wx.EVT_MENU, lambda e: self._focus_search(), id=ids[fixed_tabs + 2])
@@ -564,9 +572,14 @@ class MainFrame(wx.Frame):
             self.announce("Enter a Soulseek username, and enable Soulseek if needed.")
             return
         self._show_optional_tab(self.messages_panel, "Messages")
-        self.messages_panel.recipient_text.SetValue(username)
+        self.messages_panel.set_recipient(username)
         self.messages_panel.message_text.SetFocus()
         self.announce(f"Message recipient: {username}.")
+
+    def set_soulseek_recipient(self, username):
+        """Address the Messages tab at *username* without moving focus."""
+        if self.messages_panel is not None:
+            self.messages_panel.set_recipient(username)
 
     def _user_action(self, action, username, finished, thread_name):
         username = str(username or "").strip()
@@ -598,8 +611,8 @@ class MainFrame(wx.Frame):
             saved.append(username)
             self.config["soulseek_friends"] = saved
             self.config.save()
-        if self.messages_panel is not None:
-            self.messages_panel._show_friends(friends)
+        if self.friends_panel is not None:
+            self.friends_panel._show_friends(friends)
         self.announce(f"Added Soulseek friend {username}.")
 
     def give_soulseek_free_slot(self, username):
@@ -636,12 +649,14 @@ class MainFrame(wx.Frame):
         if enabled and self.chat_panel is None:
             self.chat_panel = ChatPanel(self.notebook, self)
             self.messages_panel = MessagesPanel(self.notebook, self)
+            self.friends_panel = FriendsPanel(self.notebook, self)
             self.notebook.AddPage(self.chat_panel, "Chat")
             self.notebook.AddPage(self.messages_panel, "Messages")
+            self.notebook.AddPage(self.friends_panel, "Friends")
             return
         if enabled:
             return
-        for attribute in ("messages_panel", "chat_panel"):
+        for attribute in ("messages_panel", "chat_panel", "friends_panel"):
             panel = getattr(self, attribute)
             if panel is None:
                 continue
@@ -750,6 +765,8 @@ class MainFrame(wx.Frame):
             self.chat_panel.handle_soulseek_event(event)
         if self.messages_panel is not None:
             self.messages_panel.handle_soulseek_event(event)
+        if self.friends_panel is not None:
+            self.friends_panel.handle_soulseek_event(event)
         self.uploads_panel.handle_soulseek_event(event)
         message = event.get("message", {})
         if event.get("type") == "private_message" and not message.get("outgoing"):
@@ -1188,6 +1205,8 @@ class MainFrame(wx.Frame):
             self.chat_panel.shutdown()
         if self.messages_panel is not None:
             self.messages_panel.shutdown()
+        if self.friends_panel is not None:
+            self.friends_panel.shutdown()
         self.search_panel.shutdown()
         self.url_panel.shutdown()
         self.library_panel.shutdown()
