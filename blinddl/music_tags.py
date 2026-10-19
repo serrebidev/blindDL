@@ -28,6 +28,7 @@ fail a download: a lookup that errors or times out simply leaves those
 fields empty. An existing tag is never overwritten.
 """
 
+import logging
 import os
 import re
 import threading
@@ -508,15 +509,21 @@ def fetch_cover(url):
         response = requests.get(
             url, headers={"User-Agent": _USER_AGENT},
             timeout=HTTP_TIMEOUT_S, stream=True)
-        response.raise_for_status()
-        declared = int(response.headers.get("Content-Length") or 0)
-        if declared > MAX_COVER_BYTES:
-            return None, ""
-        data = b""
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            data += chunk
-            if len(data) > MAX_COVER_BYTES:
+        try:
+            response.raise_for_status()
+            declared = int(response.headers.get("Content-Length") or 0)
+            if declared > MAX_COVER_BYTES:
                 return None, ""
+            data = b""
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                data += chunk
+                if len(data) > MAX_COVER_BYTES:
+                    return None, ""
+        finally:
+            try:
+                response.close()
+            except Exception:
+                logging.getLogger(__name__).debug("Could not close cover response", exc_info=True)
     except Exception:  # noqa: BLE001 - artwork is never worth a failure
         return None, ""
     if data[:3] == b"\xff\xd8\xff":

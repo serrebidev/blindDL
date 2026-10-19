@@ -755,7 +755,7 @@ def _extension(url, book_format):
     return ".epub"
 
 
-def _verify(path, extension):
+def _verify(path, extension, expected_size=0):
     """Reject an error page or a truncated file before it reaches the shelf."""
     expected = _MAGIC.get(extension)
     try:
@@ -766,6 +766,14 @@ def _verify(path, extension):
         raise RuntimeError(f"The downloaded book could not be read: {exc}")
     if size == 0:
         raise RuntimeError("The download was empty.")
+    try:
+        expected_size = int(expected_size or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    if expected_size and size != expected_size:
+        raise RuntimeError(
+            "The download was incomplete: it does not match the expected "
+            "file size.")
     if expected and not head.startswith(expected):
         raise RuntimeError(
             "The download was not a book file. The source may have answered "
@@ -808,8 +816,9 @@ def download(item, out_dir, config=None, progress_cb=None, cancel_event=None):
         response = _open_stream(url, item.get("source"))
         try:
             response.raise_for_status()
-            total = int(response.headers.get("Content-Length") or
-                        expected_size or 0)
+            content_length = int(
+                response.headers.get("Content-Length") or 0)
+            total = content_length or expected_size or 0
             downloaded = 0
             with open(partial, "wb") as handle:
                 for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -823,7 +832,7 @@ def download(item, out_dir, config=None, progress_cb=None, cancel_event=None):
                         progress_cb(downloaded, total)
         finally:
             response.close()
-        _verify(partial, extension)
+        _verify(partial, extension, expected_size=content_length)
         os.replace(partial, path)
     except BaseException:
         try:

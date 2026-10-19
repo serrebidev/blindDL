@@ -488,6 +488,82 @@ class DownloadPersistenceTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertFalse(seed.seeding)
 
+    def test_same_torrent_from_hash_and_magnet_rows_is_one_download(self):
+        with tempfile.TemporaryDirectory() as folder:
+            queue = DownloadQueue(
+                self.config(), None,
+                state_path=Path(folder) / "downloads.json",
+                start_workers=False,
+            )
+            infohash = "7bb911895886da54b4db91b710bae80b7c943f42"
+            first = queue.add_torrent(
+                {"source": "Indexer A", "infohash": infohash.upper()},
+                "Release")
+            second = queue.add_torrent(
+                {"source": "Indexer B",
+                 "magnet": f"magnet:?xt=urn:btih:{infohash}&dn=Release"},
+                "Release")
+
+        self.assertIs(second, first)
+        self.assertEqual(second.add_action, ADD_ALREADY_ACTIVE)
+        self.assertEqual(len(queue.items), 1)
+
+    def test_remove_rechecks_status_atomically_before_removing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = self.config()
+            config["download_dir"] = folder
+            queue = DownloadQueue(config, None, state_path="", start_workers=False)
+            item = DownloadItem("Book", "book", {})
+            item.status = STATUS_DONE
+            result = Path(folder) / "book.epub"
+            result.write_bytes(b"book")
+            item.result_path = str(result)
+            queue.items = [item]
+
+            def start_during_delete(_item):
+                # What a worker does when it picks the row up: under the
+                # old check-then-remove gap this raced the removal.
+                item.status = STATUS_DOWNLOADING
+                return True
+
+            with mock.patch.object(
+                    queue, "_delete_result", side_effect=start_during_delete):
+                removed = queue.remove(item.id, delete_data=True)
+
+        self.assertFalse(removed)
+        self.assertIn(item, queue.items)
+
+    def test_save_state_uses_unique_temps_and_keeps_the_latest_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder) / "downloads.json"
+            queue = DownloadQueue(
+                self.config(), None, state_path=state, start_workers=False
+            )
+            item = DownloadItem("First", "ytdlp", "https://example.invalid/1")
+            queue.items = [item]
+            import os
+            temps = []
+            real_os_replace = os.replace
+
+            def capture_os_replace(src, dst):
+                temps.append(src)
+                return real_os_replace(src, dst)
+
+            with mock.patch("blinddl.downloader.os.replace",
+                            side_effect=capture_os_replace):
+                queue._save_state()
+                item.title = "Latest"
+                queue._save_state()
+
+            document = json.loads(state.read_text(encoding="utf-8"))
+            leftovers = [name for name in os.listdir(folder)
+                         if name.endswith(".tmp")]
+
+        self.assertEqual(document["items"][0]["title"], "Latest")
+        self.assertEqual(len(temps), 2)
+        self.assertEqual(len(set(temps)), 2)
+        self.assertEqual(leftovers, [])
+
     def test_corrupt_state_is_ignored_and_can_be_replaced(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder) / "downloads.json"

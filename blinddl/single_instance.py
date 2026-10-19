@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import threading
@@ -96,7 +97,10 @@ class RestoreServer:
                     message = self._read_message(connection)
                 except OSError:
                     continue
-            self._dispatch(message)
+            try:
+                self._dispatch(message)
+            except Exception:
+                logging.getLogger(__name__).exception("Could not handle instance request")
 
     @staticmethod
     def _read_message(connection) -> bytes:

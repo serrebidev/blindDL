@@ -2,8 +2,10 @@
 # This file is part of blindDL.
 # SPDX-License-Identifier: MIT
 
-import unittest
+import os
 import tempfile
+import threading
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -334,6 +336,48 @@ class YtDlpBackendTests(unittest.TestCase):
 
         self.assertEqual(result, "")
         self.assertEqual(len(_YoutubeDL.instances), 2)
+
+    def test_auto_cookie_temp_file_is_deleted_after_use(self):
+        def export(path, elevate=False):
+            Path(path).write_text("# Netscape HTTP Cookie File\n")
+
+        with (
+            mock.patch.object(ytdlp_backend.yt_dlp, "YoutubeDL", _YoutubeDL),
+            mock.patch("blinddl.browser_cookies.export_cookies",
+                       side_effect=export),
+        ):
+            ytdlp_backend.extract_flat(
+                "https://example.invalid/video", cookies_from_browser="auto")
+
+        cookiefile = _YoutubeDL.instances[0].options["cookiefile"]
+        self.assertIn("blinddl_cookies_", cookiefile)
+        self.assertFalse(os.path.exists(cookiefile))
+
+    def test_cancel_after_the_last_postprocessor_is_not_reported_done(self):
+        cancel = threading.Event()
+
+        class Finished(_YoutubeDL):
+            def download(self, urls):
+                cancel.set()
+
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", Finished), self.assertRaises(ytdlp_backend.DownloadCancelled):
+            ytdlp_backend.download("https://example/video", folder,
+                                   cancel_event=cancel)
+
+    def test_cancel_is_honoured_during_postprocessing(self):
+        class _Postprocess(_YoutubeDL):
+            def download(self, urls):
+                for hook in self.options["postprocessor_hooks"]:
+                    hook({"status": "started"})
+
+        cancel = threading.Event()
+        cancel.set()
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(
+                ytdlp_backend.yt_dlp, "YoutubeDL", _Postprocess), self.assertRaises(ytdlp_backend.DownloadCancelled):
+            ytdlp_backend.download(
+                "https://example.invalid/video", folder,
+                cancel_event=cancel)
 
     def test_watch_url_with_list_expands_to_the_whole_playlist(self):
         # yt-dlp only redirects watch?v=...&list=... to its playlist when the

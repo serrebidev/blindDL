@@ -269,22 +269,22 @@ class SubscriptionStore:
     def save(self):
         with self._lock:
             subs = copy.deepcopy(self.subs)
-        temporary = self.path + ".tmp"
-        try:
-            with open(temporary, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(subs, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
+            temporary = self.path + ".tmp"
             try:
-                os.chmod(temporary, 0o600)
+                with open(temporary, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(subs, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.chmod(temporary, 0o600)
+                except OSError:
+                    pass
+                os.replace(temporary, self.path)
             except OSError:
-                pass
-            os.replace(temporary, self.path)
-        except OSError:
-            try:
-                os.remove(temporary)
-            except OSError:
-                pass
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     # -- CRUD -------------------------------------------------------------
 
@@ -306,7 +306,7 @@ class SubscriptionStore:
             # items, an artist's releases, or a person's shared files.
             "kind": kind,
             "username": str(username or "").strip(),
-            "seen_ids": remembered[-MAX_SEEN_IDS:],
+            "seen_ids": remembered[-(MAX_SEEN_SHARED if kind == KIND_USER else MAX_SEEN_IDS):],
             "last_checked": None,
             # Newest first is the useful subscription default: it follows new
             # uploads instead of a hashtag/search page's changing trend list.
@@ -429,6 +429,10 @@ class SubscriptionStore:
             items, title = self.listing(sub)
         except Exception as exc:  # noqa: BLE001 - shown to the user
             return 0, str(exc)
+        with self._lock:
+            sub = next((row for row in self.subs if row["id"] == sub_id), None)
+            if sub is None or not sub.get("enabled", True):
+                return 0, ""
         if title:
             sub["title"] = title
         # Keep insertion order: the trim below has to drop the oldest ids,

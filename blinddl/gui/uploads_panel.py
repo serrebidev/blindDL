@@ -100,6 +100,8 @@ class UploadsPanel(wx.Panel):
             self.refresh()
 
     def refresh(self, soulseek_rows=None):
+        if not self._alive:
+            return
         soulseek_rows = (
             soulseek_backend.uploads_snapshot()
             if soulseek_rows is None
@@ -273,6 +275,8 @@ class UploadsPanel(wx.Panel):
                 except Exception as exc:  # noqa: BLE001 - reported in the GUI
                     errors.append(str(exc))
             def finish():
+                if not self._alive:
+                    return
                 self._signature = None
                 self.refresh()
                 suffix = f" First error: {errors[0]}" if errors else ""

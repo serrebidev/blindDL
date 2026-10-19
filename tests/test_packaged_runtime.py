@@ -24,13 +24,14 @@ from blinddl import __version__, torrent_engine, updater
 
 
 @pytest.fixture(autouse=True)
-def _forget_install_attempts():
+def _forget_install_attempts(tmp_path, monkeypatch):
     """Each test starts with nothing tried yet.
 
     The installer remembers what it has already failed to install, so it
     does not spawn a package manager per search for the rest of the session.
     That memory is process-wide, and these tests share a process.
     """
+    monkeypatch.setattr(updater, "app_data_dir", lambda: str(tmp_path))
     updater._install_attempted.clear()
     yield
     updater._install_attempted.clear()
@@ -630,6 +631,7 @@ def test_one_file_held_by_something_else_no_longer_loses_the_update(tmp_path):
     finally:
         holder.terminate()
         holder.wait(timeout=30)
+        holder.stdout.close()
         helper.unlink(missing_ok=True)
 
     # And blindDL finishes the job at its next start, once the hold is over.
@@ -693,6 +695,7 @@ def test_a_held_file_the_new_version_needs_is_still_a_rollback(tmp_path):
     finally:
         holder.terminate()
         holder.wait(timeout=30)
+        holder.stdout.close()
         helper.unlink(missing_ok=True)
 
 

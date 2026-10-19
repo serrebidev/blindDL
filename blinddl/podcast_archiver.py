@@ -21,7 +21,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
@@ -334,29 +334,48 @@ def _episode_aliases(episode):
 
 def deduplicate_episodes(episodes):
     """Merge copies while retaining the live feed's playable URL."""
-    unique = []
-    alias_rows = {}
     # A migrated feed can only be discovered inside an old snapshot.  In
     # that case its live version is read later, but its working enclosure is
     # still preferable to the archived row's old host URL.
-    ordered = sorted(
+    ordered = [episode for _position, episode in sorted(
         enumerate(episodes),
-        key=lambda pair: (bool(pair[1].get("archived_at")), pair[0]))
-    for _position, episode in ordered:
-        aliases = _episode_aliases(episode)
-        row = next((alias_rows[alias] for alias in aliases
-                    if alias in alias_rows), None)
-        if row is None:
-            row = len(unique)
-            unique.append(dict(episode))
-        else:
-            existing = unique[row]
-            for key, value in episode.items():
-                if not existing.get(key) and value:
-                    existing[key] = value
-            existing["copies_found"] = int(existing.get("copies_found") or 1) + 1
-        for alias in aliases:
-            alias_rows.setdefault(alias, row)
+        key=lambda pair: (bool(pair[1].get("archived_at")), pair[0]))]
+    # Union-find over aliases: one episode can bridge two groups that do
+    # not share an alias with each other (it kept the old GUID but moved
+    # hosts, say), and those groups are one episode all the same.
+    parent = list(range(len(ordered)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left, right):
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    alias_owner = {}
+    for index, episode in enumerate(ordered):
+        for alias in _episode_aliases(episode):
+            if alias in alias_owner:
+                union(index, alias_owner[alias])
+            else:
+                alias_owner[alias] = index
+    groups = {}
+    for index in range(len(ordered)):
+        groups.setdefault(find(index), []).append(index)
+    unique = []
+    for members in sorted(groups.values(), key=lambda group: group[0]):
+        merged = dict(ordered[members[0]])
+        for index in members[1:]:
+            for key, value in ordered[index].items():
+                if not merged.get(key) and value:
+                    merged[key] = value
+        if len(members) > 1:
+            merged["copies_found"] = len(members)
+        unique.append(merged)
     unique.sort(key=lambda item: (
         float(item.get("_published_ts") or 0),
         str(item.get("title") or "").casefold()), reverse=True)
@@ -368,9 +387,12 @@ def deduplicate_episodes(episodes):
     return unique
 
 
-def _request(get, url, *, params=None, timeout=DEFAULT_TIMEOUT_S):
+def _request(get, url, *, params=None, timeout=DEFAULT_TIMEOUT_S,
+             cancel_event=None):
     response = None
     for attempt in range(3):
+        if _cancelled(cancel_event):
+            raise PodcastArchiveCancelled("Podcast archive scan stopped.")
         try:
             response = get(
                 url, params=params, timeout=timeout,
@@ -395,7 +417,10 @@ def _request(get, url, *, params=None, timeout=DEFAULT_TIMEOUT_S):
             response_headers = getattr(response, "headers", {}) or {}
             retry_after = str(response_headers.get("Retry-After") or "")
             delay = float(retry_after) if retry_after.isdigit() else 0.5 * 2 ** attempt
-            time.sleep(min(delay, 10))
+            if cancel_event is None:
+                time.sleep(min(delay, 10))
+            elif cancel_event.wait(min(delay, 10)):
+                raise PodcastArchiveCancelled("Podcast archive scan stopped.")
     raise RuntimeError(f"Could not read {url}")
 
 
@@ -629,7 +654,7 @@ def resolve_podcast_url(value, *, get=requests.get,
 
 
 def wayback_captures(feed_url, max_snapshots=DEFAULT_MAX_SNAPSHOTS, *,
-                     get=requests.get, timeout=DEFAULT_TIMEOUT_S):
+                     get=requests.get, timeout=DEFAULT_TIMEOUT_S, cancel_event=None):
     """List unique successful Wayback captures of one exact feed URL."""
     response = _request(get, WAYBACK_CDX_URL, params={
         "url": feed_url,
@@ -638,7 +663,7 @@ def wayback_captures(feed_url, max_snapshots=DEFAULT_MAX_SNAPSHOTS, *,
         "filter": "statuscode:200",
         "collapse": "digest",
         "limit": max(1, min(int(max_snapshots), DEFAULT_MAX_SNAPSHOTS)),
-    }, timeout=timeout)
+    }, timeout=timeout, cancel_event=cancel_event)
     try:
         rows = response.json()
     except (ValueError, json.JSONDecodeError) as exc:
@@ -702,13 +727,15 @@ def archive_podcast(feed_url, include_wayback=True,
         visited.add(normalized)
         report(f"Reading current feed {len(visited)}: {requested_url}")
         try:
-            response = _request(get, requested_url, timeout=timeout)
+            response = _request(get, requested_url, timeout=timeout, cancel_event=cancel_event)
             final_url = _http_url(getattr(response, "url", "")) or requested_url
             document = parse_feed(response.content, final_url)
             documents.append(document)
             for related in (final_url, *document.related_urls):
                 if _normalized_feed_url(related) not in visited:
                     pending.append(related)
+        except PodcastArchiveCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - archives can still work
             warnings.append(f"Current feed {requested_url}: {exc}")
 
@@ -717,7 +744,10 @@ def archive_podcast(feed_url, include_wayback=True,
         report(f"Finding archived feed versions for {requested_url}")
         try:
             captures = wayback_captures(
-                requested_url, max_snapshots, get=get, timeout=timeout)
+                requested_url, max_snapshots, get=get, timeout=timeout,
+                cancel_event=cancel_event)
+        except PodcastArchiveCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - current feed is still useful
             warnings.append(f"Wayback index for {requested_url}: {exc}")
             continue
@@ -739,7 +769,8 @@ def archive_podcast(feed_url, include_wayback=True,
                 except (OSError, RuntimeError):
                     pass
             for attempt in range(3):
-                response = _request(get, capture.replay_url, timeout=timeout)
+                response = _request(get, capture.replay_url, timeout=timeout,
+                                    cancel_event=cancel_event)
                 try:
                     document = parse_feed(
                         response.content, capture.original, capture.timestamp)
@@ -753,7 +784,10 @@ def archive_podcast(feed_url, include_wayback=True,
                         response.content[:8192], re.IGNORECASE)
                     if looks_like_feed or attempt == 2:
                         raise
-                    time.sleep(1 * 2 ** attempt)
+                    if cancel_event is None:
+                        time.sleep(1 * 2 ** attempt)
+                    elif cancel_event.wait(1 * 2 ** attempt):
+                        raise PodcastArchiveCancelled("Podcast archive scan stopped.")
                     continue
                 if cache_file is not None:
                     try:
@@ -767,32 +801,39 @@ def archive_podcast(feed_url, include_wayback=True,
                 return capture, document
             raise RuntimeError("The archived feed could not be read.")
 
-        with ThreadPoolExecutor(max_workers=max(1, min(int(workers), 12))) as pool:
+        pool = ThreadPoolExecutor(max_workers=max(1, min(int(workers), 12)))
+        try:
             future_captures = {
                 pool.submit(read_capture, capture): capture
                 for capture in unique_captures
             }
             done = 0
-            for future in as_completed(future_captures):
+            unfinished = set(future_captures)
+            while unfinished:
                 if _cancelled(cancel_event):
-                    for unfinished in future_captures:
-                        unfinished.cancel()
                     raise PodcastArchiveCancelled("Podcast archive scan stopped.")
-                capture = future_captures[future]
-                done += 1
-                try:
-                    _capture, document = future.result()
-                    documents.append(document)
-                    snapshots_loaded += 1
-                    for related in document.related_urls:
-                        if _normalized_feed_url(related) not in visited:
-                            pending.append(related)
-                except Exception as exc:  # noqa: BLE001 - retain other captures
-                    warnings.append(
-                        f"Snapshot {capture.timestamp} of {capture.original}: {exc}")
-                report(
-                    f"Read {done} of {len(unique_captures)} archived versions",
-                    done, len(unique_captures))
+                completed, unfinished = wait(
+                    unfinished, timeout=0.1, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    capture = future_captures[future]
+                    done += 1
+                    try:
+                        _capture, document = future.result()
+                        documents.append(document)
+                        snapshots_loaded += 1
+                        for related in document.related_urls:
+                            if _normalized_feed_url(related) not in visited:
+                                pending.append(related)
+                    except PodcastArchiveCancelled:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - retain other captures
+                        warnings.append(
+                            f"Snapshot {capture.timestamp} of {capture.original}: {exc}")
+                    report(
+                        f"Read {done} of {len(unique_captures)} archived versions",
+                        done, len(unique_captures))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     if not documents:
         detail = warnings[0] if warnings else "No readable feed was found."

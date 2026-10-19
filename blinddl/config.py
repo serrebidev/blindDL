@@ -7,6 +7,7 @@
 import copy
 import json
 import os
+import threading
 
 from platformdirs import user_config_dir
 
@@ -326,6 +327,7 @@ class Config:
     def __init__(self):
         self.path = os.path.join(app_data_dir(), "config.json")
         self.data = copy.deepcopy(DEFAULTS)
+        self._save_lock = threading.Lock()
         self.load()
 
     def load(self):
@@ -386,22 +388,23 @@ class Config:
         self.save()
 
     def save(self):
-        temporary = self.path + ".tmp"
-        try:
-            with open(temporary, "w", encoding="utf-8", newline="\n") as f:
-                json.dump(self.data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
+        with self._save_lock:
+            temporary = self.path + ".tmp"
             try:
-                os.chmod(temporary, 0o600)
+                with open(temporary, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(self.data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.chmod(temporary, 0o600)
+                except OSError:
+                    pass
+                os.replace(temporary, self.path)
             except OSError:
-                pass
-            os.replace(temporary, self.path)
-        except OSError:
-            try:
-                os.remove(temporary)
-            except OSError:
-                pass
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
 
     def __getitem__(self, key):
         return self.data[key]

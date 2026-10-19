@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: MIT
 
 import os
+import tempfile
 import unittest
+from http.cookiejar import MozillaCookieJar
 from unittest import mock
 
 from Crypto.Cipher import AES, ChaCha20_Poly1305
@@ -84,11 +86,42 @@ class AppBoundCookieTests(unittest.TestCase):
             True,
         )
         fields = line.split("\t")
-        self.assertEqual(fields[0], ".music.apple.com")
+        self.assertEqual(fields[0], "#HttpOnly_.music.apple.com")
         self.assertEqual(fields[1], "TRUE")
         self.assertEqual(fields[5], "media-user-token")
         self.assertEqual(fields[6], "abc")
-        self.assertEqual(fields[7], "#HttpOnly_")
+        self.assertEqual(len(fields), 7)
+
+    def test_netscape_file_round_trips_through_mozilla_jar(self):
+        # Mozilla's loader rejects an HttpOnly cookie written as an eighth
+        # field, which is how the elevated export used to write them.
+        expires = (1_750_000_000 + 11_644_473_600) * 1_000_000
+        content = "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                "",
+                app_bound._netscape_line(
+                    ".music.apple.com", "media-user-token", "abc", "/",
+                    expires, True, True,
+                ),
+                app_bound._netscape_line(
+                    ".music.apple.com", "geo", "us", "/", expires, False, False,
+                ),
+                "",
+            ]
+        )
+        descriptor, path = tempfile.mkstemp(suffix=".txt")
+        try:
+            with os.fdopen(
+                descriptor, "w", encoding="utf-8", newline="\n"
+            ) as handle:
+                handle.write(content)
+            jar = MozillaCookieJar(path)
+            jar.load(ignore_discard=True, ignore_expires=True)
+        finally:
+            os.remove(path)
+        values = {cookie.name: cookie.value for cookie in jar}
+        self.assertEqual(values, {"media-user-token": "abc", "geo": "us"})
 
 
 if __name__ == "__main__":

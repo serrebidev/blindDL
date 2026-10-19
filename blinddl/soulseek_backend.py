@@ -1014,6 +1014,10 @@ class _Service:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
+        # Serializes loop creation: a second caller arriving while the loop
+        # thread is still starting must wait for it, not submit to a loop
+        # that does not exist yet.
+        self._loop_lock = threading.Lock()
         self._async_lock = None
         self._client = None
         self._active_signature = None
@@ -1341,13 +1345,19 @@ class _Service:
         client.events.register(TransferRemovedEvent, self._on_transfer_changed)
 
     def _ensure_loop(self):
-        if self._thread and self._thread.is_alive():
+        # Every caller waits for _loop_ready, not just the one that starts
+        # the thread: the thread is alive the moment start() returns, but
+        # self._loop only exists once _run_loop has made it, and submitting
+        # to a loop that does not exist yet loses the coroutine.
+        if self._loop_ready.is_set() and self._thread and self._thread.is_alive():
             return
-        self._loop_ready.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name="blinddl-soulseek"
-        )
-        self._thread.start()
+        with self._loop_lock:
+            if not (self._thread and self._thread.is_alive()):
+                self._loop_ready.clear()
+                self._thread = threading.Thread(
+                    target=self._run_loop, daemon=True, name="blinddl-soulseek"
+                )
+                self._thread.start()
         self._loop_ready.wait(5)
         if self._loop is None:
             raise SoulseekError("Could not start the Soulseek background service.")
@@ -1367,8 +1377,14 @@ class _Service:
         loop.close()
 
     def _submit(self, coroutine):
-        self._ensure_loop()
-        return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        try:
+            self._ensure_loop()
+            return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except BaseException:
+            # A coroutine that was never submitted must still be closed, or
+            # it is reported as never awaited when it is collected.
+            coroutine.close()
+            raise
 
     async def _keep_session(self):
         """Sign back in while nobody is asking Soulseek for anything.

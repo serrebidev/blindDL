@@ -70,6 +70,28 @@ class SingleInstanceTests(unittest.TestCase):
             path.write_text('{"port": 1}', encoding="utf-8")
             self.assertFalse(notify_existing(path, timeout=0.1))
 
+    def test_a_failed_restore_callback_does_not_stop_later_requests(self):
+        failed = threading.Event()
+        restored = threading.Event()
+
+        def restore():
+            if not failed.is_set():
+                failed.set()
+                raise RuntimeError("frame not ready")
+            restored.set()
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "instance.json"
+            server = RestoreServer(restore, path).start()
+            try:
+                self.assertTrue(notify_existing(path, timeout=1))
+                self.assertTrue(failed.wait(2))
+                self.assertTrue(notify_existing(path, timeout=1))
+                self.assertTrue(restored.wait(2))
+                self.assertTrue(server._thread.is_alive())
+            finally:
+                server.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

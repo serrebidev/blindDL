@@ -514,6 +514,42 @@ class AppleMusicDownloadTests(unittest.TestCase):
                 os.path.isfile(os.path.join(subfolder, "03 Two.m4a")))
             self.assertEqual(len(run.call_args_list), 2)
 
+    def test_download_album_skips_idless_and_disambiguates_same_titles(self):
+        api = mock.Mock()
+        api.client.get.return_value = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"data": [{
+                "attributes": {"name": "Album"},
+                "relationships": {"tracks": {"data": [
+                    {"attributes": {}},
+                    {"id": "1", "attributes": {"playParams": {"catalogId": "1"}}},
+                    {"id": "2", "attributes": {"playParams": {"catalogId": "2"}}},
+                ]}},
+            }]},
+        )
+        api.getsong.side_effect = [
+            {"data": [{"id": "1", "attributes": {"name": "Same"}}]},
+            {"data": [{"id": "2", "attributes": {"name": "Same"}}]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(applemusic_backend, "_authenticated_api",
+                                   return_value=(api, None)), \
+                 mock.patch("musicdl.modules.utils.appleutils."
+                            "AppleMusicClientDownloadSongUtils.getdownloaditem",
+                            side_effect=[self._fake_item(),
+                                         self._fake_item()]), \
+                 mock.patch.object(applemusic_backend.subprocess, "run") as run, \
+                 self._patch_download_tools(run):
+                applemusic_backend.download(
+                    "https://music.apple.com/us/album/x/9", tmp,
+                    {"apple_music_cookies": "/x"})
+            subfolder = os.path.join(tmp, "Album")
+            self.assertEqual(api.getsong.call_count, 2)
+            self.assertTrue(os.path.isfile(
+                os.path.join(subfolder, "03 Same.m4a")))
+            self.assertTrue(os.path.isfile(
+                os.path.join(subfolder, "03 Same (2).m4a")))
+
     def test_download_album_without_tracks_errors(self):
         api = mock.Mock()
         api.client.get.return_value = SimpleNamespace(
@@ -527,6 +563,30 @@ class AppleMusicDownloadTests(unittest.TestCase):
                     applemusic_backend.download(
                         "https://music.apple.com/us/album/x/9", tmp,
                         {"apple_music_cookies": "/x"})
+
+
+class AppleMusicRegressionTests(unittest.TestCase):
+    def test_safe_name_dotdot_cannot_traverse(self):
+        self.assertEqual(applemusic_backend._safe_name(".."), "Unknown")
+        self.assertEqual(applemusic_backend._safe_name("."), "Unknown")
+
+    def test_evil_hosts_are_not_apple_music(self):
+        self.assertFalse(applemusic_backend.is_apple_music_url(
+            "https://evil.example/music.apple.com/us/song/x/1"))
+        self.assertFalse(applemusic_backend.is_apple_music_url(
+            "https://notmusic.apple.com/us/song/123"))
+        self.assertIsNone(applemusic_backend.parse_apple_url(
+            "https://notmusic.apple.com/us/song/123"))
+        self.assertTrue(applemusic_backend.is_apple_music_url(
+            "https://music.apple.com/us/song/123"))
+
+    def test_unique_out_path_disambiguates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "Song.m4a")
+            with open(path, "wb") as fh:
+                fh.write(b"x")
+            self.assertTrue(applemusic_backend._unique_out_path(path)
+                            .endswith("Song (2).m4a"))
 
 
 class AppleMusicBrowseTests(unittest.TestCase):

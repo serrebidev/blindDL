@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import tempfile
 import threading
 import time
 import types
@@ -993,6 +994,50 @@ class AdultProviderTests(unittest.TestCase):
         )
         for key in ("thisvid", "mymusclevideo", "pornhub", "gay0day"):
             self.assertIsNone(adult_backend.stream_fix_for(key))
+
+    def test_spankbang_download_builds_hls_configuration(self):
+        received = []
+
+        class Video:
+            async def download(self, *, configuration_hls, use_hls):
+                received.append((configuration_hls, use_hls))
+                configuration_hls.callback(4, 4)
+                return True
+
+        client = types.SimpleNamespace(
+            get_video=mock.AsyncMock(return_value=Video()))
+        module = types.SimpleNamespace(DownloadConfigHLS=types.SimpleNamespace)
+        progress = mock.Mock()
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(adult_backend, "_import_provider",
+                                   return_value=(module, client)):
+                adult_backend.download(
+                    {"provider": "spankbang", "url": "https://spankbang.com/v"},
+                    folder, progress_cb=progress)
+            self.assertEqual(received[0][0].path, folder)
+        self.assertEqual(received[0][0].quality, "best")
+        self.assertTrue(received[0][1])
+        progress.assert_called_once_with(4, 4)
+
+    def test_failed_tube_endpoint_lookup_is_retried(self):
+        page = '<div data-v-update-url="https://u3.icegay.tv/video"></div>'
+        with mock.patch.dict(adult_backend._tube_sign_endpoints, {}, clear=True), mock.patch.object(adult_backend.requests, "get", side_effect=[
+                    adult_backend.requests.Timeout("offline"), _Response(page)]):
+            self.assertIsNone(adult_backend._tube_sign_endpoint(
+                "https://www.icegay.tv/movies/1/x"))
+            self.assertEqual(adult_backend._tube_sign_endpoint(
+                "https://www.icegay.tv/movies/1/x"),
+                "https://u3.icegay.tv/ah/sign")
+
+    def test_hls_relative_variants_keep_bandwidth_pairing(self):
+        master = (
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200\n"
+            "#comment\n480/index.m3u8\n"
+            "unpaired.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=100\n"
+            "720/index.m3u8\n")
+        self.assertEqual(adult_backend._best_hls_variant(
+            master, "https://cdn.example/master/index.m3u8"),
+            "https://cdn.example/master/480/index.m3u8")
 
     def test_tube_sign_info_leaves_fresh_keys_alone(self):
         info = {

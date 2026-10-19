@@ -135,6 +135,14 @@ def _cookie_attempts(cookies_from_browser, cookies_file):
     return attempts
 
 
+class _TempCookieOpts(dict):
+    """Cookie opts whose file is a temporary plaintext export to delete."""
+
+    def __init__(self, path):
+        super().__init__(cookiefile=path)
+        self.temp_path = path
+
+
 def _automatic_cookie_file():
     """Export a cookies.txt from an installed browser, without elevation.
 
@@ -159,7 +167,7 @@ def _automatic_cookie_file():
         except OSError:
             pass
         return {}
-    return {"cookiefile": path}
+    return _TempCookieOpts(path)
 
 
 def _with_cookie_fallback(cookies_from_browser, cookies_file, make_opts, run):
@@ -170,23 +178,35 @@ def _with_cookie_fallback(cookies_from_browser, cookies_file, make_opts, run):
     A :class:`CookieLoadError` moves to the next attempt; every other
     exception propagates untouched.
     """
+    attempts = _cookie_attempts(cookies_from_browser, cookies_file)
     last_error = None
-    for cookie_opts in _cookie_attempts(cookies_from_browser, cookies_file):
-        try:
-            return run(make_opts(cookie_opts))
-        except CookieLoadError as exc:
-            last_error = exc
-            continue
-        except yt_dlp.utils.DownloadError as exc:
-            # download() and resolve_stream() do not set ignoreerrors, so
-            # yt-dlp's cookiejar catches the CookieLoadError and re-raises it
-            # as a DownloadError prefixed with "ERROR:". Recognise that
-            # wrapped form (its __context__ is the CookieLoadError) and treat
-            # it like the direct error: move to the next cookie attempt.
-            if isinstance(exc.__context__, CookieLoadError):
+    try:
+        for cookie_opts in attempts:
+            try:
+                return run(make_opts(cookie_opts))
+            except CookieLoadError as exc:
                 last_error = exc
                 continue
-            raise
+            except yt_dlp.utils.DownloadError as exc:
+                # download() and resolve_stream() do not set ignoreerrors, so
+                # yt-dlp's cookiejar catches the CookieLoadError and re-raises it
+                # as a DownloadError prefixed with "ERROR:". Recognise that
+                # wrapped form (its __context__ is the CookieLoadError) and treat
+                # it like the direct error: move to the next cookie attempt.
+                if isinstance(exc.__context__, CookieLoadError):
+                    last_error = exc
+                    continue
+                raise
+    finally:
+        # An auto-exported cookies file is plaintext credentials on disk;
+        # it must not outlive the operation it was exported for.
+        for cookie_opts in attempts:
+            temp_path = getattr(cookie_opts, "temp_path", "")
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
     if last_error is not None:
         raise last_error
     raise RuntimeError(
@@ -734,6 +754,8 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
             completed_paths.append(str(d["filename"]))
 
     def postprocessor_hook(d):
+        if cancel_event is not None and cancel_event.is_set():
+            raise DownloadCancelled()
         if d.get("status") != "finished":
             return
         info = d.get("info_dict") or {}
@@ -841,6 +863,8 @@ def download(url, out_dir, audio_only=True, audio_format="mp3",
         if cancel_event is not None and cancel_event.is_set():
             raise DownloadCancelled()
         raise
+    if cancel_event is not None and cancel_event.is_set():
+        raise DownloadCancelled()
     final_path = next(
         (path for path in reversed(completed_paths) if os.path.isfile(path)),
         "",

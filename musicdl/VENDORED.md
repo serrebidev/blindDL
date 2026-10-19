@@ -35,3 +35,5 @@ for its token pool and answers with no results when that pool is unreachable.
 
 Qingting and Ximalaya search now initialize their search type before creating
 the progress task. Offline regression tests cover album and track searches.
+
+Silent logging now closes each appended log file, preventing file-handle leaks.

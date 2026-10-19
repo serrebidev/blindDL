@@ -219,6 +219,7 @@ class SubsPanel(wx.Panel):
     def __init__(self, parent, frame):
         super().__init__(parent)
         self.frame = frame
+        self.closing = False
         self.displayed_subs = []
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -272,6 +273,9 @@ class SubsPanel(wx.Panel):
         self.refresh()
 
     # -- display -----------------------------------------------------------
+
+    def shutdown(self):
+        self.closing = True
 
     def refresh(self):
         selected_ids = {
@@ -479,6 +483,8 @@ class SubsPanel(wx.Panel):
                      order, kind, username)
 
     def _add_failed(self, error, kind=subscriptions.KIND_FEED):
+        if self.closing:
+            return
         self.frame.announce("Could not add subscription.")
         what = {
             subscriptions.KIND_ARTIST: "Could not follow that artist",
@@ -490,6 +496,8 @@ class SubsPanel(wx.Panel):
     def _add_done(self, url, title, items, download_existing,
                   order=search_order.ORDER_RECENT,
                   kind=subscriptions.KIND_FEED, username=""):
+        if self.closing:
+            return
         self.frame.subs.add(
             url, title, [i["id"] for i in items], order=order, kind=kind,
             username=username)
@@ -579,6 +587,8 @@ class SubsPanel(wx.Panel):
         wx.CallAfter(self._check_done, total, errors)
 
     def _check_done(self, count, errors):
+        if self.closing:
+            return
         self.refresh()
         if errors:
             noun = "check" if len(errors) == 1 else "checks"

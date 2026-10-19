@@ -191,10 +191,11 @@ def write_transcript(media_path):
     # Everything the one request left behind goes, including any second
     # language or a shape this reader cannot take: the words are in the
     # transcript now, and a stray caption file beside a download is nobody's.
-    for caption in caption_files(
-            media_path, CAPTION_EXTENSIONS + OTHER_CAPTION_EXTENSIONS):
-        try:
-            os.remove(caption)
-        except OSError:
-            pass
+    base = glob.escape(os.path.splitext(str(media_path))[0])
+    for extension in CAPTION_EXTENSIONS + OTHER_CAPTION_EXTENSIONS:
+        for caption in glob.glob(base + ".*" + extension):
+            try:
+                os.remove(caption)
+            except OSError:
+                pass
     return target

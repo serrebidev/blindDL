@@ -75,7 +75,7 @@ def search(query, config=None, order=None):
     except Exception:
         return []
     return [_item_from_result(r) for r in data.get("results", [])
-            if r.get("type") in ("a", "t")]
+            if r.get("type") in ("a", "t", "b") and r.get("id")]
 
 
 def extract_flat(url, config=None):

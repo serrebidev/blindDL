@@ -564,6 +564,15 @@ class CoverFetchTests(unittest.TestCase):
         self.assertIsNone(data)
         self.assertEqual(mime, "")
 
+    def test_fetch_cover_closes_response(self):
+        body = b"\xff\xd8\xff" + b"0" * 32
+        response = self._response(body)
+        response.close = mock.Mock()
+        with mock.patch.object(music_tags.requests, "get",
+                               return_value=response):
+            music_tags.fetch_cover("https://example.invalid/a.jpg")
+        response.close.assert_called_once()
+
     def test_an_oversized_master_is_not_embedded(self):
         with mock.patch.object(music_tags.requests, "get",
                                return_value=self._response(

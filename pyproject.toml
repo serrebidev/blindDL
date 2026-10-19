@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blindDL"
-version = "0.25.0"
+dynamic = ["version"]
 description = "Accessible cross-platform media downloader"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,6 +29,9 @@ dependencies = [
   # Dolphin, and on a Braille display. blindDL falls back to NVDA's and
   # JAWS' own APIs where it is missing, so it stays optional at runtime.
   "accessible-output2>=0.17; platform_system == 'Windows'",
+  # Reads Chromium's app-bound (v20) cookie store through the elevated
+  # helper; only Windows has that encryption.
+  "pywin32>=312; platform_system == 'Windows'",
   # musicdl is vendored at its current upstream HEAD because its published
   # metadata pins a vulnerable cryptography release. Keep these requirements
   # aligned with requirements-musicdl.txt and musicdl/VENDORED.md. gamdl is
@@ -110,6 +113,9 @@ dependencies = [
   "unofficial-api-for-xvideos @ git+https://github.com/EchterAlsFake/unofficial-api-for-xvideos",
   "unofficial-api-for-youporn @ git+https://github.com/EchterAlsFake/unofficial-api-for-youporn",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "blinddl.__version__" }
 
 [project.urls]
 Homepage = "https://github.com/serrebidev/blindDL"

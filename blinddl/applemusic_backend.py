@@ -68,13 +68,14 @@ APPLE_OUTPUT_FORMATS = {
 # links: /{cc}/{type}/... where type is a known media type, so a bare
 # music.apple.com page never gets routed to this backend.
 _APPLE_URL_RE = re.compile(
-    r"(?:geo\.|embed\.)?music\.apple\.com/(?:[a-z]{2}/)?"
+    r"^https?://(?:(?:geo|embed)\.)?music\.apple\.com/(?:[a-z]{2}/)?"
     r"(?:songs?|albums?|playlists?|artists?|music-videos?|posts?|stations?"
     r"|library-songs?|library-albums?|library-playlists?)/",
     re.IGNORECASE)
 # Legacy iTunes storefront links: itunes.apple.com/us/album/{slug}/id123
 _ITUNES_STORE_URL_RE = re.compile(
-    r"itunes\.apple\.com/[^/]+/(?:album|playlist|artist)/", re.IGNORECASE)
+    r"^https?://itunes\.apple\.com/[^/]+/(?:album|playlist|artist)/",
+    re.IGNORECASE)
 _ITUNES_ID_PART_RE = re.compile(r"^id(\d+)$", re.IGNORECASE)
 
 _MEDIA_TYPE_MAP = {
@@ -111,7 +112,9 @@ def parse_apple_url(url):
         return None
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-    if not (host.endswith("music.apple.com") or host == "itunes.apple.com"):
+    if not (host == "music.apple.com"
+            or host.endswith(".music.apple.com")
+            or host == "itunes.apple.com"):
         return None
     query = parse_qs(parsed.query)
     sub_id = (query.get("i") or [None])[0]
@@ -652,9 +655,30 @@ def _attr(resource, name):
     return (resource.get("attributes") or {}).get(name) or ""
 
 
-def _safe_name(name):
-    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(name or "").strip())
-    return cleaned or "Unknown"
+def _safe_name(name, fallback="Unknown"):
+    # Mirror creator_backend._safe_component (read-only there): strip
+    # illegal/control chars, collapse whitespace, strip dots/spaces and
+    # reject reserved names, so ".." can never traverse.
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")[:150].rstrip(" .")
+    if not cleaned or cleaned.upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+    }:
+        return fallback
+    return cleaned
+
+
+def _unique_out_path(path):
+    """A path that does not overwrite an existing file: 'Name (2).ext'."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    number = 2
+    while os.path.exists(f"{stem} ({number}){ext}"):
+        number += 1
+    return f"{stem} ({number}){ext}"
 
 
 def _check_cancelled(cancel_event):
@@ -813,8 +837,8 @@ def _download_song(api, itunes_api, metadata, playlist_metadata, target_dir,
         title = f"{int(track_no):02d} {title}"
     output_format = (APPLE_OUTPUT_FORMATS.get(audio_format)
                      or APPLE_OUTPUT_FORMATS["m4a"])
-    out_path = os.path.join(
-        target_dir, f"{_safe_name(title)}.{output_format['ext']}")
+    out_path = _unique_out_path(os.path.join(
+        target_dir, f"{_safe_name(title)}.{output_format['ext']}"))
     _check_cancelled(cancel_event)
     if output_format["ext"] == "m4a":
         _download_stream(stream.stream_url, decryption_key, out_path,
@@ -896,11 +920,20 @@ def download(url, out_dir, config=None, progress_cb=None, cancel_event=None):
     target_dir = os.path.join(out_dir, _safe_name(
         _attr(collection, "name") or kind_name))
     os.makedirs(target_dir, exist_ok=True)
+    downloaded = 0
     for track in tracks:
         _check_cancelled(cancel_event)
-        metadata = _catalog_song(api, _track_id(track))
+        catalog_id = _track_id(track)
+        if not catalog_id:
+            # A track without a catalog id cannot be fetched; skipping it
+            # must not abort the rest of the album/playlist.
+            continue
+        metadata = _catalog_song(api, catalog_id)
         _download_song(api, itunes_api, metadata, collection, target_dir,
                        cancel_event, audio_format=audio_format)
+        downloaded += 1
+    if not downloaded:
+        raise RuntimeError(f"The Apple Music {kind_name.lower()} has no tracks.")
     return target_dir
 
 

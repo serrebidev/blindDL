@@ -38,9 +38,13 @@ class GamdlBackendTests(unittest.TestCase):
             process.poll.side_effect = [None, 0]
             process.returncode = 0
 
+            def fake_popen(*args, **kwargs):
+                (Path(tmp) / "song.m4a").write_bytes(b"audio")
+                return process
+
             with (
                 mock.patch.object(gamdl_backend, "find_gamdl", return_value="gamdl"),
-                mock.patch.object(subprocess, "Popen", return_value=process) as popen,
+                mock.patch.object(subprocess, "Popen", side_effect=fake_popen) as popen,
                 mock.patch.object(gamdl_backend.time, "sleep"),
             ):
                 result = gamdl_backend.download(
@@ -55,6 +59,24 @@ class GamdlBackendTests(unittest.TestCase):
             self.assertEqual(command[command.index("--cookies-path") + 1], str(cookies))
             self.assertEqual(command[command.index("--output-path") + 1], os.path.abspath(tmp))
             self.assertEqual(result, os.path.abspath(tmp))
+
+    def test_download_without_a_new_file_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cookies = Path(tmp) / "cookies.txt"
+            cookies.write_text("# Netscape", encoding="utf-8")
+            (Path(tmp) / "old.m4a").write_bytes(b"old")
+            process = mock.Mock()
+            process.poll.side_effect = [None, 0]
+            process.returncode = 0
+            with (
+                mock.patch.object(gamdl_backend, "find_gamdl", return_value="gamdl"),
+                mock.patch.object(subprocess, "Popen", return_value=process),
+                mock.patch.object(gamdl_backend.time, "sleep"),
+                self.assertRaisesRegex(RuntimeError, "non-empty file"),
+            ):
+                gamdl_backend.download(
+                    "https://music.apple.com/ca/song/example/123",
+                    tmp, {"apple_music_cookies": str(cookies)})
 
     def test_download_cancels_running_gamdl(self):
         with tempfile.TemporaryDirectory() as tmp:

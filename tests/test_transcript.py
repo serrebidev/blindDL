@@ -110,6 +110,21 @@ class TranscriptFileTests(unittest.TestCase):
         self.assertFalse(os.path.exists(
             os.path.join(self.folder, "Show [dQw4w9].txt")))
 
+    def test_all_caption_languages_go_after_a_transcript_is_saved(self):
+        media = self._write("Show [dQw4w9].mp3", "")
+        english = self._write("Show [dQw4w9].en.vtt", SUBRIP)
+        french = self._write("Show [dQw4w9].fr.vtt", SUBRIP)
+        other = self._write("Show [dQw4w9].fr.json3", "{}")
+        unrelated = self._write("Other.fr.vtt", SUBRIP)
+
+        target = transcript.write_transcript(media)
+
+        self.assertTrue(os.path.exists(target))
+        self.assertFalse(os.path.exists(english))
+        self.assertFalse(os.path.exists(french))
+        self.assertFalse(os.path.exists(other))
+        self.assertTrue(os.path.exists(unrelated))
+
     def test_captions_with_nothing_readable_are_kept(self):
         media = self._write("Show [dQw4w9].mp3", "")
         captions = self._write("Show [dQw4w9].en.vtt", "WEBVTT\n\n")

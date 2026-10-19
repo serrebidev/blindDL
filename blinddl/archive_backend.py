@@ -474,9 +474,19 @@ def download(item, out_dir, progress_cb=None, cancel_event=None):
         if not extension:
             extension = ".mp4" if entry.get("video") else ".mp3"
         stem = safe_filename(os.path.splitext(os.path.basename(name))[0])
-        path = os.path.join(
-            folder, stem + extension if single
-            else f"{index:0{width}d} - {stem}{extension}")
+        base_name = stem + extension if single else f"{index:0{width}d} - {stem}{extension}"
+        path = os.path.join(folder, base_name)
+        expected_size = int(entry.get("size_bytes") or 0)
+        suffix = 1
+        while os.path.exists(path):
+            existing_size = os.path.getsize(path)
+            if existing_size > 0 and (not expected_size
+                                      or existing_size == expected_size):
+                break
+            suffix += 1
+            alt_stem = (f"{stem} ({suffix})" if single
+                        else f"{index:0{width}d} - {stem} ({suffix})")
+            path = os.path.join(folder, alt_stem + extension)
         last_path = path
         if os.path.exists(path) and os.path.getsize(path) > 0:
             downloaded_total += os.path.getsize(path)
@@ -522,7 +532,7 @@ def _download_file(url, path, already, total, progress_cb, cancel_event):
                 # could say so.
                 if resume_from and response.status_code == 416:
                     os.replace(partial, path)
-                    return 0
+                    return resume_from
                 response.raise_for_status()
                 # A server that ignored the Range answers 200 with the whole
                 # file, so what is on disk is worthless and the write starts

@@ -46,18 +46,22 @@ class LoggerHandle():
     '''log'''
     @staticmethod
     def log(level, message): logging.getLogger(LoggerHandle.appname).log(level, str(message))
+    @staticmethod
+    def _write_file(message):
+        with open(LoggerHandle.log_file_path, 'a', encoding='utf-8') as handle:
+            handle.write(message + '\n')
     '''debug'''
     @staticmethod
-    def debug(message: str, disable_print: bool = False): message = str(message); open(LoggerHandle.log_file_path, 'a', encoding='utf-8').write(message + '\n') if disable_print else LoggerHandle.log(logging.DEBUG, message)
+    def debug(message: str, disable_print: bool = False): message = str(message); LoggerHandle._write_file(message) if disable_print else LoggerHandle.log(logging.DEBUG, message)
     '''info'''
     @staticmethod
-    def info(message: str, disable_print: bool = False): message = str(message); open(LoggerHandle.log_file_path, 'a', encoding='utf-8').write(message + '\n') if disable_print else LoggerHandle.log(logging.INFO, message)
+    def info(message: str, disable_print: bool = False): message = str(message); LoggerHandle._write_file(message) if disable_print else LoggerHandle.log(logging.INFO, message)
     '''warning'''
     @staticmethod
-    def warning(message: str, disable_print: bool = False): message = str(message); open(LoggerHandle.log_file_path, 'a', encoding='utf-8').write(message + '\n') if disable_print else LoggerHandle.log(logging.WARNING, message if '\033[31m' in message else colorize(message, 'red'))
+    def warning(message: str, disable_print: bool = False): message = str(message); LoggerHandle._write_file(message) if disable_print else LoggerHandle.log(logging.WARNING, message if '\033[31m' in message else colorize(message, 'red'))
     '''error'''
     @staticmethod
-    def error(message: str, disable_print: bool = False): message = str(message); open(LoggerHandle.log_file_path, 'a', encoding='utf-8').write(message + '\n') if disable_print else LoggerHandle.log(logging.ERROR, message if '\033[31m' in message else colorize(message, 'red'))
+    def error(message: str, disable_print: bool = False): message = str(message); LoggerHandle._write_file(message) if disable_print else LoggerHandle.log(logging.ERROR, message if '\033[31m' in message else colorize(message, 'red'))
 
 
 '''colorize'''

@@ -405,6 +405,10 @@ class _Torrent:
         # Set once the payload is complete; seeding limits run from it.
         self.finished_at = 0.0
         self.stopping = False
+        # Active download() callers sharing this torrent (the same info
+        # hash can be queued from more than one source). Only the last
+        # one out may take the torrent out of the session.
+        self.refs = 0
 
 
 class TorrentEngine:
@@ -460,6 +464,7 @@ class TorrentEngine:
         with self._lock:
             existing = self._torrents.get(key)
             if existing is not None:
+                existing.refs += 1
                 return existing
             resume = self._read_resume(key)
             if resume is not None:
@@ -478,6 +483,7 @@ class TorrentEngine:
             torrent = _Torrent(
                 key, handle, str(item.get("title") or "Torrent"), save_path
             )
+            torrent.refs = 1
             self._torrents[key] = torrent
         return torrent
 
@@ -528,6 +534,28 @@ class TorrentEngine:
         return atp
 
     def remove(self, torrent, delete_files=False):
+        """Release one download() caller's hold on a torrent.
+
+        The torrent leaves the session only when its last active caller
+        goes; a shared torrent must survive one row being cancelled or
+        failing while another row is still downloading it.
+        """
+        with self._lock:
+            refs = getattr(torrent, "refs", 1)
+            if isinstance(refs, int) and refs > 1:
+                torrent.refs = refs - 1
+                return
+            torrent.refs = 0
+            self._remove_now(torrent, delete_files=delete_files)
+
+    def release(self, torrent):
+        """Drop one caller's hold without removing a seeding torrent."""
+        with self._lock:
+            refs = getattr(torrent, "refs", 0)
+            if isinstance(refs, int) and refs > 0:
+                torrent.refs = refs - 1
+
+    def _remove_now(self, torrent, delete_files=False):
         """Take a torrent out of the session, optionally deleting its data."""
         lt = self._lt
         with self._lock:
@@ -553,7 +581,7 @@ class TorrentEngine:
             torrent = self._torrents.get(str(key or "").lower())
         if torrent is None:
             return False
-        self.remove(torrent)
+        self._remove_now(torrent)
         return True
 
     def pause_seeding(self, key):
@@ -595,7 +623,7 @@ class TorrentEngine:
             torrent = self._torrents.get(str(key or "").lower())
         if torrent is None:
             return False
-        self.remove(torrent, delete_files=True)
+        self._remove_now(torrent, delete_files=True)
         return True
 
     def seeding(self):
@@ -692,10 +720,10 @@ class TorrentEngine:
         now = time.time()
         for torrent, status in statuses:
             if ratio_limit > 0 and _ratio(status) >= ratio_limit:
-                self.remove(torrent)
+                self._remove_now(torrent)
             elif (minute_limit > 0 and
                     now - torrent.finished_at >= minute_limit * 60):
-                self.remove(torrent)
+                self._remove_now(torrent)
 
     def set_seed_limits(self, config):
         """Copy the seeding limits in, so the upkeep thread holds no config."""
@@ -934,17 +962,22 @@ def download(item, out_dir, config, progress_cb=None, cancel_event=None,
         try:
             status = torrent.handle.status()
         except RuntimeError as exc:
+            current.release(torrent)
             raise TorrentEngineError(f"That torrent was dropped: {exc}") from exc
 
         message = _status_error(status)
         if message:
-            current.remove(torrent, delete_files=delete_partial)
+            # An error is not a cancellation: keep the partial data and
+            # resume state so a retry continues instead of starting over.
+            # Only an explicit cancel honours torrent_delete_partial.
+            current.remove(torrent, delete_files=False)
             raise TorrentEngineError(message)
 
         report(**_progress(status))
         if status.is_finished or status.is_seeding:
             break
         time.sleep(POLL_SECONDS)
+    current.release(torrent)
 
     # Only stamp the finish time the first time it completes. Re-downloading a
     # torrent that is already seeding (a known hash returns the same _Torrent)

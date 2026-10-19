@@ -316,7 +316,22 @@ class DownloadQueue:
                         relative_path.casefold())
 
         if kind == "torrent":
+            # The info hash is the torrent's identity, whichever field it
+            # arrived in: the hash field, the magnet that carries it, or
+            # the .torrent file on disk. Source, title and tracker URLs
+            # for the same hash are the same download.
             infohash = str(cls._payload_value(payload, "infohash") or "").strip()
+            if not infohash:
+                infohash = torrent_backend.infohash_from_magnet(
+                    cls._payload_value(payload, "magnet"))
+            if not infohash:
+                infohash = torrent_backend.infohash_from_magnet(
+                    cls._payload_value(payload, "download_url"))
+            torrent_path = str(
+                cls._payload_value(payload, "torrent_path") or "").strip()
+            if not infohash and torrent_path:
+                infohash = torrent_backend.infohash_from_torrent_file(
+                    torrent_path)
             if infohash:
                 return (kind, "infohash", infohash.casefold())
             for name in ("download_url", "magnet", "id"):
@@ -650,12 +665,18 @@ class DownloadQueue:
 
     def remove(self, item_id, delete_data=False):
         """Remove a non-running queue row and optionally its known result."""
-        item = self._find(item_id)
-        if item is None or item.status == STATUS_DOWNLOADING or item.seeding:
-            return False
-        if delete_data and not self._delete_result(item):
-            return False
+        # Check, data deletion and removal happen under the one condition
+        # the workers transition statuses under, so a queued row cannot
+        # start (or start seeding) between the check and its removal.
         with self._cond:
+            item = self._find(item_id)
+            if (item is None or item.status == STATUS_DOWNLOADING
+                    or item.seeding):
+                return False
+            if delete_data and not self._delete_result(item):
+                return False
+            if item.status == STATUS_DOWNLOADING or item.seeding:
+                return False
             try:
                 self.items.remove(item)
             except ValueError:
@@ -740,7 +761,8 @@ class DownloadQueue:
                 if item.kind != "torrent" or not item.seeding:
                     continue
                 payload = item.payload if isinstance(item.payload, dict) else {}
-                infohash = str(payload.get("infohash") or "").casefold()
+                infohash = str(payload.get("infohash") or "").casefold() or (
+                    torrent_backend.infohash_from_magnet(payload.get("magnet")))
                 if infohash == key or (
                     not infohash and title and item.title.casefold() == title
                 ):
@@ -761,13 +783,17 @@ class DownloadQueue:
                 if item.kind != "torrent" or item.status != STATUS_DONE:
                     continue
                 payload = item.payload if isinstance(item.payload, dict) else {}
-                infohash = str(payload.get("infohash") or "").casefold()
+                infohash = str(payload.get("infohash") or "").casefold() or (
+                    torrent_backend.infohash_from_magnet(payload.get("magnet")))
                 item.seeding = (
                     infohash in active
                     if infohash
                     else item.title.casefold() in active.values()
                 )
-            self._save_state(force=True)
+        # Saved outside the condition: _save_state takes it itself (after
+        # the save lock), and holding it here would invert that order.
+        self._save_state(force=True)
+        with self._cond:
             self._shutting_down = True
         # Nothing will be downloading any more, so the computer is free to
         # sleep the moment blindDL closes.
@@ -970,14 +996,18 @@ class DownloadQueue:
     def _save_state(self, force=False):
         if not self._state_path or (self._shutting_down and not force):
             return
-        with self._cond:
-            document = {
-                "version": self.STATE_VERSION,
-                "items": [self._item_record(item) for item in self.items],
-            }
-        parent = os.path.dirname(os.path.abspath(self._state_path))
-        temporary = self._state_path + ".tmp"
+        # Snapshot and write under the save lock together: a snapshot taken
+        # before waiting for the lock could be written after a newer one
+        # and silently roll the saved queue back. The temporary name is
+        # unique per save so writers never share (or clean up) one file.
         with self._save_lock:
+            with self._cond:
+                document = {
+                    "version": self.STATE_VERSION,
+                    "items": [self._item_record(item) for item in self.items],
+                }
+            parent = os.path.dirname(os.path.abspath(self._state_path))
+            temporary = f"{self._state_path}.{uuid.uuid4().hex}.tmp"
             try:
                 os.makedirs(parent, exist_ok=True)
                 with open(temporary, "w", encoding="utf-8", newline="\n") as handle:

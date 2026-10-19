@@ -17,9 +17,12 @@ falls back to Side B only if Deezer refuses the track at every quality.
 
 import concurrent.futures
 import hashlib
+import logging
 import os
+import re
 import threading
 import time
+import uuid
 
 import requests
 # Deezer itself defines Blowfish as the cipher for this stream format.
@@ -105,6 +108,7 @@ _ARTIST_SCOPE_ALL_BUDGET = _SEARCH_TARGET // 3
 
 _sessions = {}  # arl -> authenticated HTTP session and streaming credentials
 _sessions_lock = threading.Lock()
+_MAX_SESSIONS = 8
 
 
 class DeezerQualityError(RuntimeError):
@@ -132,6 +136,20 @@ def _gw_call(http, method, api_token, payload=None):
     if data.get("error"):
         raise RuntimeError(f"Deezer {method} failed: {data['error']}")
     return data.get("results") or {}
+
+
+def _evict_session(arl, session=None):
+    """Drop a cached session (closing it) so the next use re-logs in."""
+    with _sessions_lock:
+        current = _sessions.get(arl)
+        if session is not None and current is not session:
+            return
+        evicted = _sessions.pop(arl, None)
+    if evicted is not None:
+        try:
+            evicted["http"].close()
+        except Exception:  # closing is best-effort
+            logging.getLogger(__name__).debug("Could not close Deezer session", exc_info=True)
 
 
 def _login(arl):
@@ -167,7 +185,32 @@ def _login(arl):
         if existing is not session:
             session["http"].close()
             return existing
+        # Bound the cache: evict the oldest other sessions.
+        while len(_sessions) > _MAX_SESSIONS:
+            oldest = next((k for k in _sessions if k != arl), None)
+            if oldest is None:
+                break
+            evicted = _sessions.pop(oldest)
+            try:
+                evicted["http"].close()
+            except Exception:
+                logging.getLogger(__name__).debug("Could not close Deezer session", exc_info=True)
     return session
+
+
+def _page_track(arl, track_id):
+    """deezer.pageTrack with one fresh-login retry on session failure."""
+    session = _login(arl)
+    try:
+        with session["http_lock"]:
+            return _gw_call(session["http"], "deezer.pageTrack",
+                            session["api_token"], {"sng_id": track_id}), session
+    except Exception:
+        _evict_session(arl, session)
+        session = _login(arl)
+        with session["http_lock"]:
+            return _gw_call(session["http"], "deezer.pageTrack",
+                            session["api_token"], {"sng_id": track_id}), session
 
 
 def _track_id(url):
@@ -207,17 +250,33 @@ def _decrypt_stream(response, track_id, dest_path, progress_cb, cancel_event,
             # is not resumable, so it goes: the range asked for begins here.
             out.seek(start_at)
             out.truncate(start_at)
+        # iter_content() is not guaranteed to yield 2048-byte pieces: the
+        # network may split or coalesce them. Buffer until a whole block
+        # is held, then decrypt by its absolute block index.
+        buffer = bytearray()
         for chunk in response.iter_content(_CHUNK):
             if cancel_event is not None and cancel_event.is_set():
                 raise DownloadCancelled()
-            if len(chunk) == _CHUNK and index % 3 == 0:
-                cipher = Blowfish.new(  # nosec B304
-                    key, Blowfish.MODE_CBC, _IV
-                )
-                chunk = cipher.decrypt(chunk)
-            out.write(chunk)
-            downloaded += len(chunk)
-            index += 1
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            while len(buffer) >= _CHUNK:
+                block = bytes(buffer[:_CHUNK])
+                del buffer[:_CHUNK]
+                if index % 3 == 0:
+                    cipher = Blowfish.new(  # nosec B304
+                        key, Blowfish.MODE_CBC, _IV
+                    )
+                    block = cipher.decrypt(block)
+                out.write(block)
+                downloaded += len(block)
+                index += 1
+                if progress_cb is not None:
+                    progress_cb(downloaded, total)
+        if buffer:
+            # Final partial block: not a whole encrypted block, plain.
+            out.write(bytes(buffer))
+            downloaded += len(buffer)
             if progress_cb is not None:
                 progress_cb(downloaded, total)
     return downloaded, total
@@ -454,6 +513,19 @@ def search_artists(query, limit=_ARTIST_SEARCH_LIMIT):
     return artists
 
 
+def _iter_pages(first_path, params=None):
+    """Yield API pages following ``next`` links, never revisiting a URL."""
+    seen = set()
+    path = first_path
+    first_params = params
+    while path and path not in seen:
+        seen.add(path)
+        page = _api_get(path, first_params)
+        first_params = None
+        yield page
+        path = page.get("next") if isinstance(page, dict) else None
+
+
 def _api_get(path, params=None):
     # `next` links returned by the API are absolute URLs; only prefix the
     # base for the relative paths callers build by hand.
@@ -607,16 +679,14 @@ def supports_kind(kind):
     return search_kind.normalize(kind) in search_kind.KINDS
 
 
-def _search_albums(query):
+def _search_albums(query, limit=_SEARCH_TARGET):
     """Album rows for *query*, from Deezer's own album search endpoint."""
     items = []
     seen = set()
     try:
-        for index in range(0, _SEARCH_TARGET, _SEARCH_LIMIT):
-            page = _api_get(
+        for page in _iter_pages(
                 "/search/album",
-                {"q": query, "limit": _SEARCH_LIMIT, "index": index},
-            )
+                {"q": query, "limit": min(_SEARCH_LIMIT, max(1, limit))}):
             batch = page.get("data", [])
             if not batch:
                 break
@@ -625,12 +695,14 @@ def _search_albums(query):
                 if item["id"] not in seen:
                     seen.add(item["id"])
                     items.append(item)
-            if len(batch) < _SEARCH_LIMIT:
+                    if len(items) >= limit:
+                        break
+            if len(items) >= limit:
                 break
     except Exception:
         # A failed page stops the crawl; whatever arrived is still shown.
         pass
-    return items
+    return items[:limit]
 
 
 def _search_artist_tracks(query, limit=_SEARCH_TARGET):
@@ -655,22 +727,25 @@ def _search_artist_tracks(query, limit=_SEARCH_TARGET):
             break
         artist_name = artist.get("name") or ""
         try:
-            top = _api_get(
-                f"/artist/{artist['id']}/top", {"limit": _SEARCH_LIMIT}
-            ).get("data", [])
+            for page in _iter_pages(
+                    f"/artist/{artist['id']}/top",
+                    {"limit": _SEARCH_LIMIT}):
+                for track in page.get("data", []):
+                    entry = dict(track)
+                    # /artist/{id}/top names the artist on the request, not
+                    # on each track, so the rows would otherwise arrive
+                    # without one.
+                    entry.setdefault(
+                        "artist", {"id": artist["id"], "name": artist_name})
+                    item = _track_to_item(entry)
+                    if item["id"] not in seen:
+                        seen.add(item["id"])
+                        items.append(item)
+                if len(items) >= limit:
+                    break
         except Exception:
             # One artist that cannot be read must not lose the others.
             continue
-        for track in top:
-            entry = dict(track)
-            # /artist/{id}/top names the artist on the request, not on each
-            # track, so the rows would otherwise arrive without one.
-            entry.setdefault(
-                "artist", {"id": artist["id"], "name": artist_name})
-            item = _track_to_item(entry)
-            if item["id"] not in seen:
-                seen.add(item["id"])
-                items.append(item)
     return items[:limit]
 
 
@@ -694,9 +769,8 @@ def _search_artist_albums(query, limit=_SEARCH_TARGET):
             break
         artist_name = artist.get("name") or ""
         try:
-            next_path = f"/artist/{artist['id']}/albums?limit={_SEARCH_LIMIT}"
-            while next_path and len(items) < limit:
-                page = _api_get(next_path)
+            for page in _iter_pages(
+                    f"/artist/{artist['id']}/albums?limit={_SEARCH_LIMIT}"):
                 for album in page.get("data", []):
                     entry = dict(album)
                     # /artist/{id}/albums names the artist on the request,
@@ -707,7 +781,8 @@ def _search_artist_albums(query, limit=_SEARCH_TARGET):
                     if item["id"] not in seen:
                         seen.add(item["id"])
                         items.append(item)
-                next_path = page.get("next")
+                if len(items) >= limit:
+                    break
         except Exception:
             # One artist that cannot be read must not lose the others.
             continue
@@ -747,7 +822,7 @@ def _search_playlists(query, limit=_SEARCH_TARGET):
 
 
 def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
-           artist_scope=ARTIST_SCOPE_ALL):
+           artist_scope=ARTIST_SCOPE_ALL, limit=None):
     """Search Deezer via the public API.  Returns normalized items.
 
     *kind* is the Search tab's search type. Album and Playlist ask Deezer's
@@ -768,39 +843,48 @@ def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
     """
     kind = search_kind.normalize(kind)
     artist_scope = search_kind.normalize_artist_scope(artist_scope)
+    try:
+        limit = _SEARCH_TARGET if limit is None else int(limit)
+    except (TypeError, ValueError):
+        limit = _SEARCH_TARGET
+    limit = max(0, limit)
+    if limit == 0:
+        return []
     if kind == KIND_ALBUM:
-        return _search_albums(query)
+        return _search_albums(query, limit)
     if kind == KIND_PLAYLIST:
-        return _search_playlists(query)
+        return _search_playlists(query, limit)
     if kind == KIND_ARTIST:
         if artist_scope == ARTIST_SCOPE_ALBUMS:
-            return _search_artist_albums(query)
+            return _search_artist_albums(query, limit)
         if artist_scope == ARTIST_SCOPE_PLAYLISTS:
-            return _search_playlists(query)
+            return _search_playlists(query, limit)
         if artist_scope == ARTIST_SCOPE_ALL:
             # Split the budget between the three kinds so songs do not
             # crowd the albums and playlists out of the list entirely.
-            songs = _search_artist_tracks(query, _ARTIST_SCOPE_ALL_BUDGET)
+            budget = max(1, limit // 3)
+            songs = _search_artist_tracks(query, budget)
             if search_order.normalize(order) == ORDER_POPULAR:
                 songs.sort(key=lambda item: -item["rank"])
             combined = list(songs)
             combined.extend(
-                _search_artist_albums(query, _ARTIST_SCOPE_ALL_BUDGET))
+                _search_artist_albums(query, budget))
             combined.extend(
-                _search_playlists(query, _ARTIST_SCOPE_ALL_BUDGET))
-            return combined
+                _search_playlists(query, budget))
+            return combined[:limit]
         # ARTIST_SCOPE_SONGS
-        items = _search_artist_tracks(query)
+        items = _search_artist_tracks(query, limit)
         if search_order.normalize(order) == ORDER_POPULAR:
             items.sort(key=lambda item: -item["rank"])
         return items
     items = []
     seen = set()
     try:
-        for index in range(0, _SEARCH_TARGET, _SEARCH_LIMIT):
+        for index in range(0, limit, _SEARCH_LIMIT):
             page = _api_get(
                 "/search/track",
-                {"q": query, "limit": _SEARCH_LIMIT, "index": index},
+                {"q": query,
+                 "limit": min(_SEARCH_LIMIT, limit - index), "index": index},
             )
             batch = page.get("data", [])
             if not batch:
@@ -825,7 +909,7 @@ def search(query, config=None, order=ORDER_RELEVANCE, kind=KIND_BEST,
         pass
     if search_order.normalize(order) == ORDER_POPULAR:
         items.sort(key=lambda item: -item["rank"])
-    return items
+    return items[:limit]
 
 
 def extract_flat(url, config=None):
@@ -844,14 +928,19 @@ def extract_flat(url, config=None):
 
     if kind == "album":
         album = _api_get(f"/album/{obj_id}")
-        tracks_data = _api_get(f"/album/{obj_id}/tracks")
         items = []
-        for t in tracks_data.get("data", []):
-            t_copy = dict(t)
-            t_copy["album"] = {
-                "id": album.get("id", obj_id), "title": album.get("title", "")}
-            t_copy["artist"] = album.get("artist", {})
-            items.append(_track_to_item(t_copy))
+        seen_tracks = set()
+        for page in _iter_pages(f"/album/{obj_id}/tracks"):
+            for t in page.get("data", []):
+                t_copy = dict(t)
+                t_copy["album"] = {
+                    "id": album.get("id", obj_id),
+                    "title": album.get("title", "")}
+                t_copy["artist"] = album.get("artist", {})
+                item = _track_to_item(t_copy)
+                if item["id"] not in seen_tracks:
+                    seen_tracks.add(item["id"])
+                    items.append(item)
         return items, album.get("title") or url
 
     if kind == "playlist":
@@ -860,18 +949,13 @@ def extract_flat(url, config=None):
         # /playlist/{id}/tracks pages 25 tracks at a time and returns bare
         # track objects (no {"track": ...} wrapper). Follow the API's own
         # `next` links until the playlist is exhausted.
-        next_path = f"/playlist/{obj_id}/tracks"
-        seen = set()
-        while next_path and next_path not in seen:
-            seen.add(next_path)
-            page = _api_get(next_path)
+        for page in _iter_pages(f"/playlist/{obj_id}/tracks"):
             for entry in page.get("data", []):
                 if isinstance(entry, dict) and isinstance(
                         entry.get("track"), dict):
                     entry = entry["track"]
                 if isinstance(entry, dict):
                     items.append(_track_to_item(entry))
-            next_path = page.get("next")
         return items, playlist.get("title") or url
 
     if kind == "artist":
@@ -880,24 +964,30 @@ def extract_flat(url, config=None):
         # Fetch the full discography: paginate through all albums, then
         # collect every track. Large catalogues can take a few seconds.
         album_ids = []
-        next_path = f"/artist/{obj_id}/albums?limit=100"
-        while next_path:
-            page = _api_get(next_path)
+        seen_albums = set()
+        for page in _iter_pages(f"/artist/{obj_id}/albums?limit=100"):
             for alb in page.get("data", []):
-                album_ids.append(str(alb["id"]))
-            next_path = page.get("next")
+                alb_id = str(alb["id"])
+                if alb_id not in seen_albums:
+                    seen_albums.add(alb_id)
+                    album_ids.append(alb_id)
         items = []
+        seen_tracks = set()
         for alb_id in album_ids:
             try:
-                tracks_data = _api_get(f"/album/{alb_id}/tracks")
+                for page in _iter_pages(f"/album/{alb_id}/tracks"):
+                    for t in page.get("data", []):
+                        t_copy = dict(t)
+                        t_copy["artist"] = {"id": obj_id, "name": artist_name}
+                        if "album" not in t_copy:
+                            t_copy["album"] = {"id": alb_id}
+                        item = _track_to_item(t_copy)
+                        if item["id"] not in seen_tracks:
+                            seen_tracks.add(item["id"])
+                            items.append(item)
             except Exception:
+                logging.getLogger(__name__).debug("Could not read Deezer album tracks", exc_info=True)
                 continue
-            for t in tracks_data.get("data", []):
-                t_copy = dict(t)
-                t_copy["artist"] = {"id": obj_id, "name": artist_name}
-                if "album" not in t_copy:
-                    t_copy["album"] = {"id": alb_id}
-                items.append(_track_to_item(t_copy))
         if not items:
             # Fall back to top tracks when discography is empty (rare).
             top = _api_get(f"/artist/{obj_id}/top", {"limit": 50})
@@ -951,9 +1041,7 @@ def artist_albums(artist_id, limit=_SEARCH_TARGET, track_counts=True):
     name = artist.get("name") or ""
     items = []
     seen = set()
-    next_path = f"/artist/{artist_id}/albums?limit={_SEARCH_LIMIT}"
-    while next_path and len(items) < limit:
-        page = _api_get(next_path)
+    for page in _iter_pages(f"/artist/{artist_id}/albums?limit={_SEARCH_LIMIT}"):
         batch = page.get("data", [])
         if not batch:
             break
@@ -967,7 +1055,8 @@ def artist_albums(artist_id, limit=_SEARCH_TARGET, track_counts=True):
             if item["id"] not in seen:
                 seen.add(item["id"])
                 items.append(item)
-        next_path = page.get("next")
+        if len(items) >= limit:
+            break
     items = items[:limit]
     return (_fill_track_counts(items) if track_counts else items), name
 
@@ -1007,10 +1096,19 @@ def _request_media_sources(session, fmt, track_token):
     return _media_candidates(payload), payload.get("errors")
 
 
-def _sanitize(name):
-    for char in '<>:"/\\|?*':
-        name = name.replace(char, "_")
-    return name.strip() or "track"
+def _sanitize(name, fallback="track"):
+    # Mirror creator_backend._safe_component: strip illegal/control chars,
+    # collapse whitespace, strip leading/trailing dots and spaces, and
+    # reject reserved device names, so ".." can never traverse.
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name or ""))
+    value = re.sub(r"\s+", " ", value).strip(" .")[:150].rstrip(" .")
+    if not value or value.upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+    }:
+        return fallback
+    return value
 
 
 def playback_cache_dir():
@@ -1061,10 +1159,7 @@ def playback_file(url, config, cancel_event=None):
     if not arl:
         raise RuntimeError("No Deezer ARL cookie configured.")
     track_id = _track_id(url)
-    session = _login(arl)
-    with session["http_lock"]:
-        results = _gw_call(session["http"], "deezer.pageTrack",
-                           session["api_token"], {"sng_id": track_id})
+    results, session = _page_track(arl, track_id)
     meta = results.get("DATA") or {}
     track_token = meta.get("TRACK_TOKEN")
     if not track_token:
@@ -1097,7 +1192,7 @@ def playback_file(url, config, cancel_event=None):
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         os.utime(dest, None)
         return dest
-    partial = dest + ".part"
+    partial = f"{dest}.{uuid.uuid4().hex}.part"
     try:
         _stream_to_file(source["url"], track_id, partial, None, cancel_event)
         os.replace(partial, dest)
@@ -1132,10 +1227,7 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None,
     if not arl:
         raise RuntimeError("No Deezer ARL cookie configured.")
     track_id = _track_id(url)
-    session = _login(arl)
-    with session["http_lock"]:
-        results = _gw_call(session["http"], "deezer.pageTrack",
-                           session["api_token"], {"sng_id": track_id})
+    results, session = _page_track(arl, track_id)
     meta = results.get("DATA") or {}
     track_token = meta.get("TRACK_TOKEN")
     if not track_token:
@@ -1191,7 +1283,7 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None,
     # exactly as playback does: a dropped connection must not leave a
     # truncated file at the final path for the library to mistake for a
     # finished download.
-    partial = dest + ".part"
+    partial = f"{dest}.{uuid.uuid4().hex}.part"
     try:
         _stream_to_file(
             source["url"], track_id, partial, progress_cb, cancel_event)
@@ -1203,10 +1295,15 @@ def download(url, out_dir, config, progress_cb=None, cancel_event=None,
             pass
         raise
 
-    cover = _cover_bytes(meta.get("ALB_PICTURE"))
-    lyrics = _fetch_lyrics(meta, arl) if config["sideb_lyrics"] else None
-    if ext == "flac":
-        _tag_flac(dest, meta, cover, lyrics)
-    else:
-        _tag_mp3(dest, meta, cover, lyrics)
+    # Tagging must never fail a finished download: the bytes are already
+    # safely at the final path.
+    try:
+        cover = _cover_bytes(meta.get("ALB_PICTURE"))
+        lyrics = _fetch_lyrics(meta, arl) if config["sideb_lyrics"] else None
+        if ext == "flac":
+            _tag_flac(dest, meta, cover, lyrics)
+        else:
+            _tag_mp3(dest, meta, cover, lyrics)
+    except Exception:  # tags are not worth losing audio
+        logging.getLogger(__name__).debug("Could not tag Deezer download", exc_info=True)
     return dest

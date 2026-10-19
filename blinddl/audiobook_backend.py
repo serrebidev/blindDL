@@ -250,6 +250,33 @@ def search_archive(query, timeout=HTTP_TIMEOUT_S, order=ORDER_RELEVANCE):
     return items
 
 
+def _one_bitrate_per_stem(entries):
+    """Keep one file per chapter stem, preferring the 64 kbps LibriVox set."""
+    groups = {}
+    order = []
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        stem = os.path.splitext(name)[0].lower()
+        match = re.search(r"[_-](\d+)kb$", stem)
+        if match:
+            key = stem[:match.start()]
+            bitrate = int(match.group(1))
+        else:
+            key = stem
+            bitrate = None
+        if key not in groups:
+            groups[key] = (bitrate, entry)
+            order.append(key)
+            continue
+        existing_bitrate, _existing = groups[key]
+        if ((bitrate == 64 and existing_bitrate != 64)
+                or (existing_bitrate is None and bitrate is not None)
+                or (bitrate is not None and existing_bitrate not in (None, 64)
+                    and bitrate < existing_bitrate)):
+            groups[key] = (bitrate, entry)
+    return [groups[key][1] for key in order]
+
+
 def archive_streams(identifier, timeout=HTTP_TIMEOUT_S):
     """Return the chapter audio URLs of one Internet Archive item, in order.
 
@@ -273,6 +300,7 @@ def archive_streams(identifier, timeout=HTTP_TIMEOUT_S):
         if not entries:
             continue
         entries.sort(key=lambda entry: str(entry.get("name") or "").lower())
+        entries = _one_bitrate_per_stem(entries)
         return [
             (f"{IA_DOWNLOAD_URL}/{quote(str(identifier))}/"
              f"{quote(str(entry.get('name')))}",

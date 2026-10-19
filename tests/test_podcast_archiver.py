@@ -75,6 +75,16 @@ class Response:
 
 
 class PodcastParsingTests(unittest.TestCase):
+    def test_alias_bridge_merges_both_groups_and_retains_live_url(self):
+        episodes = podcast_archiver.deduplicate_episodes([
+            {"guid": "g1", "url": "https://x/m1", "title": "Live"},
+            {"guid": "g2", "url": "https://x/m2", "archived_at": "20200101"},
+            {"guid": "g1", "url": "https://x/m2", "archived_at": "20210101"},
+        ])
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0]["url"], "https://x/m1")
+        self.assertEqual(episodes[0]["copies_found"], 3)
+
     def test_rss_extracts_playable_fields_and_moved_feed(self):
         feed = podcast_archiver.parse_feed(
             LIVE_RSS, "https://old.example/feed.xml")
@@ -239,6 +249,56 @@ class PodcastDirectoryTests(unittest.TestCase):
 
 
 class PodcastArchiveTests(unittest.TestCase):
+    def test_cancellation_returns_while_snapshot_request_is_still_running(self):
+        cancel = threading.Event()
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        errors = []
+        replay_calls = []
+
+        def get(url, **kwargs):
+            if "/web/20200102030405id_/" in url:
+                replay_calls.append(url)
+                started.set()
+                release.wait(5)
+                raise requests.Timeout("slow snapshot")
+            return self._get(url, **kwargs)
+
+        def scan():
+            try:
+                podcast_archiver.archive_podcast(
+                    "https://old.example/feed.xml", get=get,
+                    cancel_event=cancel, cache_dir=False)
+            except podcast_archiver.PodcastArchiveCancelled as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=scan)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(2), "snapshot fetch did not start")
+            cancel.set()
+            self.assertTrue(finished.wait(1), "cancellation waited for the request")
+            self.assertIsInstance(errors[0], podcast_archiver.PodcastArchiveCancelled)
+        finally:
+            cancel.set()
+            release.set()
+            thread.join(3)
+        self.assertEqual(len(replay_calls), 1)
+
+    def test_request_cancellation_interrupts_retry_delay(self):
+        cancel = threading.Event()
+
+        def get(*args, **kwargs):
+            cancel.set()
+            return Response(status=503, headers={"Retry-After": "10"})
+
+        with mock.patch.object(podcast_archiver.time, "sleep") as sleep, self.assertRaises(podcast_archiver.PodcastArchiveCancelled):
+            podcast_archiver._request(get, "https://x/feed", cancel_event=cancel)
+        sleep.assert_not_called()
+
     def _get(self, url, params=None, **_kwargs):
         if url == podcast_archiver.WAYBACK_CDX_URL:
             if params["url"] == "https://old.example/feed.xml":

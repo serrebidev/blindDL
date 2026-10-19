@@ -197,7 +197,8 @@ class ChatPanel(wx.Panel):
         try:
             result = action(*args)
         except Exception as exc:  # noqa: BLE001 - presented in the UI
-            wx.CallAfter(self._failed, str(exc))
+            failed = self._send_failed if success == self._sent else self._failed
+            wx.CallAfter(failed, str(exc))
             return
         wx.CallAfter(success, result)
 
@@ -293,11 +294,14 @@ class ChatPanel(wx.Panel):
         self.frame.announce(f"Left Soulseek room {room}.")
 
     def on_send(self, event=None):
+        if not self._alive or not self.send_button.IsEnabled():
+            return
         room = self.room_combo.GetValue().strip()
         message = self.message_text.GetValue().strip()
         if not room or not message:
             self.frame.announce("Select a room and enter a message.")
             return
+        self.send_button.Disable()
         threading.Thread(
             target=self._worker,
             args=(
@@ -311,7 +315,13 @@ class ChatPanel(wx.Panel):
             name="blinddl-soulseek-room-message",
         ).start()
 
+    def _send_failed(self, error):
+        if self._alive:
+            self.send_button.Enable()
+            self._failed(error)
+
     def _sent(self, result):
         if self._alive:
+            self.send_button.Enable()
             self.message_text.Clear()
             self.message_text.SetFocus()

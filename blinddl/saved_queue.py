@@ -208,14 +208,20 @@ class SavedQueue:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return
         records = document.get("items", []) if isinstance(document, dict) else []
+        if not isinstance(records, list):
+            return
         for record in records:
             if not isinstance(record, dict) or not isinstance(
                     record.get("result"), dict):
                 continue
             result = record["result"]
+            try:
+                engine = int(record.get("engine") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
             self.entries.append({
                 "key": str(record.get("key") or self.key_for(result)),
-                "engine": int(record.get("engine") or 0),
+                "engine": engine,
                 "folder": str(record.get("folder") or ""),
                 "result": result,
             })

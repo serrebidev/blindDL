@@ -4,6 +4,7 @@
 
 """The download queue: what it keeps, what it refuses, what survives a restart."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -123,6 +124,20 @@ class SavedQueueTests(unittest.TestCase):
         with open(self.path, "w", encoding="utf-8") as handle:
             handle.write("{ this is not json")
         self.assertEqual(self._queue().all(), [])
+
+    def test_invalid_engine_rows_do_not_hide_valid_rows(self):
+        records = [
+            {"engine": "bad", "result": {"id": "bad"}},
+            {"engine": {"invalid": 1}, "result": {"id": "wrong-type"}},
+            {"engine": 19, "result": {"id": "good", "title": "Kept"}},
+        ]
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"items": records}, handle)
+
+        entries = self._queue().all()
+
+        self.assertEqual([entry["result"]["id"] for entry in entries], ["good"])
+        self.assertEqual(entries[0]["engine"], 19)
 
     def test_a_queue_with_no_file_never_writes_one(self):
         store = SavedQueue(state_path="")

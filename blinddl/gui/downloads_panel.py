@@ -41,6 +41,7 @@ class DownloadsPanel(wx.Panel):
     def __init__(self, parent, frame):
         super().__init__(parent)
         self.frame = frame
+        self.closing = False
         self._rows = {}  # item.id -> (list control, row index)
         self._values = {}  # item.id -> last values written to that row
 
@@ -118,13 +119,25 @@ class DownloadsPanel(wx.Panel):
                 target.SetItem(row, column, values[column])
         self._values[item.id] = values
 
+    def shutdown(self):
+        self.closing = True
+
     def refresh_all(self):
+        selected = {item_id for item_id, (control, row) in self._rows.items()
+                    if control.IsSelected(row)}
+        focused = {item_id for item_id, (control, row) in self._rows.items()
+                   if control.GetFocusedItem() == row}
         self.list.DeleteAllItems()
         self.finished_list.DeleteAllItems()
         self._rows.clear()
         self._values.clear()
         for item in self.frame.queue.items:
             self.update_item(item)
+        for item_id, (control, row) in self._rows.items():
+            if item_id in selected:
+                control.Select(row)
+            if item_id in focused:
+                control.Focus(row)
 
     # -- actions -------------------------------------------------------------
 
@@ -305,6 +318,8 @@ class DownloadsPanel(wx.Panel):
         wx.CallAfter(self._offer_description, item, candidates)
 
     def _offer_description(self, item, candidates):
+        if self.closing:
+            return
         dialog = DescriptionDialog(
             self, item.title, candidates,
             can_make=bool(self._result_path(item)))

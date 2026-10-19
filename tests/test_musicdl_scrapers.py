@@ -25,6 +25,32 @@ from musicdl.modules.thirdpartysites.mp3pm import Mp3PmMusicClient
 from musicdl.modules.thirdpartysites.zvu4it import Zvu4ITMusicClient
 
 
+class LoggerFileTests(unittest.TestCase):
+    def test_silent_log_methods_close_their_files(self):
+        from musicdl.modules.utils.logger import LoggerHandle
+        real_open = open
+        opened = []
+
+        def record_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            opened.append(handle)
+            return handle
+
+        with tempfile.TemporaryDirectory() as folder:
+            target = folder + "/musicdl.log"
+            try:
+                with mock.patch.object(LoggerHandle, "log_file_path", target), mock.patch(
+                        "builtins.open", side_effect=record_open):
+                    for level in ("debug", "info", "warning", "error"):
+                        getattr(LoggerHandle, level)(level, disable_print=True)
+                self.assertTrue(all(handle.closed for handle in opened))
+                with real_open(target, encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), "debug\ninfo\nwarning\nerror\n")
+            finally:
+                for handle in opened:
+                    handle.close()
+
+
 class _FakeResponse:
     def __init__(self, text="", url="http://example.invalid/", status_code=200,
                  json_data=None):

@@ -4,11 +4,15 @@
 
 """Torrent indexers, and the Internet Archive's torrents in particular."""
 
+import base64
+import hashlib
+import os
+import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from blinddl import search_order, torrent_backend
-
 from tests.test_book_backend import _Response
 
 
@@ -322,6 +326,97 @@ class AudiobookBayTests(unittest.TestCase):
             torrent_backend.SOURCE_AUDIOBOOKBAY,
             torrent_backend.enabled_sources(
                 [torrent_backend.SOURCE_AUDIOBOOKBAY]))
+
+
+class InfohashIdentityTests(unittest.TestCase):
+    HASH = "7bb911895886da54b4db91b710bae80b7c943f42"
+
+    def test_a_magnet_only_row_carries_its_infohash(self):
+        row = torrent_backend._item(
+            "Feed", "", "Release",
+            magnet=f"magnet:?xt=urn:btih:{self.HASH.upper()}&dn=Release")
+
+        self.assertEqual(row["infohash"], self.HASH)
+        self.assertTrue(row["id"].endswith(self.HASH))
+
+    def test_a_base32_magnet_link_yields_the_hex_infohash(self):
+        magnet = "magnet:?xt=urn:btih:" + base64.b32encode(
+            bytes.fromhex(self.HASH)).decode()
+
+        item = torrent_backend.item_from_link(magnet)
+
+        self.assertEqual(item["infohash"], self.HASH)
+
+    def test_a_torrent_file_row_is_identified_by_its_info_dict(self):
+        info = b"d6:lengthi1024e4:name4:test12:piece lengthi16384ee"
+        data = b"d8:announce16:https://example/4:info" + info + b"e"
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "private.torrent")
+            with open(path, "wb") as handle:
+                handle.write(data)
+            item = torrent_backend.item_from_link(path)
+
+        self.assertEqual(
+            item["infohash"], hashlib.sha1(info).hexdigest())
+        # The file stays the source: a rebuilt magnet would lose the
+        # private tracker's passkey announce inside it.
+        self.assertEqual(item["magnet"], "")
+        self.assertEqual(torrent_backend.magnet_for(item), "")
+
+    def test_resolving_a_magnet_records_the_hash_on_the_row(self):
+        row = torrent_backend._item(
+            torrent_backend.SOURCE_AUDIOBOOKBAY, "", "The Hobbit",
+            url="https://audiobookbay.lu/abss/the-hobbit/")
+        detail = (
+            '<table><tr><td>Info Hash:</td>'
+            f"<td>{self.HASH}</td></tr></table>")
+        with mock.patch.object(torrent_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(text=detail)
+            torrent_backend.resolve_magnet(row)
+
+        self.assertEqual(row["infohash"], self.HASH)
+
+
+class FetchTorrentFileTests(unittest.TestCase):
+    def test_concurrent_fetches_never_leave_a_torn_file(self):
+        bodies = [b"d4:info" + bytes([65 + n]) * 500 + b"e" for n in range(4)]
+        with tempfile.TemporaryDirectory() as folder:
+            remaining = list(bodies)
+            lock = threading.Lock()
+
+            def get(*_args, **_kwargs):
+                with lock:
+                    return _Response(content=remaining.pop())
+
+            with mock.patch.object(torrent_backend, "_http") as http:
+                http.return_value.get.side_effect = get
+                item = {"title": "Same title",
+                        "download_url": "https://example.invalid/t.torrent"}
+                results, errors = [], []
+
+                def fetch():
+                    try:
+                        results.append(
+                            torrent_backend.fetch_torrent_file(item, folder))
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=fetch) for _ in bodies]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(set(results)), len(bodies))
+            downloaded = []
+            for result in results:
+                with open(result, "rb") as handle:
+                    downloaded.append(handle.read())
+            self.assertCountEqual(downloaded, bodies)
+            self.assertEqual(
+                [name for name in os.listdir(folder)
+                 if name.endswith(".tmp")], [])
 
 
 if __name__ == "__main__":

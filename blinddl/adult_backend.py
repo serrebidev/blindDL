@@ -287,7 +287,7 @@ PROVIDERS = {
         ),
         Provider(
             "spankbang", "SpankBang", "spankbang_api", ("spankbang.com",),
-            config_class="", download_style="spankbang",
+            config_class="DownloadConfigHLS", download_style="spankbang",
         ),
         Provider(
             "thumbzilla", "Thumbzilla", "thumbzilla_api",
@@ -418,7 +418,8 @@ def _tube_sign_endpoint(page_url):
             endpoint = f"{update.scheme}://{update.netloc}/ah/sign"
     except requests.RequestException:
         endpoint = None
-    _tube_sign_endpoints[host] = endpoint
+    if endpoint is not None:
+        _tube_sign_endpoints[host] = endpoint
     return endpoint
 
 
@@ -500,7 +501,7 @@ def _tube_sign_info(info):
 _HLS_WRAPPER_KEYS = frozenset(("homo",))
 
 
-def _best_hls_variant(master):
+def _best_hls_variant(master, base_url=""):
     """The highest-bandwidth variant URL in an HLS master playlist."""
     best_url = None
     best_bw = -1
@@ -511,9 +512,11 @@ def _best_hls_variant(master):
             pending_bw = int(match.group(1))
             continue
         line = line.strip()
-        if line.startswith("http"):
-            if pending_bw is not None and pending_bw > best_bw:
-                best_bw, best_url = pending_bw, line
+        if line and not line.startswith("#"):
+            resolved = urljoin(base_url, line) if base_url else line
+            if (resolved.startswith("http") and pending_bw is not None
+                    and pending_bw > best_bw):
+                best_bw, best_url = pending_bw, resolved
             pending_bw = None
     return best_url
 
@@ -539,7 +542,7 @@ def _hls_wrapper_fix(info):
         return None
     if "#EXTM3U" not in text:
         return None
-    best = _best_hls_variant(text)
+    best = _best_hls_variant(text, url)
     if not best:
         return None
     info["url"] = best

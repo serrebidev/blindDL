@@ -2572,7 +2572,7 @@ class SearchPanel(wx.Panel):
         self.frame.announce(message)
         if pending:
             self.timer.Start(10000)
-        if self.results:
+        if self.results and not self.query_text.HasFocus():
             self.results_list.SetFocus()
             self.results_list.Focus(0)
             self.results_list.Select(0)
@@ -3272,6 +3272,8 @@ class SearchPanel(wx.Panel):
         ).start()
 
     def _queue_soulseek_folder(self, folder, files):
+        if self.closing:
+            return
         with self.frame.queue.batch_additions():
             for original in files:
                 item = dict(original)

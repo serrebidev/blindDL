@@ -359,12 +359,121 @@ class GuiInteractionTests(unittest.TestCase):
         cls.app = wx.App.Get() or wx.App(False)
 
     def setUp(self):
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        patcher = mock.patch.object(updater, "app_data_dir", return_value=state.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.host = wx.Frame(None)
         self.frame = _Frame()
 
     def tearDown(self):
         self.host.Destroy()
         self.app.Yield()
+
+    def test_shutdown_blocks_late_subscription_callbacks(self):
+        panel = SubsPanel(self.host, self.frame)
+        before = copy.deepcopy(self.frame.subs.rows)
+        panel.shutdown()
+        with mock.patch.object(wx, "MessageBox") as box:
+            panel._add_done("https://example/feed", "Late", [], False)
+            panel._add_failed("late failure")
+            panel._check_done(0, ["late failure"])
+        self.assertEqual(self.frame.subs.rows, before)
+        self.assertEqual(self.frame.messages, [])
+        box.assert_not_called()
+
+    def test_shutdown_blocks_late_description_dialog(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        panel.shutdown()
+        with mock.patch("blinddl.gui.downloads_panel.DescriptionDialog") as dialog:
+            panel._offer_description(SimpleNamespace(title="Late"), [])
+        dialog.assert_not_called()
+
+    def test_settings_ignores_account_callbacks_after_destroy(self):
+        config = copy.deepcopy(DEFAULTS)
+        dialog = SettingsDialog(self.host, config)
+        dialog.Destroy()
+        self.app.Yield()
+        with mock.patch.object(wx, "MessageBox") as box:
+            dialog._soulseek_account_ready("user")
+            dialog._soulseek_account_failed("late failure")
+        box.assert_not_called()
+
+    def test_download_rebuild_preserves_selected_and_focused_ids(self):
+        panel = DownloadsPanel(self.host, self.frame)
+        items = [DownloadItem(str(index), "ytdlp", str(index)) for index in range(3)]
+        self.frame.queue.items = items
+        panel.refresh_all()
+        panel.list.Select(2)
+        panel.list.Focus(2)
+        items[0].status = STATUS_DONE
+        panel.update_item(items[0])
+        self.assertEqual(panel.list.GetFocusedItem(), 1)
+        self.assertTrue(panel.list.IsSelected(1))
+        self.assertEqual(panel.list.GetItemText(1), "2")
+
+    def test_shutdown_blocks_upload_refresh_and_action_completion(self):
+        panel = UploadsPanel(self.host, self.frame)
+        callbacks = []
+        with mock.patch("blinddl.gui.uploads_panel.threading.Thread") as thread:
+            panel._run_action([], lambda row: True, lambda count: "late action")
+        with mock.patch.object(wx, "CallAfter", side_effect=lambda callback, *args: callbacks.append((callback, args))):
+            thread.call_args.kwargs["target"]()
+        panel.shutdown()
+        panel._signature = None
+        panel.refresh([])
+        for callback, args in callbacks:
+            callback(*args)
+        self.assertIsNone(panel._signature)
+        self.assertEqual(self.frame.messages, [])
+
+    def test_closing_search_ignores_late_soulseek_folder(self):
+        holder = SimpleNamespace(closing=True, frame=self.frame)
+        SearchPanel._queue_soulseek_folder(holder, "folder", [{"title": "Late"}])
+        self.assertEqual(self.frame.messages, [])
+
+    def test_closing_frame_ignores_friend_and_priority_callbacks(self):
+        holder = SimpleNamespace(_closing=True)
+        MainFrame._friend_added(holder, "user", ["user"])
+        MainFrame._free_slot_added(holder, "user", ["user"])
+
+    def test_search_completion_keeps_focus_in_query(self):
+        panel = SearchPanel(self.host, self.frame)
+        with mock.patch("blinddl.gui.search_panel.threading.Thread"):
+            panel.query_text.SetValue("test")
+            panel.on_search(None)
+        items = [{"id": "one", "title": "One", "url": "https://example/one"}]
+        with mock.patch.object(panel.query_text, "HasFocus", return_value=True), mock.patch.object(panel.results_list, "SetFocus") as focus:
+            panel._search_done(panel.token, items, ENGINE_YOUTUBE)
+        focus.assert_not_called()
+        panel.shutdown()
+
+    def test_soulseek_send_ignores_reentry_and_recovers_after_failure(self):
+        from blinddl.gui.chat_panel import ChatPanel
+        for panel_type in (ChatPanel, MessagesPanel):
+            with self.subTest(panel=panel_type.__name__):
+                panel = panel_type(self.host, self.frame)
+                if isinstance(panel, ChatPanel):
+                    panel.room_combo.SetValue("room")
+                else:
+                    panel.recipient_text.SetValue("user")
+                panel.message_text.SetValue("hello")
+                with mock.patch("threading.Thread") as thread:
+                    panel.on_send()
+                    panel.on_send()
+                self.assertEqual(thread.call_count, 1)
+                self.assertFalse(panel.send_button.IsEnabled())
+                panel._send_failed("failed")
+                self.assertTrue(panel.send_button.IsEnabled())
+                self.assertEqual(panel.message_text.GetValue(), "hello")
+                with mock.patch("threading.Thread"):
+                    panel.on_send()
+                panel._sent(None)
+                self.assertTrue(panel.send_button.IsEnabled())
+                self.assertEqual(panel.message_text.GetValue(), "")
+                panel.shutdown()
+                panel.Destroy()
 
     def test_item_picker_all_clear_and_specific_selection(self):
         items = [

@@ -72,7 +72,7 @@ _COMMON_WORDS = frozenset(
     "subtitle subtitles final extended".split())
 
 _TITLE_WORD = re.compile(r"[a-z0-9']+")
-_TIMESTAMP_LINE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*[|\-–—:]\s*(.+?)\s*$")
+_TIMESTAMP_LINE = re.compile(r"^\s*(\d+):(\d{2})\s*[|\-–—:]\s*(.+?)\s*$")
 _SHOWINFO_TIME = re.compile(r"pts_time:([0-9.]+)")
 
 

@@ -225,6 +225,109 @@ class ProgressTests(unittest.TestCase):
         current.remove.assert_called_once_with(torrent, delete_files=False)
 
 
+class SharedTorrentTests(unittest.TestCase):
+    def _engine(self):
+        engine = object.__new__(torrent_engine.TorrentEngine)
+        engine._lt = mock.Mock()
+        engine._lock = threading.RLock()
+        engine._torrents = {}
+        engine._uploads_cache = []
+        engine.session = mock.Mock()
+        return engine
+
+    def test_a_shared_torrent_survives_until_its_last_caller_leaves(self):
+        engine = self._engine()
+        torrent = torrent_engine._Torrent("abc", mock.Mock(), "Release")
+        torrent.refs = 2
+        engine._torrents["abc"] = torrent
+
+        engine.remove(torrent)
+        engine.session.remove_torrent.assert_not_called()
+        self.assertIn("abc", engine._torrents)
+        self.assertEqual(torrent.refs, 1)
+
+        engine.remove(torrent)
+        engine.session.remove_torrent.assert_called_once()
+        self.assertNotIn("abc", engine._torrents)
+
+    def test_last_remove_cannot_drop_a_new_owner_of_the_same_hash(self):
+        engine = self._engine()
+        torrent = torrent_engine._Torrent("abc", mock.Mock(), "Release")
+        torrent.refs = 1
+        engine._torrents["abc"] = torrent
+        engine._read_resume = lambda key: None
+        removing = threading.Event()
+        proceed = threading.Event()
+        added = threading.Event()
+        result = []
+        remove_now = engine._remove_now
+
+        def delayed_remove(*args, **kwargs):
+            removing.set()
+            proceed.wait(3)
+            remove_now(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(
+                engine, "_remove_now", side_effect=delayed_remove), mock.patch.object(
+                engine, "_params_for", return_value=mock.Mock()), mock.patch.object(
+                torrent_engine, "_key_for", return_value="abc"):
+            def add():
+                result.append(engine.add({"title": "Next"}, folder, {}))
+                added.set()
+
+            first = threading.Thread(target=engine.remove, args=(torrent,))
+            second = threading.Thread(target=add)
+            first.start()
+            try:
+                self.assertTrue(removing.wait(2))
+                second.start()
+                self.assertFalse(added.wait(0.1))
+            finally:
+                proceed.set()
+                first.join(3)
+                if second.ident is not None:
+                    second.join(3)
+        self.assertTrue(added.is_set())
+        self.assertIs(engine._torrents["abc"], result[0])
+
+    def test_adding_the_same_hash_twice_counts_both_callers(self):
+        engine = self._engine()
+        engine.session.add_torrent.return_value = mock.Mock()
+        engine._read_resume = lambda _key: None
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(torrent_engine, "_key_for",
+                                  return_value="abc"), \
+                mock.patch.object(
+                    torrent_engine.TorrentEngine, "_params_for",
+                    lambda self, item, save_path, config: mock.Mock()):
+            first = engine.add({"title": "One"}, folder, {})
+            second = engine.add({"title": "Two"}, folder, {})
+
+        self.assertIs(first, second)
+        self.assertEqual(first.refs, 2)
+        engine.session.add_torrent.assert_called_once()
+
+    def test_an_error_never_deletes_partial_data(self):
+        current = mock.Mock()
+        torrent = mock.Mock()
+        current.add.return_value = torrent
+        errc = mock.Mock()
+        errc.value.return_value = 1
+        errc.message.return_value = "tracker refused"
+        torrent.handle.status.return_value = mock.Mock(
+            errc=errc, error="", is_finished=False, is_seeding=False)
+
+        with (
+            mock.patch.object(torrent_engine, "engine", return_value=current),
+            self.assertRaises(torrent_engine.TorrentEngineError),
+        ):
+            torrent_engine.download(
+                {"title": "Broken"}, "output",
+                {"torrent_delete_partial": True})
+
+        current.remove.assert_called_once_with(torrent, delete_files=False)
+
+
 class RatioTests(unittest.TestCase):
     def test_ratio_is_measured_against_the_torrent_not_this_session(self):
         # A resumed torrent has downloaded nothing this session; dividing by

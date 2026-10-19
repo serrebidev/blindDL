@@ -303,6 +303,18 @@ class AnnasArchiveTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    def test_truncated_book_with_valid_header_is_removed(self):
+        response = _Response(content=b"PK\x03\x04half",
+                             headers={"Content-Length": "16"})
+        with tempfile.TemporaryDirectory() as folder:
+            with (
+                mock.patch.object(book_backend, "_open_stream", return_value=response),
+                self.assertRaisesRegex(RuntimeError, "incomplete"),
+            ):
+                book_backend.download(self._item(), folder)
+            self.assertEqual(os.listdir(os.path.join(
+                folder, book_backend.BOOK_SUBFOLDER)), [])
+
     def _item(self, **extra):
         item = {"title": "Moby Dick", "author": "Herman Melville",
                 "source": book_backend.SOURCE_GUTENBERG,

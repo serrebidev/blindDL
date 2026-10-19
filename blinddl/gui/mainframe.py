@@ -606,6 +606,8 @@ class MainFrame(wx.Frame):
         )
 
     def _friend_added(self, username, friends):
+        if self._closing:
+            return
         saved = list(self.config.get("soulseek_friends", []) or [])
         if username.casefold() not in {value.casefold() for value in saved}:
             saved.append(username)
@@ -624,6 +626,8 @@ class MainFrame(wx.Frame):
         )
 
     def _free_slot_added(self, username, priority_users):
+        if self._closing:
+            return
         self.config["soulseek_priority_users"] = list(priority_users)
         self.config.save()
         self.announce(f"Gave {username} Soulseek upload priority for a free slot.")
@@ -1211,6 +1215,8 @@ class MainFrame(wx.Frame):
         self.url_panel.shutdown()
         self.library_panel.shutdown()
         self.uploads_panel.shutdown()
+        self.subs_panel.shutdown()
+        self.downloads_panel.shutdown()
         self.subs.stop()
         # Active rows become resumable Queued rows on the next start, and
         # completed seeds are recorded before libtorrent is shut down.

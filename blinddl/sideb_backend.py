@@ -23,9 +23,11 @@ starts when sideb is not installed -- the job then fails with a clear
 """
 
 import asyncio
+import contextlib
 import os
 import re
 import shutil
+import threading
 
 import requests
 
@@ -41,6 +43,7 @@ _DEEZER_SHORTLINK_RE = re.compile(
     r"(?:deezer|dzr)\.page\.link/|link\.deezer\.com/", re.IGNORECASE)
 
 _home_ready = False
+_home_lock = threading.RLock()
 
 
 class _YtdlpShim:
@@ -133,14 +136,30 @@ def _ensure_home():
     place, so the redundant calls are harmless.
     """
     global _home_ready
-    if _home_ready:
-        return
-    home = os.path.join(app_data_dir(), "sideb-home")
-    os.makedirs(home, exist_ok=True)
-    # Leftovers from an interrupted run are scratch, not music.
-    shutil.rmtree(os.path.join(home, "tmp"), ignore_errors=True)
-    os.chdir(home)
-    _home_ready = True
+    with _home_lock:
+        home = os.path.join(app_data_dir(), "sideb-home")
+        os.makedirs(home, exist_ok=True)
+        if not _home_ready:
+            # Leftovers from an interrupted run are scratch, not music.
+            shutil.rmtree(os.path.join(home, "tmp"), ignore_errors=True)
+            _home_ready = True
+        os.chdir(home)
+        return home
+
+
+@contextlib.contextmanager
+def _locked_home():
+    """Run sideb work under the chdir lock, restoring the caller's CWD."""
+    with _home_lock:
+        original = os.getcwd()
+        _ensure_home()
+        try:
+            yield
+        finally:
+            try:
+                os.chdir(original)
+            except OSError:
+                pass
 
 
 def _settings(config, out_dir=None):
@@ -191,22 +210,22 @@ def extract_flat(url, config):
     subscriptions can treat both backends alike. An artist URL resolves to
     the whole discography, matching sideb's own behaviour.
     """
-    _ensure_home()
-    _patch_sideb_ytdlp()
-    from sideb.app.main import Application
+    with _locked_home():
+        _patch_sideb_ytdlp()
+        from sideb.app.main import Application
 
-    async def _run():
-        app = Application(_settings(config))
-        try:
-            return await app.collect(url)
-        finally:
-            await app.aclose()
+        async def _run():
+            app = Application(_settings(config))
+            try:
+                return await app.collect(url)
+            finally:
+                await app.aclose()
 
-    ctx, tracks = asyncio.run(_run())
-    if not tracks:
-        raise RuntimeError(f"Side B found no tracks at: {url}")
-    title = ctx.source_name or url
-    return [_track_to_item(t) for t in tracks], title
+        ctx, tracks = asyncio.run(_run())
+        if not tracks:
+            raise RuntimeError(f"Side B found no tracks at: {url}")
+        title = ctx.source_name or url
+        return [_track_to_item(t) for t in tracks], title
 
 
 def search(query, config, order=None):
@@ -215,17 +234,17 @@ def search(query, config, order=None):
     Side B's metadata search exposes only best match, so ``order`` is accepted
     for the common search contract and intentionally does not alter the query.
     """
-    _ensure_home()
-    from sideb.providers.metadata.deezer import DeezerMetadata
+    with _locked_home():
+        from sideb.providers.metadata.deezer import DeezerMetadata
 
-    async def _run():
-        provider = DeezerMetadata(user_agent=_settings(config).user_agent)
-        try:
-            return await provider.search(query)
-        finally:
-            await provider.aclose()
+        async def _run():
+            provider = DeezerMetadata(user_agent=_settings(config).user_agent)
+            try:
+                return await provider.search(query)
+            finally:
+                await provider.aclose()
 
-    return [_track_to_item(t) for t in asyncio.run(_run())]
+        return [_track_to_item(t) for t in asyncio.run(_run())]
 
 
 def download(url, out_dir, config, event_cb=None):
@@ -236,28 +255,28 @@ def download(url, out_dir, config, event_cb=None):
     percent. Cancellation is not supported -- like musicdl, the call either
     returns or raises.
     """
-    _ensure_home()
-    _patch_sideb_ytdlp()
-    os.makedirs(out_dir, exist_ok=True)
-    from sideb.app.events_bus import EventBus
-    from sideb.app.main import Application
+    with _locked_home():
+        _patch_sideb_ytdlp()
+        os.makedirs(out_dir, exist_ok=True)
+        from sideb.app.events_bus import EventBus
+        from sideb.app.main import Application
 
-    bus = EventBus()
-    if event_cb is not None:
-        bus.subscribe(event_cb)
+        bus = EventBus()
+        if event_cb is not None:
+            bus.subscribe(event_cb)
 
-    async def _run():
-        app = Application(_settings(config, out_dir), bus)
-        try:
-            return await app.run(url)
-        finally:
-            await app.aclose()
+        async def _run():
+            app = Application(_settings(config, out_dir), bus)
+            try:
+                return await app.run(url)
+            finally:
+                await app.aclose()
 
-    summary = asyncio.run(_run())
-    if summary.succeeded:
-        return str(summary.succeeded[0].filepath or "")
-    if summary.failed:
-        raise RuntimeError(f"Side B: {summary.failed[0].error}")
-    reason = (summary.skipped[0].skipped_reason
-              if summary.skipped else "nothing downloaded")
-    raise RuntimeError(f"Side B: {reason}")
+        summary = asyncio.run(_run())
+        if summary.succeeded:
+            return str(summary.succeeded[0].filepath or "")
+        if summary.failed:
+            raise RuntimeError(f"Side B: {summary.failed[0].error}")
+        reason = (summary.skipped[0].skipped_reason
+                  if summary.skipped else "nothing downloaded")
+        raise RuntimeError(f"Side B: {reason}")

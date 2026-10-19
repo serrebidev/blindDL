@@ -411,6 +411,10 @@ def _netscape_line(host, name, value, path, expires, secure, httponly):
     # Chromium stores microseconds since 1601-01-01; Netscape wants Unix
     # seconds since 1970-01-01.
     expires_s = "" if not expires else str(int(expires // 1000000) - 11644473600)
+    # Mozilla's format marks an HttpOnly cookie with a prefix on the domain
+    # field; an extra eighth field makes the whole file unloadable.
+    if httponly:
+        host = f"#HttpOnly_{host}"
     return "\t".join(
         [
             host,
@@ -421,7 +425,7 @@ def _netscape_line(host, name, value, path, expires, secure, httponly):
             name,
             value,
         ]
-    ) + ("\t#HttpOnly_" if httponly else "")
+    )
 
 
 # -- elevated helper ----------------------------------------------------------

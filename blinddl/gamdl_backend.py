@@ -80,6 +80,28 @@ def find_gamdl():
     return None
 
 
+def _snapshot_files(root):
+    snapshot = {}
+    for dirpath, _dirs, filenames in os.walk(root):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            snapshot[path] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def _has_new_nonempty_file(root, before):
+    for path, (size, _mtime) in _snapshot_files(root).items():
+        if size > 0 and before.get(path) != (size, _mtime):
+            return True
+        if size > 0 and path not in before:
+            return True
+    return False
+
+
 def available():
     return find_gamdl() is not None
 
@@ -107,6 +129,7 @@ def download(url, out_dir, config=None, cancel_event=None):
         )
 
     os.makedirs(out_dir, exist_ok=True)
+    before = _snapshot_files(os.path.abspath(out_dir))
     command = [
         executable,
         "-n",
@@ -157,6 +180,10 @@ def download(url, out_dir, config=None, cancel_event=None):
             tail = detail[-1200:] if detail else "gamdl exited without an error message."
             raise RuntimeError(f"gamdl could not download the Apple Music URL: {tail}")
 
+        if not _has_new_nonempty_file(os.path.abspath(out_dir), before):
+            raise RuntimeError(
+                "gamdl reported success but did not produce a new "
+                "non-empty file.")
         return os.path.abspath(out_dir)
     finally:
         if log_path:

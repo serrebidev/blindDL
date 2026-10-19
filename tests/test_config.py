@@ -4,6 +4,7 @@
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +13,41 @@ from blinddl import config as config_module
 
 
 class ConfigLoadTests(unittest.TestCase):
+    def test_overlapping_saves_write_one_complete_snapshot(self):
+        config = self._load({})
+        first_started = threading.Event()
+        second_started = threading.Event()
+        snapshots = [{"download_dir": "long" * 1000}, {"download_dir": "short"}]
+        config.data = snapshots[0]
+
+        def dump(value, stream, **kwargs):
+            encoded = json.dumps(value, **kwargs)
+            if threading.current_thread().name == "first-save":
+                stream.write(encoded[:20])
+                stream.flush()
+                first_started.set()
+                second_started.wait(0.2)
+                stream.write(encoded[20:])
+            else:
+                stream.write(encoded)
+                stream.flush()
+                second_started.set()
+
+        first = threading.Thread(target=config.save, name="first-save")
+        second = threading.Thread(target=config.save, name="second-save")
+        with mock.patch.object(config_module.json, "dump", side_effect=dump):
+            first.start()
+            self.assertTrue(first_started.wait(2))
+            config.data = snapshots[1]
+            second.start()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        saved = json.loads(Path(config.path).read_text(encoding="utf-8"))
+        self.assertIn(saved, snapshots)
+
     def _load(self, value):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

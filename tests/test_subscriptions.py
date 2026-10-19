@@ -94,6 +94,82 @@ class _StoreCase:
 
 
 class SubscriptionStoreTests(_StoreCase, unittest.TestCase):
+    def test_overlapping_saves_write_one_complete_snapshot(self):
+        first_started = threading.Event()
+        second_started = threading.Event()
+        snapshots = [[{"id": "long" * 1000}], [{"id": "short"}]]
+        self.store.subs = snapshots[0]
+
+        def dump(value, stream, **kwargs):
+            encoded = json.dumps(value, **kwargs)
+            if threading.current_thread().name == "first-save":
+                stream.write(encoded[:20])
+                stream.flush()
+                first_started.set()
+                second_started.wait(0.2)
+                stream.write(encoded[20:])
+            else:
+                stream.write(encoded)
+                stream.flush()
+                second_started.set()
+
+        def second_save():
+            with self.store._lock:
+                self.store.subs = snapshots[1]
+            self.store.save()
+
+        first = threading.Thread(target=self.store.save, name="first-save")
+        second = threading.Thread(target=second_save, name="second-save")
+        with mock.patch.object(subscriptions.json, "dump", side_effect=dump):
+            first.start()
+            self.assertTrue(first_started.wait(2))
+            second.start()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        saved = json.loads(Path(self.store.path).read_text(encoding="utf-8"))
+        self.assertIn(saved, snapshots)
+
+    def test_a_removed_or_disabled_subscription_does_not_queue_a_slow_listing(self):
+        for action in (self.store.remove,
+                       lambda key: self.store.set_enabled(key, False)):
+            with self.subTest(action=action):
+                sub = self.store.add("https://www.youtube.com/@x", "X", [])
+                entered = threading.Event()
+                release = threading.Event()
+                results = []
+
+                def listing(_sub, entered=entered, release=release):
+                    entered.set()
+                    release.wait(5)
+                    return [_item("new")], "X"
+
+                with mock.patch.object(self.store, "listing", side_effect=listing):
+                    worker = threading.Thread(
+                        target=lambda results=results, sub_id=sub["id"]: results.append(
+                            self.store.check_one(sub_id))
+                    )
+                    worker.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        action(sub["id"])
+                    finally:
+                        release.set()
+                        worker.join(2)
+
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(self.queue.ytdlp, [])
+                self.assertEqual(results[0][0], 0)
+
+    def test_non_user_subscriptions_still_cap_seen_history(self):
+        for kind in (subscriptions.KIND_FEED, subscriptions.KIND_ARTIST):
+            with self.subTest(kind=kind):
+                sub = self.store.add("https://example", "X", list(range(6000)),
+                                     kind=kind)
+                self.assertEqual(len(sub["seen_ids"]), 5000)
+
     def _check(self, sub_id, items, title="Playlist"):
         with mock.patch.object(
                 subscriptions.ytdlp_backend, "extract_flat",
@@ -362,6 +438,12 @@ class FollowedUserTests(_StoreCase, unittest.TestCase):
                 "name": "Music",
                 "files": [_shared("dj", path) for path in paths],
             }])
+
+    def test_a_large_initial_share_is_all_remembered(self):
+        sub = self._user_sub([f"file:{index}" for index in range(6000)])
+
+        self.assertEqual(len(sub["seen_ids"]), 6000)
+        self.assertEqual(len(set(sub["seen_ids"])), 6000)
 
     def test_a_newly_shared_file_is_queued_under_the_sharer(self):
         sub = self._user_sub()

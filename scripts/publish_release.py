@@ -31,6 +31,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from blinddl import parse_version
 
 # Every file a finished release carries, grouped by the machine that
 # builds it, so a missing platform names the host to go and check.
@@ -89,7 +93,7 @@ def version_of(tag: str) -> str:
 
 
 def version_key(tag: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.findall(r"\d+", tag))
+    return parse_version(tag)
 
 
 def release(tag: str) -> dict:

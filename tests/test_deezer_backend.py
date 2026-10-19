@@ -1115,6 +1115,93 @@ class DeezerBackendTests(unittest.TestCase):
             get.call_args.args[0], "https://api.deezer.com/track/3135556")
 
 
+class DeezerRegressionTests(unittest.TestCase):
+    def test_search_accepts_and_threads_limit(self):
+        def page(_path, params):
+            index = params["index"]
+            return {"data": [
+                {"id": i, "title": f"T{i}", "rank": i}
+                for i in range(index + 1, index + params["limit"] + 1)]}
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=page):
+            items = deezer_backend.search("x", limit=5)
+        self.assertEqual(len(items), 5)
+
+    def test_sanitize_dotdot_cannot_traverse(self):
+        self.assertEqual(deezer_backend._sanitize(".."), "track")
+        self.assertEqual(deezer_backend._sanitize("."), "track")
+        self.assertEqual(deezer_backend._sanitize("CON"), "track")
+        self.assertNotIn("/", deezer_backend._sanitize("a/b"))
+
+    def test_blowfish_blocks_decrypted_by_absolute_index_when_split(self):
+        from Crypto.Cipher import Blowfish as _BF
+        key = deezer_backend._blowfish_key("3135556")
+        plain_blocks = [bytes([i]) * deezer_backend._CHUNK for i in range(4)]
+        wire = b""
+        for idx, block in enumerate(plain_blocks):
+            if idx % 3 == 0:
+                wire += _BF.new(key, _BF.MODE_CBC, deezer_backend._IV).encrypt(block)
+            else:
+                wire += block
+
+        class Resp:
+            def __init__(self):
+                self.headers = {"Content-Length": str(len(wire))}
+            def iter_content(self, _size):
+                for pos in range(0, len(wire), 1000):
+                    yield wire[pos:pos + 1000]
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "out.bin")
+            deezer_backend._decrypt_stream(Resp(), "3135556", dest, None, None)
+            with open(dest, "rb") as fh:
+                self.assertEqual(fh.read(), b"".join(plain_blocks))
+
+    def test_album_search_follows_next_and_stops_on_cycle(self):
+        pages = {
+            "/search/album": {"data": [{"id": 1, "title": "A", "nb_tracks": 1}],
+                              "next": "https://api.deezer.com/search/album?index=1"},
+            "https://api.deezer.com/search/album?index=1": {
+                "data": [{"id": 2, "title": "B", "nb_tracks": 1}],
+                "next": "/search/album"},
+        }
+        def api(path, params=None):
+            return pages[path]
+        with mock.patch.object(deezer_backend, "_api_get", side_effect=api):
+            items = deezer_backend.search("x", kind=search_kind.KIND_ALBUM)
+        self.assertEqual([i["title"] for i in items], ["A", "B"])
+
+    def test_tagging_failure_does_not_fail_finished_download(self):
+        session = {"api_token": "c", "license_token": "l",
+                   "http": mock.Mock(), "http_lock": threading.Lock()}
+        metadata = {"DATA": {"SNG_TITLE": "T", "ART_NAME": "A",
+                             "TRACK_TOKEN": "tok"}}
+        media = mock.Mock()
+        media.json.return_value = {"data": [{"media": [{
+            "format": "MP3_128",
+            "sources": [{"url": "https://media.invalid/x"}]}]}]}
+        config = {"deezer_arl": "arl", "deezer_format": "mp3_320",
+                  "sideb_lyrics": False}
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(deezer_backend, "_login", return_value=session), \
+                mock.patch.object(deezer_backend, "_gw_call", return_value=metadata), \
+                mock.patch.object(deezer_backend.requests, "post", return_value=media), \
+                mock.patch.object(deezer_backend.requests, "get", return_value=mock.MagicMock()), \
+                mock.patch.object(deezer_backend, "_decrypt_stream", side_effect=_write_decrypted), \
+                mock.patch.object(deezer_backend, "_cover_bytes", return_value=None), \
+                mock.patch.object(deezer_backend, "_tag_mp3", side_effect=RuntimeError("bad tags")):
+            path = deezer_backend.download(
+                "https://www.deezer.com/track/1", out_dir, config)
+            self.assertTrue(os.path.isfile(path))
+
+    def test_session_eviction_drops_cached_session(self):
+        http = mock.Mock()
+        deezer_backend._sessions["arl"] = {
+            "api_token": "c", "license_token": "l", "http": http,
+            "http_lock": threading.Lock()}
+        deezer_backend._evict_session("arl")
+        self.assertNotIn("arl", deezer_backend._sessions)
+        http.close.assert_called_once()
+
+
 class DeezerPlaybackFileTests(unittest.TestCase):
     """Full playback comes from Deezer itself, decrypted, not from YouTube."""
 
@@ -1296,6 +1383,15 @@ class SidebSearchCostTests(unittest.TestCase):
         self.assertEqual(YouTubeAudio.__name__, "YouTubeAudio")
         self.assertEqual(AudioProvider.__name__, "AudioProvider")
         self.assertTrue(is_instrumental("Song (Instrumental)"))
+
+    def test_locked_home_restores_cwd(self):
+        original = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                sideb_backend, "app_data_dir", return_value=tmp):
+            sideb_backend._home_ready = False
+            with sideb_backend._locked_home():
+                self.assertTrue(os.getcwd().endswith("sideb-home"))
+            self.assertEqual(os.getcwd(), original)
 
     def test_one_tls_context_serves_every_side_b_client(self):
         from sideb.utils.http import default_ssl_context

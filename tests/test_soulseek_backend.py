@@ -78,6 +78,67 @@ def _file(path, extension, size=1024, duration=0):
 
 
 class SoulseekBackendTests(unittest.TestCase):
+    def test_concurrent_submissions_wait_for_the_first_loop_start(self):
+        service = soulseek_backend._Service()
+        entered = threading.Event()
+        release = threading.Event()
+        second_finished = threading.Event()
+        results = []
+        errors = []
+        run_loop = service._run_loop
+
+        def delayed_loop():
+            entered.set()
+            release.wait(5)
+            run_loop()
+
+        async def value(number):
+            return number
+
+        def submit(number):
+            try:
+                future = service._submit(value(number))
+                if number == 2:
+                    second_finished.set()
+                results.append(future.result(timeout=2))
+            except (RuntimeError, AttributeError, TimeoutError) as exc:
+                errors.append(exc)
+                second_finished.set()
+
+        first = threading.Thread(target=submit, args=(1,))
+        second = threading.Thread(target=submit, args=(2,))
+        with mock.patch.object(service, "_run_loop", side_effect=delayed_loop):
+            first.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                second.start()
+                self.assertFalse(second_finished.wait(0.1))
+            finally:
+                release.set()
+                first.join(3)
+                if second.ident is not None:
+                    second.join(3)
+                if service._loop is not None:
+                    service._loop.call_soon_threadsafe(service._loop.stop)
+                    service._thread.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [1, 2])
+
+    def test_a_failed_submission_closes_its_coroutine(self):
+        service = soulseek_backend._Service()
+
+        async def value():
+            return 1
+
+        coroutine = value()
+        with mock.patch.object(service, "_ensure_loop", side_effect=RuntimeError), self.assertRaises(RuntimeError):
+            service._submit(coroutine)
+
+        self.assertIsNone(coroutine.cr_frame)
+
     def config(self, folder):
         config = copy.deepcopy(DEFAULTS)
         config.update(

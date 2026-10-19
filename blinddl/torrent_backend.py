@@ -29,9 +29,12 @@ Nothing is downloaded by this module. It searches, and it opens a magnet.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import os
 import re
+import tempfile
 import threading
 import time
 import defusedxml.ElementTree as ET
@@ -309,6 +312,80 @@ def _text(value):
     return re.sub(r"\s+", " ", stripped).strip()
 
 
+def infohash_from_magnet(magnet):
+    """The lowercase hex info hash named by a magnet link, or "".
+
+    Accepts the hex (40-char) and base32 (32-char) btih forms alike.
+    """
+    text = str(magnet or "").strip()
+    if not text.lower().startswith("magnet:"):
+        return ""
+    for urn in parse_qs(urlparse(text).query).get("xt") or []:
+        value = str(urn).strip()
+        if not value.lower().startswith("urn:btih:"):
+            continue
+        raw = value[len("urn:btih:"):].strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40}", raw):
+            return raw.lower()
+        try:
+            decoded = base64.b32decode(raw.upper())
+        except (ValueError, TypeError):
+            return ""
+        return decoded.hex() if len(decoded) == 20 else ""
+    return ""
+
+
+def _skip_bencode(data, index):
+    """Index just past the bencoded value at *index*."""
+    if index >= len(data):
+        raise ValueError("truncated torrent data")
+    token = data[index:index + 1]
+    if token == b"i":
+        end = data.index(b"e", index)
+        return end + 1
+    if token in (b"l", b"d"):
+        index += 1
+        while data[index:index + 1] != b"e":
+            index = _skip_bencode(data, index)
+            if token == b"d":
+                index = _skip_bencode(data, index)
+        return index + 1
+    if token.isdigit():
+        colon = data.index(b":", index)
+        length = int(data[index:colon])
+        return colon + 1 + length
+    raise ValueError("invalid torrent data")
+
+
+def infohash_from_torrent_data(data):
+    """SHA-1 of a .torrent's bencoded info dict, or "" when unreadable."""
+    try:
+        if not data.startswith(b"d"):
+            return ""
+        index = 1
+        while data[index:index + 1] != b"e":
+            colon = data.index(b":", index)
+            length = int(data[index:colon])
+            key = data[colon + 1:colon + 1 + length]
+            start = colon + 1 + length
+            end = _skip_bencode(data, start)
+            if key == b"info":
+                return hashlib.sha1(data[start:end]).hexdigest()
+            index = end
+    except (ValueError, IndexError, TypeError):
+        return ""
+    return ""
+
+
+def infohash_from_torrent_file(path):
+    """The info hash of the .torrent at *path*, or "" when unreadable."""
+    try:
+        with open(path, "rb") as handle:
+            return infohash_from_torrent_data(handle.read())
+    except OSError:
+        return ""
+
+
 def _item(source, infohash, title, **extra):
     """One normalized result row, shaped like every other blindDL result."""
     infohash = str(infohash or "").strip().lower()
@@ -339,6 +416,13 @@ def _item(source, infohash, title, **extra):
         "url": "",
     }
     item.update(extra)
+    if not item["infohash"]:
+        # A row whose only hash lives inside its magnet still has one;
+        # the hash, not the source, is the torrent's identity.
+        derived = infohash_from_magnet(item.get("magnet"))
+        if derived:
+            item["infohash"] = derived
+            item["id"] = f"{source}:{derived}"
     if item["size_bytes"] and not item["file_size"]:
         item["file_size"] = format_size(item["size_bytes"])
     if item["posted"] and not item["age"]:
@@ -373,6 +457,10 @@ def magnet_for(item):
         return existing
     if str(item.get("download_url") or "").strip():
         return ""
+    if str(item.get("torrent_path") or "").strip():
+        # The file on disk carries the private announce (passkey included);
+        # a magnet rebuilt from its hash alone would lose exactly that.
+        return ""
     infohash = str(item.get("infohash") or "").strip().lower()
     if not infohash:
         return ""
@@ -390,17 +478,25 @@ def resolve_magnet(item, timeout=HTTP_TIMEOUT_S):
     actually downloaded. Returns "" when the row has no hash anywhere.
     """
     magnet = magnet_for(item)
-    if magnet:
-        return magnet
-    source = str(item.get("source") or "")
-    try:
-        if source == SOURCE_EBOOKELO:
-            return _ebookelo_magnet(item, timeout=timeout)
-        if source == SOURCE_AUDIOBOOKBAY:
-            return _audiobookbay_magnet(item, timeout=timeout)
-    except Exception:  # noqa: BLE001 - a dead site must not kill the queue row
-        return ""
-    return ""
+    if not magnet:
+        source = str(item.get("source") or "")
+        try:
+            if source == SOURCE_EBOOKELO:
+                magnet = _ebookelo_magnet(item, timeout=timeout)
+            elif source == SOURCE_AUDIOBOOKBAY:
+                magnet = _audiobookbay_magnet(item, timeout=timeout)
+        except Exception:  # noqa: BLE001 - a dead site must not kill the queue row
+            return ""
+    if magnet and not str(item.get("infohash") or "").strip():
+        # Record the resolved hash on the row itself, so the queue and the
+        # seeding manifest can identify this torrent by it from now on.
+        derived = infohash_from_magnet(magnet)
+        if derived:
+            try:
+                item["infohash"] = derived
+            except TypeError:
+                pass
+    return magnet
 
 
 def fetch_torrent_file(item, out_dir, timeout=HTTP_TIMEOUT_S):
@@ -430,9 +526,21 @@ def fetch_torrent_file(item, out_dir, timeout=HTTP_TIMEOUT_S):
         raise RuntimeError(
             "That tracker did not return a torrent file. The link may have "
             "expired, or the feed's API key may be wrong.")
-    path = os.path.join(out_dir, safe_filename(item.get("title")) + ".torrent")
-    with open(path, "wb") as handle:
-        handle.write(body)
+    # Two rows for the same title can fetch at once. Write to a unique
+    # sibling and replace atomically, so no reader ever sees a torn file.
+    descriptor, temporary = tempfile.mkstemp(
+        dir=out_dir, prefix=safe_filename(item.get("title")) + ".", suffix=".tmp")
+    path = temporary[:-4] + ".torrent"
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -482,22 +590,21 @@ def item_from_link(link):
         # the swarm knows the torrent by, and it is what the row will be
         # replaced with once metadata arrives anyway.
         name = (query.get("dn") or [""])[0].strip()
-        infohash = ""
-        for urn in query.get("xt") or []:
-            if str(urn).lower().startswith("urn:btih:"):
-                infohash = str(urn)[len("urn:btih:"):].strip().lower()
-                break
+        infohash = infohash_from_magnet(candidate)
         item = _item("Magnet link", infohash, name or infohash or "Torrent")
         item["magnet"] = candidate
         return item
     path = os.path.abspath(candidate)
     if not os.path.isfile(path):
         raise RuntimeError(f"There is no torrent file at {candidate}.")
-    item = _item("Torrent file", "", os.path.splitext(
-        os.path.basename(path))[0])
+    item = _item("Torrent file", infohash_from_torrent_file(path),
+                 os.path.splitext(os.path.basename(path))[0])
     # Kept rather than fetched: the file is already on this disk, and it is
     # the only copy that carries a private tracker's passkey.
     item["torrent_path"] = path
+    # The hash identifies the torrent; it must not replace the file as the
+    # download source (see magnet_for), or the passkey above is lost.
+    item["magnet"] = ""
     return item
 
 

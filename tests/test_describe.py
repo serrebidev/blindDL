@@ -76,6 +76,12 @@ class DescribedTrackTests(unittest.TestCase):
 
 
 class AnswerTests(unittest.TestCase):
+    def test_moments_after_one_hundred_minutes_are_kept(self):
+        self.assertEqual(
+            describe.parse_description("00:03 | Start.\n120:05 | Later.\n"),
+            [(3, "Start."), (7205, "Later.")],
+        )
+
     def test_an_answer_becomes_timed_moments(self):
         answer = (
             "00:03 | A woman in a red coat walks into the room.\n"

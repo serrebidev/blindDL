@@ -198,6 +198,40 @@ class ArchiveFileTests(unittest.TestCase):
 
 
 class ArchiveDownloadTests(unittest.TestCase):
+    def test_name_collision_downloads_the_other_item_and_skips_its_redownload(self):
+        entry = {"title": "Episode", "file_name": "episode.mp3",
+                 "identifier": "other", "direct_url": "https://x/other.mp3",
+                 "size_bytes": 8}
+        with tempfile.TemporaryDirectory() as folder:
+            original = os.path.join(folder, "episode.mp3")
+            with open(original, "wb") as handle:
+                handle.write(b"first")
+            with mock.patch.object(archive_backend, "_http") as http:
+                http.return_value.get.return_value = _Response(content=b"new data")
+                path = archive_backend.download(entry, folder)
+                again = archive_backend.download(entry, folder)
+            self.assertEqual(os.path.basename(path), "episode (2).mp3")
+            self.assertEqual(again, path)
+            self.assertEqual(http.return_value.get.call_count, 1)
+            with open(original, "rb") as handle:
+                self.assertEqual(handle.read(), b"first")
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), b"new data")
+
+    def test_complete_partial_416_counts_resumed_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "episode.mp3")
+            with open(path + ".part", "wb") as handle:
+                handle.write(b"complete")
+            with mock.patch.object(archive_backend, "_http") as http:
+                http.return_value.get.return_value = _Response(status_code=416)
+                written = archive_backend._download_file(
+                    "https://x/episode.mp3", path, 4, 12, None, None)
+            self.assertEqual(written, 8)
+            self.assertFalse(os.path.exists(path + ".part"))
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), b"complete")
+
     def test_a_single_file_lands_next_to_the_other_downloads(self):
         entry = {"title": "Episode 1", "file_name": "ep1.mp3",
                  "identifier": "dragnet", "collection_title": "Dragnet",
@@ -337,6 +371,19 @@ class ArchiveDownloadTests(unittest.TestCase):
 
 
 class AudiobookTests(unittest.TestCase):
+    def test_archive_chapters_choose_only_the_64kb_set_in_order(self):
+        payload = {"files": [{"name": name} for name in (
+            "book_02_128kb.mp3", "book_01_128kb.mp3",
+            "book_02_64kb.mp3", "book_01_64kb.mp3")]}
+        with mock.patch.object(audiobook_backend, "_http") as http:
+            http.return_value.get.return_value = _Response(payload=payload)
+            streams = audiobook_backend.archive_streams("book")
+        self.assertEqual(streams, [
+            ("https://archive.org/download/book/book_01_64kb.mp3",
+             "book_01_64kb.mp3"),
+            ("https://archive.org/download/book/book_02_64kb.mp3",
+             "book_02_64kb.mp3")])
+
     def test_an_audiobooker_book_becomes_a_result_row(self):
         book = SimpleNamespace(
             title="The Return of Sherlock Holmes",

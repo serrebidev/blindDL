@@ -38,7 +38,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from . import __version__
+from . import __version__, parse_version
 from .config import app_data_dir
 
 # ytmusicapi is here because Side B is vendored: it breaks whenever YouTube
@@ -127,6 +127,7 @@ DENO_TARGETS = {
     ("darwin", "arm64"): "deno-aarch64-apple-darwin",
 }
 _external_tools_lock = threading.Lock()
+_app_update_lock = threading.Lock()
 # Packages this process has already tried to install. Cleared by an update
 # check, which is the user asking for another go.
 _install_attempted: set[str] = set()
@@ -180,8 +181,7 @@ def _subprocess_options() -> dict[str, Any]:
 
 
 def _version_tuple(value):
-    parts = [int(part) for part in re.findall(r"\d+", str(value))[:3]]
-    return tuple((parts + [0, 0, 0])[:3])
+    return parse_version(value)
 
 
 def _release_platform():
@@ -405,12 +405,19 @@ def download_app_update(update, log=lambda _line: None, progress=None):
     """
     update_dir = Path(app_data_dir()) / "updates" / f"v{update.version}"
     update_dir.mkdir(parents=True, exist_ok=True)
-    checksums_path = update_dir / update.checksum_name
     package_path = update_dir / Path(update.package_name).name
     log(f"Downloading checksum: {update.checksum_name}")
-    _download(update.checksum_url, checksums_path)
+    descriptor, checksums_name = tempfile.mkstemp(
+        prefix=Path(update.checksum_name).name + ".", suffix=".tmp", dir=update_dir)
+    os.close(descriptor)
+    checksums_path = Path(checksums_name)
+    try:
+        _download(update.checksum_url, checksums_path)
+        checksum_lines = checksums_path.read_text(encoding="utf-8").splitlines()
+    finally:
+        checksums_path.unlink(missing_ok=True)
     expected = ""
-    for line in checksums_path.read_text(encoding="utf-8").splitlines():
+    for line in checksum_lines:
         pieces = line.split(None, 1)
         if len(pieces) == 2 and pieces[1].lstrip("*") == update.package_name:
             expected = pieces[0].lower()
@@ -420,12 +427,20 @@ def download_app_update(update, log=lambda _line: None, progress=None):
     # A staged update that never installed leaves its package behind. It is
     # the same hundred-odd megabytes the server would send again, and the
     # checksum above is enough to prove it is the right one.
-    if package_path.is_file() and _file_digest(package_path) == expected:
-        log(f"{update.package_name} was already downloaded and still matches.")
-        _prune_old_updates(update_dir)
-        return package_path
+    with _app_update_lock:
+        if package_path.is_file() and _file_digest(package_path) == expected:
+            log(f"{update.package_name} was already downloaded and still matches.")
+            _prune_old_updates(update_dir)
+            return package_path
     log(f"Downloading {update.package_name}...")
-    partial = package_path.with_name(package_path.name + ".part")
+    # Concurrent checks must not share one .part: two writers to the same
+    # file interleave, and one finishing deletes or replaces the other's
+    # download. A unique staging file in the same folder keeps the final
+    # replace on one filesystem without either download touching the other.
+    handle, partial_name = tempfile.mkstemp(
+        prefix=package_path.name + ".", suffix=".part", dir=update_dir)
+    os.close(handle)
+    partial = Path(partial_name)
     try:
         actual = _download(
             update.package_url, partial, digest=True,
@@ -442,7 +457,12 @@ def download_app_update(update, log=lambda _line: None, progress=None):
         raise UpdateError(
             "The downloaded update failed its SHA-256 check and was deleted."
         )
-    partial.replace(package_path)
+    # Windows cannot replace a file while another check reads or replaces it.
+    with _app_update_lock:
+        if package_path.is_file() and _file_digest(package_path) == expected:
+            partial.unlink(missing_ok=True)
+        else:
+            partial.replace(package_path)
     log("The update package passed its SHA-256 integrity check.")
     _prune_old_updates(update_dir)
     return package_path
@@ -749,7 +769,7 @@ for /f "delims=" %%I in ('dir /b /a "%BACKUP_DIR%" 2^>nul') do (
 exit /b 0
 
 :verify_version
-"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $exe=Join-Path ([string]$env:INSTALL_DIR) ([string]$env:EXE_NAME); $found=''; try { $found=[string](Get-Item -LiteralPath $exe).VersionInfo.FileVersion } catch { }; if (-not $found) { Write-Host 'The new blindDL.exe has no readable version information.'; exit 1 }; function Key([string]$t) { $n=@([regex]::Matches($t,'\d+') | ForEach-Object { [int]$_.Value }); $k=@(0,0,0); for ($i=0; $i -lt 3 -and $i -lt $n.Count; $i++) { $k[$i]=$n[$i] }; return ($k -join '.') }; if ((Key $found) -ne (Key ([string]$env:BLINDDL_VERSION))) { Write-Host ('The folder holds blindDL ' + $found + ', not ' + [string]$env:BLINDDL_VERSION); exit 1 }; exit 0"
+"%PS%" -NoProfile -InputFormat None -Command "$ErrorActionPreference='SilentlyContinue'; $exe=Join-Path ([string]$env:INSTALL_DIR) ([string]$env:EXE_NAME); $found=''; for ($attempt=0; $attempt -lt 10 -and -not $found; $attempt++) { try { $found=[string](Get-Item -LiteralPath $exe).VersionInfo.FileVersion } catch { $found='' }; if (-not $found) { Start-Sleep -Milliseconds 500 } }; if (-not $found) { Write-Host 'The new blindDL.exe has no readable version information.'; exit 1 }; function Key([string]$t) { $n=@([regex]::Matches($t,'\d+') | ForEach-Object { [int]$_.Value }); $k=@(0,0,0); for ($i=0; $i -lt 3 -and $i -lt $n.Count; $i++) { $k[$i]=$n[$i] }; return ($k -join '.') }; if ((Key $found) -ne (Key ([string]$env:BLINDDL_VERSION))) { Write-Host ('The folder holds blindDL ' + $found + ', not ' + [string]$env:BLINDDL_VERSION); exit 1 }; exit 0"
 exit /b %ERRORLEVEL%
 
 :save
@@ -881,6 +901,22 @@ def _forget_update_result():
         pass
 
 
+def _record_pending_update(version):
+    """Leave a pending record before BlindDL closes for an update.
+
+    The platform installer outlives this process, so without a record a
+    failure after the close is silent. On the next start the record is
+    forgiven when the new version is running, and reported otherwise.
+    """
+    _write_update_result({
+        "status": "pending",
+        "ok": False,
+        "version": str(version),
+        "detail": "",
+        "log": "",
+    })
+
+
 def take_update_result(forget=True):
     """Return what the last update helper recorded.
 
@@ -931,28 +967,25 @@ def last_update_failure(forget=True):
     if result is None:
         return None
     version = str(result.get("version") or "").strip()
-    if result.get("ok"):
-        # Only what this blindDL is now running: an "ok" for anything else
-        # is not this install's, and the package may still be wanted.
-        if _version_tuple(version) == _version_tuple(__version__):
-            _discard_staged_update(version)
+    if _version_tuple(version) == _version_tuple(__version__):
+        # The executable itself proves the requested version is now running,
+        # whatever the helper managed to record -- a lost final write, or a
+        # failure reported before a later verify succeeded. Forgive any such
+        # record, not only a pending one.
+        _discard_staged_update(version)
         if not forget:
             _forget_update_result()
         return None
-    if (
-        result.get("status") == "pending"
-        and _version_tuple(version) == _version_tuple(__version__)
-    ):
-        # The helper's final status write was lost, but the executable itself
-        # proves the requested version is now running.
-        _discard_staged_update(version)
+    if result.get("ok"):
+        # An "ok" for anything else is not this install's, and the package
+        # may still be wanted.
         if not forget:
             _forget_update_result()
         return None
     detail = str(result.get("detail") or "").strip()
     if result.get("status") == "pending" and not detail:
         detail = (
-            "the Windows update helper did not report finishing. The verified "
+            "the update helper did not report finishing. The verified "
             "package is still downloaded, so try the update again"
         )
     log_path = str(result.get("log") or "").strip()
@@ -1284,6 +1317,7 @@ def install_app_update(update, package_path, log=lambda _line: None):
             # slash has to come from an absolute path: pkexec runs its program
             # in the target user's home directory, so "./name.deb" would be
             # looked for in root's home, where it is not.
+            _record_pending_update(update.version)
             subprocess.Popen(
                 ["pkexec", "apt-get", "install", "-y",
                  str(package_path.resolve())],
@@ -1307,6 +1341,7 @@ def install_app_update(update, package_path, log=lambda _line: None):
         # only thing left to bring it back; the same script run by hand from a
         # terminal does not, and says what to run instead.
         environment = dict(os.environ, BLINDDL_RESTART="1")
+        _record_pending_update(update.version)
         subprocess.Popen(
             ["sh", str(installer)], cwd=installer.parent, env=environment
         )
@@ -1409,6 +1444,20 @@ def _install_deno_user(log):
         log(f"Installing Deno {version} for the current user...")
         with _open_url(url, timeout=180) as response:
             archive.write_bytes(response.read())
+        # Verify before anything from the archive is extracted or run: the
+        # checksum is fetched separately from the same release, so a
+        # corrupted or substituted zip never becomes an executable.
+        with _open_url(f"{url}.sha256sum", timeout=120) as response:
+            checksum_text = response.read().decode("utf-8", "replace")
+        fields = checksum_text.split()
+        expected = fields[0].lower() if fields else ""
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            archive.unlink(missing_ok=True)
+            raise UpdateError("The Deno release returned no usable checksum.")
+        if _file_digest(archive) != expected:
+            archive.unlink(missing_ok=True)
+            raise UpdateError(
+                "The downloaded Deno archive failed its SHA-256 check.")
         with zipfile.ZipFile(archive) as bundle:
             name = next(
                 (item for item in bundle.namelist()

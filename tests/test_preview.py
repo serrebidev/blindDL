@@ -85,3 +85,16 @@ def test_bandcamp_doubled_url_normalized(monkeypatch):
     items = bandcamp_backend.search("radiohead creep")
     assert items and items[0]["url"] == (
         "https://djwarrentrack.bandcamp.com/album/radiohead-creep-3-versions")
+
+
+def test_bandcamp_skips_idless_and_includes_artists(monkeypatch):
+    from blinddl import bandcamp_backend
+    data = {"results": [
+        {"type": "b", "id": 5, "name": "Radiohead", "url": "radiohead.bandcamp.com"},
+        {"type": "t", "name": "No id", "url": "x.bandcamp.com/track/y"},
+        {"type": "a", "id": 6, "name": "Album", "url": "x.bandcamp.com/album/z"},
+    ]}
+    monkeypatch.setattr(bandcamp_backend, "_api_get", lambda *a, **k: data)
+    items = bandcamp_backend.search("radiohead")
+    assert [i["title"] for i in items] == ["Radiohead", "Album"]
+    assert items[0]["format"] == "Artist"

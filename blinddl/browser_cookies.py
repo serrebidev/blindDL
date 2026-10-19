@@ -307,9 +307,15 @@ def _elevate(candidates, dest_path, require, errors):
     except ImportError as exc:
         errors.append(f"app-bound cookie decryption is unavailable: {exc}")
         return None
-    label, app_errors = app_bound.export_elevated(
-        candidates, dest_path, require=require
-    )
+    try:
+        label, app_errors = app_bound.export_elevated(
+            candidates, dest_path, require=require
+        )
+    except ImportError as exc:
+        # app_bound imports win32api and friends only when it runs, so the
+        # import above succeeds even when pywin32 is missing.
+        errors.append(f"app-bound cookie decryption is unavailable: {exc}")
+        return None
     errors.extend(app_errors)
     return label
 

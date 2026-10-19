@@ -110,6 +110,7 @@ def _row(sizer, label_ctrl, ctrl):
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, config):
         super().__init__(parent, title="Settings")
+        self._alive = True
         self.config = config
         # The main window, so handlers can announce results on its status bar.
         self.frame = parent
@@ -935,6 +936,10 @@ class SettingsDialog(wx.Dialog):
         page.SetScrollRate(0, 12)
         return page
 
+    def Destroy(self):
+        self._alive = False
+        return super().Destroy()
+
     def _on_soulseek_account(self, event):
         username = self.soulseek_username_text.GetValue().strip()
         password = self.soulseek_password_text.GetValue()
@@ -965,6 +970,8 @@ class SettingsDialog(wx.Dialog):
         wx.CallAfter(self._soulseek_account_ready, username)
 
     def _soulseek_account_ready(self, username):
+        if not self._alive:
+            return
         self.soulseek_account_button.Enable(self.soulseek_enabled_check.GetValue())
         self.soulseek_account_status.SetLabel(
             f"Signed in as {username}. New usernames are now registered."
@@ -979,6 +986,8 @@ class SettingsDialog(wx.Dialog):
         )
 
     def _soulseek_account_failed(self, error):
+        if not self._alive:
+            return
         self.soulseek_account_button.Enable(self.soulseek_enabled_check.GetValue())
         self.soulseek_account_status.SetLabel(f"Sign in failed: {error}")
         wx.MessageBox(
