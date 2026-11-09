@@ -314,9 +314,10 @@ class ForgejoClient:
         return (data or {}).get("tag_name")
 
     def download(self, url: str) -> bytes:
-        _status, raw = self._http(
-            "GET", url, {"User-Agent": "blindDL-release"}, None, API_TIMEOUT
-        )
+        # Draft assets need the token just like the draft itself; without
+        # it the checksum gate silently verifies nothing (v0.26.4).
+        headers = self._headers({"User-Agent": "blindDL-release"})
+        _status, raw = self._http("GET", url, headers, None, API_TIMEOUT)
         if _status >= 400:
             raise ReleaseError(
                 f"Forgejo download failed: {url} ({_status})"
@@ -594,6 +595,11 @@ def publish_one(
         if missing:
             print(f"{tag} is already published but incomplete:")
             report(missing)
+            return 1
+        problems = checksum_problems(client, info)
+        if problems:
+            print(f"{tag} is already published but does not verify:")
+            report(problems)
             return 1
         print(f"{tag} is already published and complete.")
         return verify_latest(client, tag)

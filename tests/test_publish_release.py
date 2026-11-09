@@ -259,6 +259,16 @@ def test_upload_assets_replaces_differing_file(tmp_path):
     assert methods[1] == ("POST", "/releases/42/assets")
 
 
+def test_download_sends_token_for_draft_assets():
+    client, http = _client({})
+    try:
+        client.download("https://forgejo.invalid/dl/SHA256SUMS-x.txt")
+    except publish_release.ReleaseError:
+        pass
+    _method, _path, headers = http.calls[-1]
+    assert headers["Authorization"] == "token token"
+
+
 def test_delete_draft_only_deletes_drafts():
     client, _http = _client({
         ("GET", "/releases/tags/v9.9.9"): [(404, b"{}")],

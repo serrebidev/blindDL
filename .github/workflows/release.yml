@@ -100,8 +100,8 @@ jobs:
           set -euo pipefail
           api="https://$FORGEJO_HOST/api/v1/repos/$FORGEJO_REPO"
           [ -n "$FORGEJO_TOKEN" ] || { echo "::error::FORGEJO_TOKEN secret is not set."; exit 1; }
-          # The draft is created before the tag is pushed, so it is normally
-          # already here; wait a while in case the tag came first.
+          # The tag is pushed before the draft is created (a tag push
+          # auto-publishes a matching draft), so wait for the draft here.
           for attempt in $(seq 1 30); do
             release="$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
               "$api/releases/tags/$GITHUB_REF_NAME")"

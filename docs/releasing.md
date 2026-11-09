@@ -23,11 +23,14 @@ invisible to unauthenticated reads.
 
 1. Run `build.bat` (no argument). It tests and builds `release/` with the
    weekly libtorrent wheel.
-2. Push `main`, then create the draft **before** pushing the tag:
+2. Push `main`, then tag and push the tag:
+   `git tag vX.Y.Z` and `git push forgejo main vX.Y.Z`. The tag must point
+   at the pushed release commit.
+3. Create the draft **after** pushing the tag:
    `python scripts/publish_release.py vX.Y.Z --create --notes-file notes.md --assets "release/*"`.
-   The tag must point at the pushed release commit, and the macOS leg's
-   upload waits on the draft.
-3. Tag and push the tag: `git tag vX.Y.Z` and `git push forgejo main vX.Y.Z`.
+   Pushing a tag auto-publishes a matching Forgejo draft, so a draft made
+   first would go out with only the Windows artifacts on it. The macOS
+   leg's upload polls for the draft rather than failing without it.
 4. Build Linux on `root@serrebiradio.com` from the tag with
    `tools/build_linux_release.sh`, then from its `release/` directory run
    `python scripts/publish_release.py vX.Y.Z --upload --assets "release/*"`.
