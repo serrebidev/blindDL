@@ -139,7 +139,7 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 # down with the blindDL that started it -- an update that does nothing
 # at all, with nothing to show for it.
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
-RELEASE_API_URL = "https://api.github.com/repos/serrebidev/blindDL/releases/latest"
+RELEASE_API_URL = "https://git.serrebiradio.com/api/v1/repos/serrebi/blindDL/releases/latest"
 # Written by the Windows helper scripts once they have finished, win or lose,
 # and read on the next start. An update that dies between two processes has
 # nowhere else to say so, which is how a silent failure used to look like
@@ -163,7 +163,7 @@ class UpdateError(RuntimeError):
 
 @dataclass(frozen=True)
 class AppUpdate:
-    """One newer GitHub release and its package for this installation."""
+    """One newer Forgejo release and its package for this installation."""
 
     version: str
     page_url: str
@@ -236,7 +236,7 @@ def _asset_map(release):
 def _select_update(release):
     version = str(release.get("tag_name") or "").lstrip("vV")
     if not version:
-        raise UpdateError("The latest GitHub release has no version tag.")
+        raise UpdateError("The latest Forgejo release has no version tag.")
     if _version_tuple(version) <= _version_tuple(__version__):
         return None
 
@@ -283,7 +283,7 @@ def _open_url(url, timeout=30):
     if urlparse(str(url)).scheme.casefold() != "https":
         raise UpdateError("The update server returned a non-HTTPS URL.")
     request = Request(url, headers={
-        "Accept": "application/vnd.github+json",
+        "Accept": "application/json",
         "User-Agent": UPDATE_USER_AGENT,
     })
     try:

@@ -1362,7 +1362,7 @@ class MainFrame(wx.Frame):
     def _check_for_release(self, log):
         """Look for a newer blindDL, and fetch it when asked to.
 
-        A check that cannot reach GitHub says nothing: this runs on its own
+        A check that cannot reach Forgejo says nothing: this runs on its own
         every twelve hours, and a passing network fault is not news. A
         download that fails after an update *was* found is worth saying,
         because by then something was expected to happen. So is an install
