@@ -4,7 +4,7 @@
 
 import re as _re
 
-__version__ = "0.26.3"
+__version__ = "0.26.4"
 APP_NAME = "blindDL"
 
 
