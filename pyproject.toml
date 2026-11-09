@@ -118,8 +118,8 @@ dependencies = [
 version = { attr = "blinddl.__version__" }
 
 [project.urls]
-Homepage = "https://github.com/serrebidev/blindDL"
-Issues = "https://github.com/serrebidev/blindDL/issues"
+Homepage = "https://git.serrebiradio.com/serrebi/blindDL"
+Issues = "https://git.serrebiradio.com/serrebi/blindDL/issues"
 
 [project.gui-scripts]
 blinddl = "blinddl.__main__:main"

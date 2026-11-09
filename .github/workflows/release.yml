@@ -5,8 +5,12 @@ name: Build macOS release
 
 # Windows x64 releases are built locally with build.bat. Linux x64 releases
 # are built over SSH on root@serrebiradio.com with
-# tools/build_linux_release.sh. Hosted release runners intentionally own only
-# the two macOS architectures below.
+# tools/build_linux_release.sh. This workflow is the secondary macOS leg: it
+# builds the Apple Silicon DMG on a hosted runner and attaches it to the
+# Forgejo release, where scripts/publish_release.py publishes once every
+# platform has landed. It needs a FORGEJO_TOKEN secret with release scope.
+# While the GitHub account is unreachable there is no macOS leg and releases
+# go out with --skip-macos; nothing here blocks them.
 
 on:
   push:
@@ -15,7 +19,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   audit:
@@ -73,16 +77,13 @@ jobs:
           path: release/*
           if-no-files-found: error
 
-  publish:
-    name: Publish the release
+  upload:
+    name: Attach macOS packages to the Forgejo release
     if: startsWith(github.ref, 'refs/tags/')
     needs: macos
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
       # Only the macOS packages: a dispatched run's gitleaks artifact brought a
       # release/work directory that made the upload below fail (v0.24.54).
       - uses: actions/download-artifact@v8
@@ -90,24 +91,41 @@ jobs:
           pattern: blindDL-macos-*
           path: release
           merge-multiple: true
-      - name: Upload macOS packages to the existing release
+      - name: Upload macOS packages to the Forgejo draft
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          FORGEJO_HOST: git.serrebiradio.com
+          FORGEJO_REPO: serrebi/blindDL
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" release/* --clobber
-      # macOS is usually the last of the three build hosts to finish, so
-      # this waits for Windows and Linux to land their artifacts and then
-      # takes the release out of draft. A draft is invisible on the
-      # Releases page and skipped by the /releases/latest endpoint the
-      # updater reads, so leaving one behind hides a finished release
-      # from everybody. Release guard catches anything this misses.
-      - name: Wait for every platform, then publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          python scripts/publish_release.py "$GITHUB_REF_NAME" \
-            --wait-minutes 120 \
-            --verify-source-version
+          set -euo pipefail
+          api="https://$FORGEJO_HOST/api/v1/repos/$FORGEJO_REPO"
+          [ -n "$FORGEJO_TOKEN" ] || { echo "::error::FORGEJO_TOKEN secret is not set."; exit 1; }
+          # The draft is created before the tag is pushed, so it is normally
+          # already here; wait a while in case the tag came first.
+          for attempt in $(seq 1 30); do
+            release="$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
+              "$api/releases/tags/$GITHUB_REF_NAME")"
+            id="$(echo "$release" | jq -r .id)"
+            if [ -n "$id" ] && [ "$id" != "null" ]; then
+              break
+            fi
+            echo "No Forgejo draft for $GITHUB_REF_NAME yet; waiting (attempt $attempt/30)."
+            sleep 60
+          done
+          [ -n "$id" ] && [ "$id" != "null" ] || {
+            echo "::error::No Forgejo draft for $GITHUB_REF_NAME after 30 minutes."
+            exit 1
+          }
+          for file in release/*; do
+            name="$(basename "$file")"
+            if echo "$release" | jq --arg name "$name" -e \
+              '[.assets[].name] | index($name) != null' >/dev/null; then
+              echo "$name is already attached to $GITHUB_REF_NAME."
+              continue
+            fi
+            echo "Uploading $name..."
+            curl -sS -H "Authorization: token $FORGEJO_TOKEN" \
+              -F "attachment=@$file" \
+              "$api/releases/$id/assets?name=$name" >/dev/null
+          done
+          echo "macOS packages are on the Forgejo draft. The release host publishes with scripts/publish_release.py once Linux lands."

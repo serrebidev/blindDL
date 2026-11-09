@@ -380,7 +380,7 @@ class MusicBrainzTests(unittest.TestCase):
     def test_the_user_agent_names_the_application(self):
         """Anonymous clients get blocked, so the header is not optional."""
         self.assertIn("blindDL", music_tags._USER_AGENT)
-        self.assertIn("github.com/serrebidev/blindDL", music_tags._USER_AGENT)
+        self.assertIn("git.serrebiradio.com/serrebi/blindDL", music_tags._USER_AGENT)
 
 
 class ITunesTests(unittest.TestCase):

@@ -43,7 +43,7 @@ from . import APP_NAME, __version__, music_match
 # contact whoever runs it; anonymous clients get blocked.
 _USER_AGENT = (
     f"{APP_NAME}/{__version__} "
-    "( https://github.com/serrebidev/blindDL )"
+    "( https://git.serrebiradio.com/serrebi/blindDL )"
 )
 _MB_ROOT = "https://musicbrainz.org/ws/2"
 # MusicBrainz allows one request per second per application, averaged. The

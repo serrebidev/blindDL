@@ -352,7 +352,7 @@ def package_deb(app_version: str) -> Path:
         f"Installed-Size: {installed_kib}\n"
         f"Maintainer: serrebidev\n"
         f"Depends: ffmpeg, nodejs, libvlc5, vlc-plugin-base, python3-wxgtk-media4.0, libgtk-3-0 | libgtk-3-0t64, libnotify4 | libnotify4t64\n"
-        f"Homepage: https://github.com/serrebidev/blindDL\n"
+        f"Homepage: https://git.serrebiradio.com/serrebi/blindDL\n"
         f"Description: Accessible cross-platform media downloader\n"
         f" blindDL provides keyboard and screen-reader accessible media search,\n"
         f" downloading, queues, and subscriptions.\n",

@@ -56,7 +56,7 @@ Optional adult and account-based sites are supported and switched off by default
 
 ## Download and install
 
-Grab the latest build from the [Releases page](https://github.com/serrebidev/blindDL/releases).
+Grab the latest build from the [Releases page](https://git.serrebiradio.com/serrebi/blindDL/releases).
 
 **Windows installer (recommended)**
 
@@ -222,7 +222,7 @@ The Subscriptions tab's **Sort by** control changes only how subscriptions are d
 
 ## Building
 
-The default release path runs the credential audit, complete tests, frozen self-test, and native packaging on each maintained build machine. On Windows, install the requirements plus PyInstaller and pytest, then run `build.bat`. On `root@serrebiradio.com`, use a fresh checkout and run `tools/build_linux_release.sh`; it creates a clean release virtual environment, links only Debian's native wxPython package into it, verifies dependency consistency, and writes the x64 tarball and Debian package to `release/`. macOS continues to run `./build.sh` in GitHub Actions. Ordinary source builds can still call `python tools/build_release.py` directly.
+The default release path runs the credential audit, complete tests, frozen self-test, and native packaging on each maintained build machine. On Windows, install the requirements plus PyInstaller and pytest, then run `build.bat`. On `root@serrebiradio.com`, use a fresh checkout and run `tools/build_linux_release.sh`; it creates a clean release virtual environment, links only Debian's native wxPython package into it, verifies dependency consistency, and writes the x64 tarball and Debian package to `release/`. macOS is a secondary leg that builds on a hosted runner when that account is reachable. Ordinary source builds can still call `python tools/build_release.py` directly.
 
 Complete builds verify that libtorrent imports before PyInstaller starts. The
 Windows `build.bat` release path always reinstalls the newest compatible wheel
@@ -235,16 +235,15 @@ can be used by a release build. Their source-controlled entry points are
 `tools/update_libtorrent_windows.ps1` and
 `tools/update_libtorrent_linux.sh`.
 
-Release artifacts are built and self-tested on their target operating systems. Windows x64 is built on the maintainer's Windows machine, Linux x64 is built on `serrebiradio.com`, and GitHub Actions builds the Apple-silicon macOS DMG when a version tag such as `v0.1.0` is published. The Windows and Linux frozen self-tests remove every developer Python path; Linux additionally runs with an empty executable search path. A release is rejected unless its packaged executable identifies its embedded Python and imports its bundled libtorrent.
+Release artifacts are built and self-tested on their target operating systems. Windows x64 is built on the maintainer's Windows machine, Linux x64 is built on `serrebiradio.com`, and a secondary hosted runner builds the Apple-silicon macOS DMG when that account is reachable. The Windows and Linux frozen self-tests remove every developer Python path; Linux additionally runs with an empty executable search path. A release is rejected unless its packaged executable identifies its embedded Python and imports its bundled libtorrent.
 
-Because three machines build one release, nobody publishes it by hand.
-`scripts/publish_release.py` owns that last step: it checks the draft carries
-all eight artifacts, verifies each one against the checksum its builder
-published, and only then takes the release out of draft and marks it latest.
-The tag build runs it after uploading the macOS DMGs, waiting up to two hours
-for the other two hosts. The `Release guard` workflow sweeps every six hours
-for a complete release still sitting in draft and publishes it, and fails
-loudly once a draft has been incomplete for a day. A draft is invisible on the
+Because several machines build one release, nobody publishes it by hand.
+`scripts/publish_release.py` owns that last step against the Forgejo release:
+it checks the draft carries every platform artifact, verifies each checksum
+listing names files the release actually carries, and only then takes the
+release out of draft and confirms it is latest. Its `--sweep` mode catches a
+complete release still sitting in draft and fails loudly once a draft has
+been incomplete for a day. A draft is invisible on the
 Releases page and skipped by the `/releases/latest` endpoint the in-app
 updater reads, so one left behind hides a finished release from everybody —
 which is what happened to v0.24.24. To hold a draft back deliberately, put
@@ -298,4 +297,4 @@ Bundled dependencies keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD
 
 ## Community and support
 
-Report bugs and request features in [Issues](https://github.com/serrebidev/blindDL/issues). For questions, feedback, and release news, join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects).
+Report bugs and request features in [Issues](https://git.serrebiradio.com/serrebi/blindDL/issues). For questions, feedback, and release news, join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects).

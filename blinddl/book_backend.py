@@ -73,7 +73,7 @@ MAX_RESULTS_PER_SOURCE = 200
 MIN_SCORE = 35.0
 
 USER_AGENT = ("blindDL/1.0 (accessible downloader; "
-              "https://github.com/serrebidev/blindDL)")
+              "https://git.serrebiradio.com/serrebi/blindDL)")
 HEADERS = {"User-Agent": USER_AGENT}
 
 IA_SEARCH_URL = "https://archive.org/advancedsearch.php"

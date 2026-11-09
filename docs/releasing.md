@@ -1,22 +1,55 @@
 # Releasing blindDL
 
-Every release carries eight artifacts: Windows x64 (installer, zip, checksums), Linux x64 (tarball, .deb, checksums) and the Apple Silicon macOS DMG with its checksums. Intel Macs are not built. `scripts/publish_release.py` publishes a draft only when all eight are in place. Tags are `vX.Y.Z` and the release title is the tag. Release notes are house prose: an opening one-line summary, no bullet lists, no version numbers in headings.
+Releases live on Forgejo at `serrebi/blindDL`, and the in-app updater reads
+them from there. GitHub is a secondary mirror: while that account is
+reachable its `release.yml` leg builds the Apple Silicon macOS DMG, but a
+release never waits on it.
 
-Start every release by bumping `__version__` in `blinddl/__init__.py` and committing `chore: release X.Y.Z` to `main`.
+Every release carries six artifacts: Windows x64 (installer, zip,
+checksums) and Linux x64 (tarball, .deb, checksums), plus the macOS DMG
+with its checksums when the secondary leg ran. Intel Macs are not built.
+`scripts/publish_release.py` publishes a draft only when everything it was
+told to expect is in place. Tags are `vX.Y.Z` and the release title is the
+tag. Release notes are house prose: an opening one-line summary, no bullet
+lists, no version numbers in headings.
+
+Start every release by bumping `__version__` in `blinddl/__init__.py` and
+committing `chore: release X.Y.Z` to `main`. Every command below needs
+`FORGEJO_TOKEN` in the environment (host: the user variable; VPS:
+`/root/forgejo-muse-token.txt`), including `--check-only`: drafts are
+invisible to unauthenticated reads.
 
 ## On the Windows release host
 
-1. Run `build.bat` (no argument). It tests and builds `release/` with the weekly libtorrent wheel.
-2. Create the draft **before** pushing the tag: `gh release create vX.Y.Z --draft --latest=false release/* --notes-file notes.md`. If the tag comes first, release.yml's macOS publish fails with "release not found".
-3. Push `main` and the tag. `release.yml` builds the Apple Silicon DMG.
-4. Build Linux on `root@serrebiradio.com` from the tag with `tools/build_linux_release.sh`, then upload its three files.
-5. `release.yml` (or `python scripts/publish_release.py vX.Y.Z`) publishes once all eight are present.
+1. Run `build.bat` (no argument). It tests and builds `release/` with the
+   weekly libtorrent wheel.
+2. Push `main`, then create the draft **before** pushing the tag:
+   `python scripts/publish_release.py vX.Y.Z --create --notes-file notes.md --assets "release/*"`.
+   The tag must point at the pushed release commit, and the macOS leg's
+   upload waits on the draft.
+3. Tag and push the tag: `git tag vX.Y.Z` and `git push forgejo main vX.Y.Z`.
+4. Build Linux on `root@serrebiradio.com` from the tag with
+   `tools/build_linux_release.sh`, then from its `release/` directory run
+   `python scripts/publish_release.py vX.Y.Z --upload --assets "release/*"`.
+5. Publish once every platform has landed:
+   `python scripts/publish_release.py vX.Y.Z [--skip-macos]`. Without the
+   macOS leg, `--skip-macos` is required or the missing DMG blocks the
+   publish. The script verifies the checksums and confirms
+   `/releases/latest` afterwards.
+6. `python scripts/publish_release.py --sweep` catches a complete release
+   left in draft and fails loudly on one incomplete for a day. To hold a
+   draft back deliberately, put `<!-- no-autopublish -->` in its body.
 
-## Muse agent and cloud agents only
+To publish or check one by hand:
 
-The Muse agent and cloud agents, which have no Windows host, use `.github/workflows/cloud-release.yml`, which builds every platform on GitHub runners. Never use it on the release host, and never run it while a host release is in progress.
+```
+python scripts/publish_release.py vX.Y.Z --check-only
+python scripts/publish_release.py vX.Y.Z --skip-macos
+```
 
-- `gh workflow run cloud-release.yml -f dry_run=true` runs `build.bat` on Windows and `tools/build_linux_release.sh` in a `debian:trixie` container, uploading both as workflow artifacts. It tags and publishes nothing.
-- `gh workflow run cloud-release.yml -f dry_run=false -f notes="$(cat notes.md)"` does the real release. It builds both platforms, creates the draft with the notes, creates the tag, then dispatches `release.yml` on the tag and waits for it. A tag created with `GITHUB_TOKEN` starts no workflow, so the dispatch is required. `release.yml` builds macOS and publishes, then the workflow checks `/releases/latest`.
-- Watch with `gh run watch <id> --exit-status`. If `release.yml` fails, re-run its failed jobs. Do not start a new cloud release, because the tag already exists.
-- Windows uses the maintained CPython 3.14 libtorrent wheel from the `libtorrent-wheels` pre-release, which is never Latest and never a `v*` tag. After the weekly wheel build, refresh it with `gh release upload libtorrent-wheels <new .whl> --clobber`; the newest stamp wins.
+## Cloud agents
+
+There is no cloud release path: the old `cloud-release.yml` built every
+platform on hosted runners and died with the GitHub account. A release
+needs the Windows host (and the Linux VPS); agents without them stop after
+the `chore: release X.Y.Z` commit and say so.

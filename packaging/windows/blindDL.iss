@@ -10,7 +10,7 @@
   #define MyAppArch "x64"
 #endif
 #define MyAppPublisher "serrebidev"
-#define MyAppURL "https://github.com/serrebidev/blindDL"
+#define MyAppURL "https://git.serrebiradio.com/serrebi/blindDL"
 #define MyAppExeName "blindDL.exe"
 
 [Setup]
