@@ -82,7 +82,7 @@ jobs:
         run: python -m pytest -q
       - name: Build packages
         run: python tools/build_release.py
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: blindDL-macos-${{ matrix.arch }}
           path: release/*
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/checkout@v7
       # Only the macOS packages: a dispatched run's gitleaks artifact brought a
       # release/work directory that made the upload below fail (v0.24.54).
-      - uses: actions/download-artifact@v8
+      - uses: https://code.forgejo.org/forgejo/download-artifact@v4
         with:
           pattern: blindDL-macos-*
           path: release
