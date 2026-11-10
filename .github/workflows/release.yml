@@ -4,8 +4,8 @@
 name: Build macOS release
 
 # Windows x64 releases are built locally with build.bat. Linux x64 releases
-# are built over SSH on root@serrebiradio.com with
-# tools/build_linux_release.sh. This workflow is the secondary macOS leg: it
+# are built in local WSL (ssh wsl-build) with tools/build_linux_remote.sh,
+# which runs tools/build_linux_release.sh in a debian:trixie container. This workflow is the secondary macOS leg: it
 # builds the Apple Silicon DMG on the Forgejo Mac runner and attaches it to the
 # Forgejo release, where scripts/publish_release.py publishes once every
 # platform has landed. Forgejo's automatic job token (FORGEJO_TOKEN) does the

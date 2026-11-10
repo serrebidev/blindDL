@@ -31,8 +31,8 @@ invisible to unauthenticated reads.
    Pushing a tag auto-publishes a matching Forgejo draft, so a draft made
    first would go out with only the Windows artifacts on it. The macOS
    leg's upload polls for the draft rather than failing without it.
-4. Build Linux on `root@serrebiradio.com` from the tag with
-   `tools/build_linux_release.sh`, then from its `release/` directory run
+4. Build Linux in local WSL: `ssh wsl-build bash -s -- vX.Y.Z < tools/build_linux_remote.sh`
+   (debian:trixie container; prints the release dir), `scp wsl-build:<dir>/* release/`, then run
    `python scripts/publish_release.py vX.Y.Z --upload --assets "release/*"`.
 5. Publish once every platform has landed:
    `python scripts/publish_release.py vX.Y.Z [--skip-macos]`. Without the

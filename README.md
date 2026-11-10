@@ -222,7 +222,7 @@ The Subscriptions tab's **Sort by** control changes only how subscriptions are d
 
 ## Building
 
-The default release path runs the credential audit, complete tests, frozen self-test, and native packaging on each maintained build machine. On Windows, install the requirements plus PyInstaller and pytest, then run `build.bat`. On `root@serrebiradio.com`, use a fresh checkout and run `tools/build_linux_release.sh`; it creates a clean release virtual environment, links only Debian's native wxPython package into it, verifies dependency consistency, and writes the x64 tarball and Debian package to `release/`. macOS is a secondary leg that builds on a hosted runner when that account is reachable. Ordinary source builds can still call `python tools/build_release.py` directly.
+The default release path runs the credential audit, complete tests, frozen self-test, and native packaging on each maintained build machine. On Windows, install the requirements plus PyInstaller and pytest, then run `build.bat`. For releases, run `ssh wsl-build bash -s -- vX.Y.Z < tools/build_linux_remote.sh` from Windows (local WSL, debian:trixie container) or, on a Debian 13 machine, use a fresh checkout and run `tools/build_linux_release.sh`; it creates a clean release virtual environment, links only Debian's native wxPython package into it, verifies dependency consistency, and writes the x64 tarball and Debian package to `release/`. macOS is a secondary leg that builds on a hosted runner when that account is reachable. Ordinary source builds can still call `python tools/build_release.py` directly.
 
 Complete builds verify that libtorrent imports before PyInstaller starts. The
 Windows `build.bat` release path always reinstalls the newest compatible wheel
