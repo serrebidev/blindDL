@@ -1033,7 +1033,11 @@ class MainFrame(wx.Frame):
             "Torrent results open in your own BitTorrent client, or download "
             "here when Settings, Torrents says so. Add your Prowlarr or "
             "Jackett in Tools, My torrent indexers to search private "
-            "trackers too.",
+            "trackers too.\n\n"
+            "Author: serrebidev. GitHub: https://github.com/serrebidev/blindDL. "
+            "Forgejo: https://git.serrebiradio.com/serrebi/blindDL. "
+            "Projects: https://projects.serrebiradio.com. "
+            "Telegram: https://t.me/SerrebiProjects. Full credits: CREDITS.md.",
             f"About {APP_NAME}",
             wx.OK | wx.ICON_INFORMATION,
             self,
