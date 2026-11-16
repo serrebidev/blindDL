@@ -7,6 +7,8 @@ A vibe-coded, screen-reader-friendly desktop media downloader for Windows, macOS
 
 **Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects), the fastest place to get help.
 
+More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+
 ## Features
 
 - Downloads single videos, playlists, and whole channels from any link yt-dlp supports.
@@ -298,3 +300,7 @@ Bundled dependencies keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD
 ## Community and support
 
 Report bugs and request features in [Issues](https://git.serrebiradio.com/serrebi/blindDL/issues). For questions, feedback, and release news, join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects).
+
+## Credits
+
+See [CREDITS.md](CREDITS.md) for where the ideas behind this project came from, and the third-party projects it builds on.
