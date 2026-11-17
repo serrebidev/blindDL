@@ -1009,9 +1009,12 @@ class MainFrame(wx.Frame):
 
     def on_about(self, event):
         from .. import __version__
+        from .about_dialog import serrebi_links, show_about
 
-        wx.MessageBox(
-            f"blindDL {__version__}\n\n"
+        show_about(
+            self,
+            f"About {APP_NAME}",
+            f"blindDL {__version__}",
             "Accessible media downloader.\n"
             "MIT licensed. Copyright (c) 2024-2026 "
             "serrebidev and contributors.\n\n"
@@ -1034,13 +1037,8 @@ class MainFrame(wx.Frame):
             "here when Settings, Torrents says so. Add your Prowlarr or "
             "Jackett in Tools, My torrent indexers to search private "
             "trackers too.\n\n"
-            "Author: serrebidev. GitHub: https://github.com/serrebidev/blindDL. "
-            "Forgejo: https://git.serrebiradio.com/serrebi/blindDL. "
-            "Projects: https://projects.serrebiradio.com. "
-            "Telegram: https://t.me/SerrebiProjects. Full credits: CREDITS.md.",
-            f"About {APP_NAME}",
-            wx.OK | wx.ICON_INFORMATION,
-            self,
+            "Author: serrebidev.",
+            serrebi_links("serrebidev/blindDL", "serrebi/blindDL"),
         )
 
     # -- closing and the system tray --------------------------------------------
