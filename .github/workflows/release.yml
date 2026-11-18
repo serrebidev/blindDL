@@ -3,18 +3,13 @@
 # SPDX-License-Identifier: MIT
 name: Build macOS release
 
-# Windows x64 releases are built locally with build.bat. Linux x64 releases
-# are built in local WSL (ssh wsl-build) with tools/build_linux_remote.sh,
-# which runs tools/build_linux_release.sh in a debian:trixie container. This workflow is the secondary macOS leg: it
-# builds the Apple Silicon DMG on the Forgejo Mac runner and attaches it to the
-# Forgejo release, where scripts/publish_release.py publishes once every
-# platform has landed. Forgejo's automatic job token (FORGEJO_TOKEN) does the
-# upload. Dispatch on main with release_tag to add macOS to an existing release.
+# The macOS leg of a release. cloud-release.yml starts this with release_tag: it
+# builds the Apple Silicon DMG on a GitHub runner and attaches it to the Forgejo
+# draft, where scripts/publish_release.py publishes once every platform has landed.
+# Manual only: the Forgejo-to-GitHub sync disables GitHub workflows with
+# automatic triggers.
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       release_tag:

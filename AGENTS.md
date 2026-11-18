@@ -1,4 +1,4 @@
-Release: see `docs/releasing.md` (host flow on Forgejo; there is no cloud release path).
+Release: see `docs/releasing.md` (GitHub runners build every platform; releases publish on Forgejo).
 
 
 ## Agent skills

@@ -1,9 +1,8 @@
 # Releasing blindDL
 
 Releases live on Forgejo at `serrebi/blindDL`, and the in-app updater reads
-them from there. GitHub is a secondary mirror: while that account is
-reachable its `release.yml` leg builds the Apple Silicon macOS DMG, but a
-release never waits on it.
+them from there. Every platform builds on GitHub runners through
+`.github/workflows/cloud-release.yml`.
 
 Every release carries six artifacts: Windows x64 (installer, zip,
 checksums) and Linux x64 (tarball, .deb, checksums), plus the macOS DMG
@@ -19,7 +18,7 @@ committing `chore: release X.Y.Z` to `main`. Every command below needs
 `/root/forgejo-muse-token.txt`), including `--check-only`: drafts are
 invisible to unauthenticated reads.
 
-## On the Windows release host
+## Manual fallback
 
 1. Run `build.bat` (no argument). It tests and builds `release/` with the
    weekly libtorrent wheel.
@@ -50,9 +49,15 @@ python scripts/publish_release.py vX.Y.Z --check-only
 python scripts/publish_release.py vX.Y.Z --skip-macos
 ```
 
-## Cloud agents
+## Releasing on GitHub runners
 
-There is no cloud release path: the old `cloud-release.yml` built every
-platform on hosted runners and died with the GitHub account. A release
-needs the Windows host (and the Linux VPS); agents without them stop after
-the `chore: release X.Y.Z` commit and say so.
+Push the `chore: release X.Y.Z` commit to `main` on Forgejo, wait for it to reach
+GitHub, then run:
+
+```
+gh workflow run cloud-release.yml --repo serrebidev/blindDL -f dry_run=false -f notes="$(cat notes.md)"
+```
+
+The workflow builds Windows and Linux, tags the commit, creates the Forgejo draft,
+builds the macOS DMG with `release.yml`, and publishes once every artifact is in
+place. `-f dry_run=true` builds Windows and Linux and publishes nothing.
