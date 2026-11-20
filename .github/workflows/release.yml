@@ -50,7 +50,7 @@ jobs:
       matrix:
         include:
           # Apple Silicon only; Intel Macs are no longer built.
-          - runner: macos-15
+          - runner: macos-26
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
