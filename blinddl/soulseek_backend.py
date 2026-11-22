@@ -64,7 +64,7 @@ try:
         PeerTransferQueueFailed,
         PeerTransferReply,
     )
-    from aioslsk.network.connection import ConnectionState
+    from aioslsk.network.connection import CloseReason, ConnectionState, PeerConnection
     from aioslsk.protocol.primitives import AttributeKey
     from aioslsk.search.model import SearchQuery
     from aioslsk.settings import (
@@ -581,9 +581,34 @@ def available() -> bool:
     return SoulSeekClient is not None
 
 
+def _install_aioslsk_upload_eof_timeout() -> None:
+    if not available():
+        return
+    receive_until_eof = PeerConnection.receive_until_eof
+    if getattr(receive_until_eof, "_blinddl_bounded", False):
+        return
+
+    @functools.wraps(receive_until_eof)
+    async def bounded_receive(connection, raise_exception=True):
+        if raise_exception:
+            return await receive_until_eof(connection)
+        # The upload manager checks the byte count after this wait. A peer
+        # that leaves the socket open must not hold an upload slot forever.
+        try:
+            async with asyncio.timeout(connection.transfer_read_timeout):
+                return await receive_until_eof(connection, raise_exception=False)
+        except TimeoutError:
+            await connection.disconnect(CloseReason.TIMEOUT)
+            return None
+
+    bounded_receive._blinddl_bounded = True
+    PeerConnection.receive_until_eof = bounded_receive
+
+
 _install_aioslsk_cross_drive_fix()
 _install_aioslsk_query_fix()
 _install_aioslsk_early_share_report_fix()
+_install_aioslsk_upload_eof_timeout()
 _install_leecher_guard()
 
 
@@ -1981,6 +2006,7 @@ class _Service:
         loop = asyncio.get_running_loop()
         last_activity = loop.time()
         last_progress = None
+        stale_timeout = float(snapshot.get("stale_timeout_s", 0) or 0)
         target_relative = str(item.get("target_relative_path") or "").strip()
         if target_relative and transfer.local_path is None:
             safe_parts = []
@@ -2051,10 +2077,18 @@ class _Service:
                     or "Transfer aborted"
                 )
                 raise _transfer_failure(reason)
-            stale_timeout = float(snapshot.get("stale_timeout_s", 0) or 0)
-            if stale_timeout and now - last_activity >= stale_timeout:
+            waiting_in_peer_queue = (
+                state == TransferState.QUEUED
+                and transfer.remotely_queued
+                and (transfer.place_in_queue or 0) > 0
+            )
+            if (
+                not waiting_in_peer_queue
+                and stale_timeout
+                and now - last_activity >= stale_timeout
+            ):
                 try:
-                    await client.transfers.abort(transfer)
+                    await client.transfers.pause(transfer)
                 finally:
                     raise SoulseekTransientError(
                         "No Soulseek transfer progress for "

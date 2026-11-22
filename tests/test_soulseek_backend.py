@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from aioslsk.network.connection import ConnectionState
+from aioslsk.network.connection import CloseReason, ConnectionState, PeerConnection
 from aioslsk.protocol.primitives import (
     Attribute,
     AttributeKey,
@@ -742,6 +742,21 @@ class SoulseekShareScanTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upload_eof_wait_releases_the_connection(self):
+        reader = asyncio.StreamReader()
+        connection = SimpleNamespace(
+            _reader=reader,
+            _read=lambda read: read,
+            transfer_read_timeout=0.01,
+            disconnect=mock.AsyncMock(),
+        )
+        result = await asyncio.wait_for(
+            PeerConnection.receive_until_eof(connection, raise_exception=False),
+            timeout=1,
+        )
+        self.assertIsNone(result)
+        connection.disconnect.assert_awaited_once_with(CloseReason.TIMEOUT)
+
     async def test_failed_startup_can_retry_with_unchanged_settings(self):
         for failing_step in ("start", "login"):
             with self.subTest(failing_step=failing_step):
@@ -897,7 +912,7 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
                 threading.Event(),
             )
 
-    async def test_stalled_transfer_is_aborted_and_made_retryable(self):
+    async def test_stalled_transfer_is_paused_and_made_retryable(self):
         snapshot = SimpleNamespace(
             state=TransferState.DOWNLOADING,
             bytes_transfered=0,
@@ -915,7 +930,7 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
         )
         transfers = SimpleNamespace(
             download=mock.AsyncMock(return_value=transfer),
-            abort=mock.AsyncMock(),
+            pause=mock.AsyncMock(),
         )
         client = SimpleNamespace(transfers=transfers)
         service = soulseek_backend._Service()
@@ -941,7 +956,42 @@ class SoulseekAsyncSearchTests(unittest.IsolatedAsyncioTestCase):
                 threading.Event(),
             )
 
-        transfers.abort.assert_awaited_once_with(transfer)
+        transfers.pause.assert_awaited_once_with(transfer)
+
+    async def test_confirmed_peer_queue_survives_stall_timeout(self):
+        snapshots = iter(
+            SimpleNamespace(state=state, bytes_transfered=0, speed=0)
+            for state in (TransferState.QUEUED, TransferState.QUEUED, TransferState.COMPLETE)
+        )
+        transfer = SimpleNamespace(
+            local_path="Track.flac",
+            filesize=1024,
+            place_in_queue=5,
+            remotely_queued=True,
+            take_progress_snapshot=lambda: next(snapshots),
+        )
+        client = SimpleNamespace(transfers=SimpleNamespace(
+            download=mock.AsyncMock(return_value=transfer),
+            abort=mock.AsyncMock(),
+            pause=mock.AsyncMock(),
+        ))
+        service = soulseek_backend._Service()
+        service._configure = mock.AsyncMock(return_value=client)
+        service._client = client
+        clock = SimpleNamespace(time=mock.Mock(side_effect=[0.0, 0.0, 1.0, 2.0]))
+
+        with (
+            mock.patch.object(soulseek_backend.asyncio, "get_running_loop", return_value=clock),
+            mock.patch.object(soulseek_backend.asyncio, "sleep", new=mock.AsyncMock()),
+        ):
+            result = await service._download(
+                {"stale_timeout_s": 0.5},
+                {"username": "peer", "remote_path": "Track.flac"},
+                None,
+                threading.Event(),
+            )
+        self.assertEqual(result, "Track.flac")
+        client.transfers.pause.assert_not_awaited()
 
     async def test_browse_user_normalizes_public_and_locked_folder_files(self):
         public = [
