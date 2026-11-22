@@ -12,7 +12,7 @@ import sys
 import warnings
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_data_files, copy_metadata
 
 
 ROOT = Path(SPECPATH)
@@ -91,6 +91,10 @@ for package in (
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hidden
+
+# Audiobooker's language matcher loads its JSON tables from package resources.
+if importlib.util.find_spec("linguatag") is not None:
+    datas += collect_data_files("linguatag")
 
 if BUNDLE_EXTERNAL_TOOLS and importlib.util.find_spec("nodejs_wheel") is not None:
     node_datas, node_binaries, node_hidden = collect_all("nodejs_wheel")
