@@ -322,6 +322,12 @@ class MainFrame(wx.Frame):
         help_menu = wx.Menu()
         self.ID_UPDATE = wx.NewIdRef()
         help_menu.Append(self.ID_UPDATE, "Check for &updates...\tCtrl+U")
+        self.ID_REPORT_ISSUE = wx.NewIdRef()
+        help_menu.Append(
+            self.ID_REPORT_ISSUE,
+            "Report an &issue on GitHub...",
+            "Describe a problem or an idea, then send it as a GitHub issue",
+        )
         help_menu.AppendSeparator()
         help_menu.Append(wx.ID_ABOUT, "&About blindDL")
 
@@ -359,6 +365,7 @@ class MainFrame(wx.Frame):
                 id=item_id,
             )
         self.Bind(wx.EVT_MENU, self.on_about, id=wx.ID_ABOUT)
+        self.Bind(wx.EVT_MENU, self.on_report_issue, id=self.ID_REPORT_ISSUE)
 
     def _bind_shortcuts(self):
         # Ctrl+1 through Ctrl+7 are the seven tabs that are always there, in
@@ -1006,6 +1013,12 @@ class MainFrame(wx.Frame):
         self.subs.check_all()
         wx.CallAfter(self._refresh_subscriptions)
         wx.CallAfter(self.announce, "Subscription check complete.")
+
+    def on_report_issue(self, event):
+        from .. import __version__
+        from .about_dialog import report_issue
+
+        report_issue(self, "serrebidev/blindDL", f"blindDL {__version__}")
 
     def on_about(self, event):
         from .. import __version__
